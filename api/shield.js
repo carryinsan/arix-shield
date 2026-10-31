@@ -1,340 +1,231 @@
-import { command, getJSON, setJSON, pushRing, incrementMetric, rateLimit, addActiveVisitor, assertProductionStore } from './_lib/redis.js';
-import { findKeyEntry, verifyDpop, randomId, hashIdentifier, sha256, sha256Bytes, bindInfrastructure, assertMasterSecret } from './_lib/crypto-trap.js';
-import { inspectRequestData, detectBotSignals, getNumericResourceId, isSequentialEnumeration } from './_lib/waf-engine.js';
-import { watermarkOutboundJson, embedInvisibleWatermark, decodeWatermark } from './_lib/watermark.js';
-import { jsonResponse, readJson, getRequestMetadata, getClientIp, corsHeaders, safeString } from './_lib/http.js';
+import { sendJson, readJson, methodNotAllowed, getNetworkHints, clientRateKey } from './_lib/http.js';
+import { rateLimit, getJson, setJson, setString, recordProjectEvent } from './_lib/redis.js';
+import { sha256Hex, hashCredential, verifyDpopProof, trapMirage, createSignedToken, verifySignedToken, randomToken, sha256 } from './_lib/crypto-trap.js';
+import { inspectRequest } from './_lib/waf-engine.js';
+import { embedInvisibleWatermark, decodeInvisibleWatermark } from './_lib/watermark.js';
 
-const DATACENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '174', '9009']);
+const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
+const DEMO_ID = 'public-demo';
 
-function projectJson(req, data, status = 200, policy, extra = {}) {
-  const origin = req.headers.get('origin') || '';
-  const cors = Object.fromEntries(corsHeaders(origin, policy?.allowedOrigins || []).entries());
-  return jsonResponse(req, data, status, { ...cors, ...extra });
+function responseCors(req, res, allowOrigin = '*') {
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Arix-Key, X-Arix-PoP, X-Arix-JWK, X-Arix-Server-Key');
+  res.setHeader('Access-Control-Max-Age', '600');
+  res.setHeader('Vary', 'Origin');
 }
 
-function defaultPolicy(project) {
-  const stored = project?.policy && typeof project.policy === 'object' ? project.policy : {};
-  return {
-    mode: stored.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE',
-    rateLimitRPM: Math.max(10, Math.min(10000, Number(stored.rateLimitRPM) || 120)),
-    rateAlgorithm: ['TOKEN_BUCKET', 'SLIDING_WINDOW', 'FIXED_WINDOW', 'LEAKY_BUCKET'].includes(stored.rateAlgorithm) ? stored.rateAlgorithm : 'SLIDING_WINDOW',
-    blockDatacenter: stored.blockDatacenter === true,
-    backendDnaLock: stored.backendDnaLock === true,
-    tarpitEnabled: stored.tarpitEnabled !== false,
-    canaryRows: stored.canaryRows === true,
-    redactSecrets: stored.redactSecrets !== false,
-    redactEmails: stored.redactEmails === true,
-    blockBots: stored.blockBots === true,
-    allowedOrigins: Array.isArray(project?.allowedOrigins) ? project.allowedOrigins : Array.isArray(stored.allowedOrigins) ? stored.allowedOrigins : []
-  };
+function requestUrl(req) {
+  const host = String(req.headers?.host ?? 'localhost').replace(/[\r\n]/g, '');
+  const proto = String(req.headers?.['x-forwarded-proto'] ?? 'https').split(',')[0].trim() === 'http' ? 'http' : 'https';
+  return `${proto}://${host}${req.url || '/api/shield'}`;
 }
 
-async function saveThreat(projectId, metadata, type, reason, extra = {}) {
-  const event = {
-    id: `thr_${randomId(8)}`,
-    timestamp: new Date().toISOString(),
-    type,
-    reason: safeString(reason, 180),
-    projectId,
-    ip: metadata.ip,
-    country: metadata.country,
-    asn: metadata.asn,
-    userAgent: metadata.userAgent,
-    path: metadata.path,
-    ...extra
-  };
-  await pushRing(`arix:threat_logs:${projectId}`, event, 500);
-  if (type === 'TRAPPED_HACKER') await incrementMetric(`arix:metrics:${projectId}`, 'trappedHackers', 1);
-  else if (type === 'BLOCKED_ATTACK') await incrementMetric(`arix:metrics:${projectId}`, 'blockedAttacks', 1);
-  else await incrementMetric(`arix:metrics:${projectId}`, 'observedAttacks', 1);
-  return event;
+function isProjectOriginAllowed(project, origin) {
+  if (!origin || typeof origin !== 'string') return false;
+  return Array.isArray(project.allowedOrigins) && project.allowedOrigins.includes(origin);
 }
 
-async function saveVisitor(projectId, metadata, body, latencyMs, status, popVerified, riskScore = 0) {
-  const visitorId = safeString(body.visitorId || `v_${randomId(8)}`, 80);
-  const event = {
-    id: `vis_${randomId(7)}`,
-    visitorId,
-    timestamp: new Date().toISOString(),
-    ip: metadata.ip,
-    country: metadata.country,
-    asn: metadata.asn,
-    userAgent: metadata.userAgent,
-    path: safeString(body.path || metadata.path, 240),
-    latencyMs: Math.max(0, Math.min(60000, Math.round(latencyMs))),
-    status,
-    riskScore: Math.max(0, Math.min(100, riskScore)),
-    dpopVerified: popVerified
-  };
-  await pushRing(`arix:live_visitors:${projectId}`, event, 500);
-  const activeCount = await addActiveVisitor(`arix:active:${projectId}`, visitorId, Date.now(), 90000);
-  await command('HSET', `arix:metrics:${projectId}`, 'activeVisitorCount', String(activeCount));
-  return event;
+async function issuePowChallenge(projectId) {
+  return createSignedToken({ projectId, nonce: randomToken(16), exp: Date.now() + 120000, difficulty: 12 }, 'browser-pow');
 }
 
-function deterministicMirage(projectId, requestPath, fingerprint) {
-  let seed = 2166136261;
-  for (const ch of `${projectId}:${requestPath}:${fingerprint}`) seed = Math.imul(seed ^ ch.charCodeAt(0), 16777619) >>> 0;
-  const id = (seed.toString(16).padStart(8, '0') + Math.imul(seed, 2246822519).toString(16).replace('-', '').slice(-8)).toLowerCase();
-  return {
-    status: 'success',
-    environment: 'production-primary',
-    data: {
-      account_id: `acct_${id.slice(0, 12)}`,
-      account_balance_usd: Number((120000 + (seed % 300000) / 100).toFixed(2)),
-      internal_backup_s3: `s3://arix-canary-vault.invalid/snapshots/${id.slice(0, 8)}.json.gz`,
-      aws_Honey_Access_Key: `AKIAARIXTRAP${id.slice(0, 12).toUpperCase()}`,
-      database_host: `db-${id.slice(0, 6)}.internal.invalid`,
-      internal_api_token: `ARIX_INTERNAL_${id.toUpperCase()}`,
-      records: [{ id: `rec_${id.slice(2, 14)}`, state: 'completed', source: 'mirage' }]
-    },
-    meta: { request_id: `req_mirage_${id}`, synthetic: true }
-  };
+async function validatePow(projectId, token, solution) {
+  if (typeof solution !== 'string' || solution.length > 16 || !/^\d{1,12}$/.test(solution)) return false;
+  const payload = await verifySignedToken(token, 'browser-pow');
+  if (!payload || payload.projectId !== projectId || payload.exp < Date.now()) return false;
+  const digest = await sha256(`${payload.nonce}:${solution}`);
+  return digest[0] === 0 && (digest[1] & 0xf0) === 0;
 }
 
-async function trapResponse(req, projectId, metadata, reason, policy) {
-  const started = Date.now();
-  const mirage = deterministicMirage(projectId, metadata.path, await hashIdentifier(getClientIp(req)));
-  await saveThreat(projectId, metadata, 'TRAPPED_HACKER', reason, { deception: 'PHANTOM_SANDBOX', miragePreview: mirage.data });
-  if (policy?.tarpitEnabled) {
-    const delayMs = 450;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    await incrementMetric(`arix:metrics:${projectId}`, 'tarpitMsServed', delayMs);
-  }
-  return projectJson(req, { decision: 'MIRAGE', trapped: true, reason: safeString(reason, 140), data: mirage, latencyMs: Date.now() - started }, 200, policy, {
-    'X-Arix-Decision': 'MIRAGE',
-    'X-Arix-Synthetic': '1'
-  });
-}
-
-function bearerOrHeader(req) {
-  const headerKey = req.headers.get('x-arix-key');
-  if (headerKey) return headerKey.trim();
-  const authorization = req.headers.get('authorization') || '';
-  return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-}
-
-async function verifyProjectContext(req, apiKey, keyEntry, project, policy, metadata, action, browserBindingId) {
-  if (keyEntry.kind === 'CANARY') return { trapped: true, reason: 'CANARY_KEY_USED' };
-  if (keyEntry.kind === 'LIVE' && !['pageview', 'enroll'].includes(action)) return { trapped: true, reason: 'BROWSER_KEY_USED_FOR_SERVER_API_ACCESS' };
-  if (keyEntry.kind === 'SERVER' && ['pageview', 'enroll'].includes(action)) return { trapped: true, reason: 'SERVER_KEY_USED_FOR_BROWSER_TELEMETRY' };
-  const pop = req.headers.get('x-arix-pop');
-  if (pop) {
-    if (keyEntry.kind === 'LIVE' && !browserBindingId) return { trapped: true, reason: 'BROWSER_BINDING_ID_REQUIRED' };
-    const popBinding = keyEntry.kind === 'LIVE' ? await hashIdentifier(String(browserBindingId)) : 'server';
-    const popKey = `arix:pop:${project.id}:${project.keyVersion || 1}:${popBinding}`;
-    const expected = await command('GET', popKey);
-    const proof = await verifyDpop(pop, { method: req.method, url: req.url, apiKey, expectedThumbprint: expected || undefined });
-    if (!proof.valid) return { trapped: true, reason: proof.reason };
-    if (!expected) {
-      const inserted = await command('SET', popKey, proof.thumbprint, 'NX', 'EX', 31536000);
-      if (inserted !== 'OK') {
-        const saved = await command('GET', popKey);
-        if (saved !== proof.thumbprint) return { trapped: true, reason: 'DPoP_ENROLLMENT_RACE_OR_KEY_MISMATCH' };
-      }
-    }
-    const origin = req.headers.get('origin');
-    if (origin && !policy.allowedOrigins.includes(origin)) return { trapped: true, reason: 'ORIGIN_NOT_ALLOWED' };
-    if (keyEntry.kind !== 'LIVE') return { trapped: true, reason: 'DPoP_NOT_EXPECTED_FOR_SERVER_KEY' };
-    return { valid: true, popVerified: true };
-  }
-  if (keyEntry.kind === 'LIVE') return { trapped: true, reason: 'MISSING_DPOP_PROOF' };
-  if (policy.backendDnaLock) {
-    const dna = await bindInfrastructure(project.id, req);
-    if (!dna.match) return { trapped: true, reason: 'INFRASTRUCTURE_DNA_MISMATCH' };
-  }
-  return { valid: true, popVerified: false };
-}
-
-async function checkEnumeration(projectId, metadata, requestPath, actorId = '') {
-  const id = getNumericResourceId(requestPath);
-  if (!id) return false;
-  const actorIdentity = safeString(actorId || metadata.ipFingerprint, 160);
-  const actor = await hashIdentifier(`${projectId}:${actorIdentity}`);
-  const key = `arix:bola:${projectId}:${actor}`;
-  await command('ZADD', key, Date.now(), id);
-  await command('ZREMRANGEBYSCORE', key, '-inf', Date.now() - 120000);
-  await command('EXPIRE', key, 180);
-  const values = await command('ZRANGE', key, 0, -1);
-  return isSequentialEnumeration(values, 4);
-}
-
-async function recordRequest(projectId) {
-  await incrementMetric(`arix:metrics:${projectId}`, 'totalRequests', 1);
-}
-
-async function evaluatePow(projectId, visitorId, headerValue) {
-  if (!headerValue) {
-    const token = randomId(18);
-    await setJSON(`arix:pow:${projectId}:${token}`, { visitorId, expiresAt: Date.now() + 120000 }, 120);
-    return { required: true, token, difficulty: 12 };
-  }
-  const [token, nonce] = String(headerValue).split('.', 2);
-  if (!token || !nonce || token.length > 64 || nonce.length > 24 || !/^[A-Za-z0-9_-]+$/.test(token) || !/^[A-Za-z0-9_-]+$/.test(nonce)) return { valid: false };
-  const challenge = await getJSON(`arix:pow:${projectId}:${token}`);
-  if (!challenge || challenge.visitorId !== visitorId || challenge.expiresAt < Date.now()) return { valid: false };
-  const digest = await sha256Bytes(`${token}:${nonce}`);
-  if (digest[0] !== 0 || (digest[1] & 0xf0) !== 0) return { valid: false };
-  const used = await command('SET', `arix:pow:used:${projectId}:${token}`, '1', 'NX', 'EX', 120);
-  if (used !== 'OK') return { valid: false };
-  await command('DEL', `arix:pow:${projectId}:${token}`);
-  return { valid: true };
-}
-
-async function handleDemo(req, body) {
-  const ipHash = await hashIdentifier(getClientIp(req));
-  const rate = await rateLimit({ key: `arix:rl:demo:${ipHash}`, limit: 20, windowMs: 60000 });
-  if (!rate.allowed) return jsonResponse(req, { error: 'Demo request limit reached. Try again in a minute.' }, 429);
-  const scenario = String(body.scenario || 'legitimate');
-  const projectId = 'demo';
-  const metadata = getRequestMetadata(req);
+async function handleDemo(body, req, res) {
+  if (String(process.env.ARIX_DEMO_ENABLED ?? 'true').toLowerCase() === 'false') return sendJson(res, 404, { error: 'Public demo is disabled.' });
+  const clientHash = await sha256Hex(clientRateKey(req));
+  const limit = await rateLimit({ key: `arix:demo:limit:${clientHash}`, algorithm: 'SLIDING_WINDOW', limit: 8, windowMs: 60000 });
+  if (!limit.allowed) return sendJson(res, 429, { error: 'Demo rate limit reached. Try again in a minute.' });
+  const scenario = String(body.scenario ?? 'legitimate');
+  const timestamp = new Date().toISOString();
   if (scenario === 'legitimate') {
-    const visitor = await saveVisitor(projectId, metadata, { path: '/demo/catalog', visitorId: `demo_${ipHash.slice(0, 10)}` }, 4, 200, true, 0);
-    await incrementMetric(`arix:metrics:${projectId}`, 'totalRequests', 1);
-    return jsonResponse(req, { decision: 'ALLOW', demo: true, message: 'Demo request accepted. No customer origin was contacted.', visitor });
+    const inspection = inspectRequest({ method: 'GET', url: '/api/catalog/items', headers: { accept: 'application/json' }, body: null });
+    await recordProjectEvent(DEMO_ID, { type: 'DEMO_ALLOWED', blocked: false, timestamp, path: '/api/catalog/items', riskScore: inspection.riskScore });
+    return sendJson(res, 200, { ok: true, httpStatus: 200, result: 'ALLOWED', message: 'Request passed the same request-inspection engine used by the protection endpoint.', inspection });
   }
   if (scenario === 'sqli') {
-    const inspection = inspectRequestData({ path: '/api/users', method: 'GET', query: "id=1 UNION SELECT email,password FROM users" });
-    await saveThreat(projectId, metadata, 'BLOCKED_ATTACK', inspection.findings.map((f) => f.id).join(', '), { demo: true, findings: inspection.findings });
-    return jsonResponse(req, { decision: 'BLOCK', demo: true, status: 403, findings: inspection.findings, message: 'Lexical WAF detected a SQL injection pattern.' });
+    const inspection = inspectRequest({ method: 'GET', url: "/api/products?id=1' OR 1=1 --", headers: { accept: 'application/json' } });
+    const blocked = inspection.findings.length > 0;
+    await recordProjectEvent(DEMO_ID, { type: 'DEMO_SQLI', blocked, timestamp, path: '/api/products', findings: inspection.findings, riskScore: inspection.riskScore }, { threat: true });
+    return sendJson(res, 200, { ok: true, httpStatus: blocked ? 403 : 200, result: blocked ? 'BLOCKED' : 'ALLOWED', message: blocked ? 'The lexical WAF detected suspicious SQL syntax.' : 'No rule matched.', inspection });
   }
-  if (scenario === 'stolen') {
-    const mirage = deterministicMirage(projectId, '/api/v1/accounts', ipHash);
-    await saveThreat(projectId, metadata, 'TRAPPED_HACKER', 'DEMO_STOLEN_KEY_REPLAY', { demo: true, deception: 'PHANTOM_SANDBOX' });
-    return jsonResponse(req, { decision: 'MIRAGE', demo: true, status: 200, mirage, message: 'A synthetic Mirage response was returned; no real account or origin data was accessed.' });
+  if (scenario === 'replay') {
+    const mirage = await trapMirage(DEMO_ID, '/api/v1/accounts', 'DEMO_STOLEN_KEY_REPLAY');
+    await recordProjectEvent(DEMO_ID, { type: 'TRAPPED_HACKER', blocked: true, timestamp, ip: getNetworkHints(req).ip, path: '/api/v1/accounts', reason: 'DEMO_STOLEN_KEY_REPLAY', mirage: mirage.data }, { threat: true });
+    return sendJson(res, 200, { ok: true, httpStatus: 200, result: 'PHANTOM_SANDBOX', message: 'The demo replay path returned deterministic synthetic data and recorded a trap event.', payload: mirage });
   }
-  if (scenario === 'leak') {
-    const sampleText = await embedInvisibleWatermark('Sample customer record', {
-      projectId: 'demo', sessionId: 'sess_demo_9a81', userId: 'usr_demo_4412', ip: '203.0.113.24', source: 'landing-page-demo'
-    });
-    const decoded = await decodeWatermark(sampleText, 'demo');
-    return jsonResponse(req, { decision: 'WATERMARKED', demo: true, sampleText, decoded, message: 'The invisible attribution marker was decoded from this demonstration record.' });
+  if (scenario === 'watermark') {
+    const sessionId = `demo_${randomToken(8)}`;
+    const original = 'Quarterly customer export for demonstration';
+    const marked = await embedInvisibleWatermark(original, { projectId: DEMO_ID, sessionId, userId: 'demo_user', ip: getNetworkHints(req).ip });
+    const decoded = await decodeInvisibleWatermark(marked, DEMO_ID);
+    await recordProjectEvent(DEMO_ID, { type: 'DEMO_WATERMARK', blocked: false, timestamp, path: '/demo/watermark', attributionId: decoded.attributionId });
+    return sendJson(res, 200, { ok: true, httpStatus: 200, result: 'ATTRIBUTED', message: 'A signed invisible marker was embedded and resolved against its server-side attribution record.', preview: original, markedText: marked, decoded });
   }
-  return jsonResponse(req, { error: 'Unknown demo scenario.' }, 400);
+  return sendJson(res, 400, { error: 'Unknown demo scenario.' });
 }
 
-async function authorizeOrigin(req, policy) {
-  const origin = req.headers.get('origin');
-  if (!origin) return true;
-  return policy.allowedOrigins.includes(origin);
+async function resolveProjectFromApiKey(apiKey) {
+  if (typeof apiKey !== 'string' || apiKey.length < 20 || apiKey.length > 160) return null;
+  const hash = await hashCredential(apiKey);
+  const mapping = await getJson(`arix:key:${hash}`);
+  return mapping ? { mapping, hash } : null;
 }
 
-export default async function handler(req) {
+async function browserVisit(body, req, res, mapping, project, inspection) {
+  const origin = req.headers?.origin;
+  if (!isProjectOriginAllowed(project, origin)) {
+    const hints = getNetworkHints(req);
+    await recordProjectEvent(project.id, { type: 'TRAPPED_HACKER', blocked: true, reason: 'ORIGIN_MISMATCH', timestamp: new Date().toISOString(), ip: hints.ip, country: hints.country, asn: hints.asn, ja3: hints.ja3, ja4: hints.ja4, path: String(req.url).slice(0, 160) }, { threat: true });
+    if (project.policy?.deceptionEnabled === false) return sendJson(res, 403, { error: 'Browser origin is not registered for this project.' });
+    const mirage = await trapMirage(project.id, req.url || '/', 'ORIGIN_MISMATCH');
+    return sendJson(res, 200, { ...mirage, arix: { mode: 'PHANTOM_SANDBOX' } });
+  }
+
+  const proof = req.headers?.['x-arix-pop'];
+  const proofResult = await verifyDpopProof({ proof, method: req.method, url: requestUrl(req), projectId: project.id, redisGetSet: setString });
+  if (!proofResult.valid) {
+    if (project.policy?.deceptionEnabled === false) return sendJson(res, 401, { error: 'Browser proof-of-possession failed.' });
+    const mirage = await trapMirage(project.id, req.url || '/', proofResult.reason || 'DPOP_FAILED');
+    const hints = getNetworkHints(req);
+    await recordProjectEvent(project.id, { type: 'TRAPPED_HACKER', blocked: true, reason: proofResult.reason, timestamp: new Date().toISOString(), ip: hints.ip, country: hints.country, asn: hints.asn, ja3: hints.ja3, ja4: hints.ja4, path: String(req.url).slice(0, 160), mirage: mirage.data }, { threat: true });
+    return sendJson(res, 200, { ...mirage, arix: { mode: 'PHANTOM_SANDBOX', event: 'TRAPPED_HACKER' } });
+  }
+
+  const key = `arix:limit:${project.id}:${proofResult.thumbprint}`;
+  const limit = await rateLimit({ key, algorithm: 'TOKEN_BUCKET', limit: project.policy?.rateLimitPerMinute ?? 120, windowMs: 60000 });
+  if (!limit.allowed) return sendJson(res, 429, { error: 'Project visitor telemetry rate limit exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))) });
+
+  const pathForPolicy = String(body.path ?? req.url ?? '/');
+  const asnForPolicy = String(req.headers?.['x-vercel-ip-as-number'] ?? '');
+  const humanOnly = /\/(?:login|signup|checkout)(?:\/|\?|$)/i.test(pathForPolicy);
+  const dcBlocked = Boolean(project.policy?.blockDatacenterAsn && humanOnly && DATA_CENTER_ASNS.has(asnForPolicy));
+  if ((inspection?.findings?.length || dcBlocked) && project.policy?.mode !== 'DRY_RUN') {
+    const hints = getNetworkHints(req);
+    await recordProjectEvent(project.id, { type: dcBlocked ? 'DATACENTER_ASN_BLOCK' : 'WAF_BLOCK', blocked: true, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, country: hints.country, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: dcBlocked ? 90 : inspection?.riskScore ?? 0 }, { threat: true });
+    return sendJson(res, 403, { error: 'Request blocked by ArixShield policy.', findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0 });
+  }
+  if (inspection?.findings?.length || dcBlocked) {
+    const hints = getNetworkHints(req);
+    await recordProjectEvent(project.id, { type: 'WAF_OBSERVED', blocked: false, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0 }, { threat: true });
+  }
+
+  if (!body.powToken || !(await validatePow(project.id, body.powToken, String(body.powSolution ?? '')))) {
+    const challenge = await issuePowChallenge(project.id);
+    return sendJson(res, 200, { ok: true, challenge, pow: { difficulty: 12, expiresInSeconds: 120 } });
+  }
+
+  const hints = getNetworkHints(req);
+  const botSignals = body.signals && typeof body.signals === 'object' ? body.signals : {};
+  const suspicious = botSignals.webdriver === true || botSignals.headless === true;
+  const path = typeof body.path === 'string' ? body.path.slice(0, 180) : '/';
+  const event = {
+    type: 'VISIT',
+    blocked: false,
+    timestamp: new Date().toISOString(),
+    visitorId: proofResult.thumbprint.slice(0, 20),
+    ip: hints.ip,
+    country: hints.country,
+    city: hints.city,
+    asn: hints.asn,
+    ja3: hints.ja3,
+    ja4: hints.ja4,
+    userAgent: String(req.headers?.['user-agent'] || 'unknown').slice(0, 180),
+    path,
+    latencyMs: Math.max(0, Math.min(60000, Number(body.latencyMs) || 0)),
+    status: 'OBSERVED',
+    dpopVerified: true,
+    riskScore: suspicious ? 75 : 0
+  };
+  await recordProjectEvent(project.id, event);
+  return sendJson(res, 200, { ok: true, result: 'OBSERVED', dpopVerified: true, riskScore: event.riskScore });
+}
+
+async function serverEvent(body, req, res) {
+  const serverKey = req.headers?.['x-arix-server-key'];
+  const resolved = await resolveProjectFromApiKey(serverKey);
+  if (!resolved || resolved.mapping.type !== 'server') return sendJson(res, 401, { error: 'Invalid server integration key.' });
+  const project = await getJson(`arix:project:${resolved.mapping.projectId}`);
+  if (!project) return sendJson(res, 401, { error: 'Project not found.' });
+  if (body.action === 'get-policy') {
+    const limit = await rateLimit({ key: `arix:server-policy-limit:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 600, windowMs: 60000 });
+    if (!limit.allowed) return sendJson(res, 429, { error: 'Policy-read quota exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))) });
+    return sendJson(res, 200, { ok: true, policy: project.policy ?? {} });
+  }
+  if (body.action === 'check-limit') {
+    const control = await rateLimit({ key: `arix:server-quota-api:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 30000, windowMs: 60000 });
+    if (!control.allowed) return sendJson(res, 429, { error: 'Distributed quota API limit reached.' }, { 'Retry-After': String(Math.max(1, Math.ceil(control.retryAfterMs / 1000))) });
+    const scope = typeof body.scope === 'string' ? body.scope : '';
+    const algorithm = String(body.algorithm ?? 'TOKEN_BUCKET').toUpperCase();
+    const requestedLimit = Number(body.limit ?? project.policy?.rateLimitPerMinute ?? 120);
+    const windowMs = Number(body.windowMs ?? 60000);
+    const weight = Number(body.weight ?? 1);
+    if (!scope || scope.length > 256 || !['TOKEN_BUCKET', 'SLIDING_WINDOW', 'FIXED_WINDOW', 'LEAKY_BUCKET'].includes(algorithm)) return sendJson(res, 400, { error: 'Invalid distributed quota scope or algorithm.' });
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 10000 || !Number.isInteger(windowMs) || windowMs < 100 || windowMs > 3600000 || !Number.isInteger(weight) || weight < 1 || weight > 10000) return sendJson(res, 400, { error: 'Invalid distributed quota limit, window or weight.' });
+    const projectCeiling = Math.max(1, Math.min(10000, Number(project.policy?.rateLimitPerMinute) || 120));
+    const effectiveLimit = Math.min(requestedLimit, projectCeiling);
+    if (weight > effectiveLimit) return sendJson(res, 400, { error: 'Quota weight cannot exceed the effective project limit.' });
+    const scopeHash = await sha256Hex(scope);
+    const decision = await rateLimit({ key: `arix:customer-quota:${project.id}:${algorithm}:${windowMs}:${scopeHash}`, algorithm, limit: effectiveLimit, windowMs, weight });
+    return sendJson(res, 200, { ok: true, decision: { ...decision, limit: effectiveLimit, algorithm, windowMs } });
+  }
+  const limit = await rateLimit({ key: `arix:server-event-limit:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 600, windowMs: 60000 });
+  if (!limit.allowed) return sendJson(res, 429, { error: 'Server telemetry quota exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))) });
+  const eventType = String(body.type ?? 'SERVER_EVENT').slice(0, 48).replace(/[^A-Z0-9_]/gi, '_').toUpperCase();
+  const event = {
+    type: eventType,
+    blocked: body.blocked === true,
+    timestamp: new Date().toISOString(),
+    path: typeof body.path === 'string' ? body.path.slice(0, 180) : '/',
+    method: typeof body.method === 'string' ? body.method.slice(0, 12).toUpperCase() : '—',
+    riskScore: Math.max(0, Math.min(100, Number(body.riskScore) || 0)),
+    findings: Array.isArray(body.findings) ? body.findings.slice(0, 20) : [],
+    userId: typeof body.userId === 'string' ? body.userId.slice(0, 80) : 'anonymous',
+    ip: 'not-collected-by-server-event'
+  };
+  await recordProjectEvent(project.id, event, { threat: event.blocked || eventType.includes('THREAT') });
+  return sendJson(res, 202, { ok: true });
+}
+
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    responseCors(req, res, '*');
+    res.statusCode = 204;
+    return res.end();
+  }
+  if (req.method !== 'POST') return methodNotAllowed(res, ['POST', 'OPTIONS']);
+  responseCors(req, res, '*');
   try {
-    assertProductionStore();
-    assertMasterSecret();
-    if (req.method === 'OPTIONS') {
-      const origin = req.headers.get('origin') || '';
-      let safeOrigin = '';
-      try {
-        const parsed = new URL(origin);
-        if (['https:', 'http:'].includes(parsed.protocol)) safeOrigin = parsed.origin;
-      } catch { /* invalid origins receive no allow-origin header */ }
-      return new Response(null, { status: 204, headers: corsHeaders(safeOrigin, safeOrigin ? [safeOrigin] : []) });
-    }
-    if (req.method !== 'POST') return jsonResponse(req, { error: 'Method not allowed.' }, 405, { Allow: 'POST, OPTIONS' });
-    const body = await readJson(req, 65536);
-    if (body.action === 'demo') return handleDemo(req, body);
+    const body = await readJson(req, 36000);
+    if (body.action === 'demo') return await handleDemo(body, req, res);
+    if (body.action === 'server-event' || body.action === 'get-policy' || body.action === 'check-limit') return await serverEvent(body, req, res);
 
-    const apiKey = bearerOrHeader(req);
-    const keyEntry = await findKeyEntry(apiKey);
-    if (!keyEntry) return jsonResponse(req, { error: 'A valid ArixShield project key is required.' }, 401);
-    const project = await getJSON(`arix:project:${keyEntry.projectId}`);
-    if (!project) return jsonResponse(req, { error: 'Project not found.' }, 401);
-    const policy = defaultPolicy(project);
-    const origin = req.headers.get('origin');
-    if (origin && !(await authorizeOrigin(req, policy))) {
-      return jsonResponse(req, { error: 'This origin is not authorized for the project.' }, 403, Object.fromEntries(corsHeaders(origin, []).entries()));
-    }
-    const metadata = getRequestMetadata(req);
-    const started = Date.now();
-    await recordRequest(project.id);
-    const action = String(body.action || 'inspect');
-    const context = await verifyProjectContext(req, apiKey, keyEntry, project, policy, metadata, action, body.visitorId);
-    if (context.trapped) return trapResponse(req, project.id, metadata, context.reason, policy);
+    const apiKey = req.headers?.['x-arix-key'];
+    const resolved = await resolveProjectFromApiKey(apiKey);
+    if (!resolved) return sendJson(res, 401, { error: 'Unknown project key.' });
+    const project = await getJson(`arix:project:${resolved.mapping.projectId}`);
+    if (!project) return sendJson(res, 401, { error: 'Project is unavailable.' });
 
-    const inspectionForQuota = body.inspection && typeof body.inspection === 'object' ? body.inspection : body;
-    const quotaActor = action === 'pageview' ? safeString(body.visitorId || '', 80) : safeString(inspectionForQuota.actorId || '', 160);
-    const quotaDimension = await hashIdentifier(`${metadata.ipFingerprint}:${quotaActor || 'ip-only'}`);
-    const perProject = await rateLimit({
-      key: `arix:rl:project:${project.id}:${quotaDimension}`,
-      algorithm: policy.rateAlgorithm,
-      limit: policy.rateLimitRPM,
-      windowMs: 60000
-    });
-    if (!perProject.allowed) {
-      const enforce = policy.mode === 'ENFORCE';
-      await saveThreat(project.id, metadata, enforce ? 'BLOCKED_ATTACK' : 'OBSERVED_ATTACK', 'RATE_LIMIT_EXCEEDED', { retryAfterMs: perProject.retryAfterMs });
-      return projectJson(req, { decision: enforce ? 'BLOCK' : 'DRY_RUN', reason: 'RATE_LIMIT_EXCEEDED', remaining: perProject.remaining, retryAfterMs: perProject.retryAfterMs }, enforce ? 429 : 200, policy, { 'Retry-After': String(Math.max(1, Math.ceil(perProject.retryAfterMs / 1000))) });
+    if (resolved.mapping.type === 'canary' || apiKey.startsWith('ARIX_CANARY_')) {
+      if (project.policy?.deceptionEnabled === false) return sendJson(res, 401, { error: 'Canary key detected.' });
+      const mirage = await trapMirage(project.id, req.url || '/', 'CANARY_KEY_USED');
+      const hints = getNetworkHints(req);
+      await recordProjectEvent(project.id, { type: 'TRAPPED_HACKER', blocked: true, reason: 'CANARY_KEY_USED', timestamp: new Date().toISOString(), ip: hints.ip, country: hints.country, asn: hints.asn, path: String(req.url).slice(0, 160), mirage: mirage.data }, { threat: true });
+      return sendJson(res, 200, { ...mirage, arix: { mode: 'PHANTOM_SANDBOX', event: 'CANARY_KEY_USED' } });
     }
+    if (resolved.mapping.type !== 'live') return sendJson(res, 401, { error: 'This key type cannot be used for browser telemetry.' });
 
-    if (action === 'enroll') {
-      if (!context.popVerified) return trapResponse(req, project.id, metadata, 'DPoP_REQUIRED_FOR_ENROLLMENT', policy);
-      return projectJson(req, { decision: 'ENROLLED', projectId: project.id, dpop: 'verified' }, 200, policy);
-    }
-    if (action === 'pageview') {
-      const visitorId = safeString(body.visitorId || `v_${randomId(8)}`, 80);
-      const pow = await evaluatePow(project.id, visitorId, req.headers.get('x-arix-pow'));
-      if (pow.required) return projectJson(req, { decision: 'CHALLENGE', challenge: pow.token, difficulty: pow.difficulty }, 428, policy);
-      if (!pow.valid) return trapResponse(req, project.id, metadata, 'INVALID_OR_REPLAYED_PROOF_OF_WORK', policy);
-      const bot = detectBotSignals({ userAgent: metadata.userAgent, headers: Object.fromEntries(req.headers.entries()), telemetry: body.telemetry || {} });
-      const visitor = await saveVisitor(project.id, metadata, { ...body, visitorId }, Date.now() - started, 200, context.popVerified, bot.riskScore);
-      if (bot.suspicious) await pushRing(`arix:threat_logs:${project.id}`, { id: `bot_${randomId(8)}`, type: 'BOT_SIGNAL', timestamp: new Date().toISOString(), ip: metadata.ip, path: visitor.path, signals: bot.signals, riskScore: bot.riskScore }, 500);
-      return projectJson(req, { decision: 'RECORDED', visitorId: visitor.visitorId, riskScore: bot.riskScore }, 200, policy);
-    }
-
-    if (action === 'watermark') {
-      if (keyEntry.kind !== 'SERVER') return trapResponse(req, project.id, metadata, 'INVALID_KEY_TYPE_FOR_WATERMARK', policy);
-      const payload = await watermarkOutboundJson(body.payload, {
-        projectId: project.id,
-        sessionId: safeString(body.sessionId || `sess_${randomId(8)}`, 120),
-        userId: safeString(body.userId || 'unknown', 120),
-        ip: safeString(body.clientIp || body.attribution?.ip || metadata.ipFingerprint, 64),
-        source: safeString(body.source || body.attribution?.source || 'server-middleware', 80)
-      }, { canaryRows: policy.canaryRows, redactSecrets: policy.redactSecrets, redactEmails: policy.redactEmails });
-      return projectJson(req, { decision: 'WATERMARKED', payload }, 200, policy);
-    }
-
-    if (action !== 'inspect') return jsonResponse(req, { error: 'Unsupported shield action.' }, 400);
-    const inspection = body.inspection && typeof body.inspection === 'object' ? body.inspection : body;
-    const requestPath = safeString(inspection.path || '/', 500);
-    if (!requestPath.startsWith('/') || /[\r\n]/.test(requestPath)) return jsonResponse(req, { error: 'Invalid inspected path.' }, 400);
-    const inspectedMethod = safeString(inspection.method || 'GET', 12).toUpperCase();
-    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'].includes(inspectedMethod)) return jsonResponse(req, { error: 'Unsupported inspected HTTP method.' }, 400);
-    const waf = inspectRequestData({
-      path: requestPath,
-      method: inspectedMethod,
-      query: safeString(inspection.query || '', 4000),
-      headers: inspection.headers && typeof inspection.headers === 'object' ? inspection.headers : {},
-      body: inspection.body ?? null
-    });
-    const bot = detectBotSignals({ userAgent: metadata.userAgent, headers: Object.fromEntries(req.headers.entries()), telemetry: body.telemetry || {} });
-    const enumeration = await checkEnumeration(project.id, metadata, requestPath, inspection.actorId);
-    if (enumeration) waf.findings.push({ id: 'BOLA_SEQUENTIAL_ID_ENUMERATION', severity: 'high' });
-    if (bot.suspicious) waf.findings.push({ id: 'AUTOMATION_CLIENT_SIGNAL', severity: 'medium' });
-    const datacenter = /^AS?(\d+)$/.exec(metadata.asn.replace(/\s/g, ''))?.[1];
-    const humanOnlyPath = /\/(?:login|signup|checkout|register)(?:\/|$)/i.test(requestPath) && ['POST', 'PUT'].includes(inspectedMethod);
-    const dcBlocked = policy.blockDatacenter && humanOnlyPath && datacenter && DATACENTER_ASNS.has(datacenter);
-    if (dcBlocked) waf.findings.push({ id: 'DATACENTER_ASN_ON_HUMAN_ENDPOINT', severity: 'high' });
-    const hasHigh = waf.findings.some((f) => f.severity === 'high');
-    if (waf.findings.length) {
-      await saveThreat(project.id, metadata, policy.mode === 'ENFORCE' && waf.findings.some((f) => f.severity === 'high') ? 'BLOCKED_ATTACK' : 'OBSERVED_ATTACK', waf.findings.map((f) => f.id).join(', '), { findings: waf.findings, riskScore: waf.riskScore });
-    }
-    const enforce = policy.mode === 'ENFORCE';
-    const blocked = enforce && (hasHigh || (bot.suspicious && policy.blockBots));
-    const response = {
-      decision: blocked ? 'BLOCK' : waf.findings.length ? 'DRY_RUN' : 'ALLOW',
-      status: blocked ? 403 : 200,
-      findings: waf.findings,
-      riskScore: Math.max(waf.riskScore, bot.riskScore),
-      dpopVerified: context.popVerified,
-      mode: policy.mode
-    };
-    return projectJson(req, response, blocked ? 403 : 200, policy, { 'X-Arix-Decision': response.decision });
+    const inspection = inspectRequest({ method: req.method, url: req.url, headers: req.headers, body });
+    return await browserVisit(body, req, res, resolved.mapping, project, inspection);
   } catch (error) {
-    const status = Number(error?.status) || 500;
-    const message = status >= 500 ? 'Shield service is temporarily unavailable.' : String(error.message || 'Request rejected.');
-    if (status >= 500) console.error('[ArixShield Shield]', error);
-    return jsonResponse(req, { error: message }, status);
+    const status = Number(error.statusCode) || 503;
+    return sendJson(res, status, { error: status === 503 ? 'Protection service unavailable. Check Redis and master-secret configuration.' : error.message });
   }
 }
