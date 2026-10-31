@@ -1,103 +1,74 @@
-import { getJSON, setJSON, readRing, readHash, command, getActiveVisitorCount, assertProductionStore } from './_lib/redis.js';
+import { sendJson, readJson, methodNotAllowed, sameOriginRequest, getNetworkHints } from './_lib/http.js';
 import { requireSession } from './_lib/session.js';
-import { assertMasterSecret } from './_lib/crypto-trap.js';
-import { jsonResponse, readJson, errorResponse, sameOriginRequest, normalizeOrigin } from './_lib/http.js';
+import { getJson, setJson, getProjectDashboardSnapshot } from './_lib/redis.js';
 
-const POLICY_FIELDS = new Set(['mode', 'rateLimitRPM', 'rateAlgorithm', 'blockDatacenter', 'backendDnaLock', 'tarpitEnabled', 'canaryRows', 'redactSecrets', 'redactEmails', 'blockBots']);
-
-function normalizePolicy(input, current) {
-  const next = { ...current };
-  for (const [key, value] of Object.entries(input || {})) {
-    if (!POLICY_FIELDS.has(key)) continue;
-    if (key === 'mode') {
-      if (!['ENFORCE', 'DRY_RUN'].includes(value)) throw Object.assign(new Error('Mode must be ENFORCE or DRY_RUN.'), { status: 400 });
-      next.mode = value;
-    } else if (key === 'rateLimitRPM') {
-      const limit = Number(value);
-      if (!Number.isInteger(limit) || limit < 10 || limit > 10000) throw Object.assign(new Error('Rate limit must be from 10 to 10000 requests per minute.'), { status: 400 });
-      next.rateLimitRPM = limit;
-    } else if (key === 'rateAlgorithm') {
-      if (!['TOKEN_BUCKET', 'SLIDING_WINDOW', 'FIXED_WINDOW', 'LEAKY_BUCKET'].includes(value)) throw Object.assign(new Error('Unsupported rate-limit algorithm.'), { status: 400 });
-      next.rateAlgorithm = value;
-    } else {
-      if (typeof value !== 'boolean') throw Object.assign(new Error(`${key} must be true or false.`), { status: 400 });
-      next[key] = value;
-    }
-  }
-  return next;
+function parseEvents(values) {
+  return (values ?? []).flatMap((value) => {
+    try { const row = JSON.parse(value); return row && typeof row === 'object' ? [row] : []; }
+    catch { return []; }
+  });
 }
 
-async function getDashboardData(project) {
-  const projectId = project.id;
-  const visitors = await readRing(`arix:live_visitors:${projectId}`, 0, 199);
-  const threats = await readRing(`arix:threat_logs:${projectId}`, 0, 199);
-  const metrics = await readHash(`arix:metrics:${projectId}`);
-  const activeCount = await getActiveVisitorCount(`arix:active:${projectId}`, 90000);
-  const activeIds = await command('ZRANGE', `arix:active:${projectId}`, 0, -1);
-  const activeSet = new Set(Array.isArray(activeIds) ? activeIds : []);
-  const liveVisitors = visitors.filter((visitor) => activeSet.has(visitor.visitorId));
-  const normalizedMetrics = {
-    totalRequests: Number(metrics.totalRequests || 0),
-    blockedAttacks: Number(metrics.blockedAttacks || 0),
-    trappedHackers: Number(metrics.trappedHackers || 0),
-    tarpitMsServed: Number(metrics.tarpitMsServed || 0),
-    activeVisitorCount: activeCount
-  };
-  return {
-    project: { id: project.id, name: project.name },
-    metrics: normalizedMetrics,
-    visitors: liveVisitors.slice(0, 100),
-    recentVisitors: visitors.slice(0, 100),
-    threats: threats.slice(0, 100),
-    policy: project.policy || {}
-  };
-}
-
-export default async function handler(req) {
+export default async function handler(req, res) {
+  if (!['GET', 'POST'].includes(req.method)) return methodNotAllowed(res, ['GET', 'POST']);
   try {
-    assertProductionStore();
-    assertMasterSecret();
+    const auth = await requireSession(req);
+    if (!auth) return sendJson(res, 401, { error: 'Sign in to view project telemetry.' });
+    const { project } = auth;
     if (req.method === 'GET') {
-      const auth = await requireSession(req);
-      if (auth.response) return auth.response;
-      const project = await getJSON(`arix:project:${auth.session.account.projectId}`);
-      if (!project || project.ownerId !== auth.session.account.id) return jsonResponse(req, { error: 'Project not found.' }, 404);
-      return jsonResponse(req, await getDashboardData(project));
+      const snapshot = await getProjectDashboardSnapshot(project.id);
+      const visitors = parseEvents(snapshot.visitors);
+      const threats = parseEvents(snapshot.threats);
+      const metrics = snapshot.metrics;
+      const cutoff = Date.now() - 60_000;
+      const active = new Map();
+      for (const event of visitors) {
+        if (Date.parse(event.timestamp) >= cutoff && event.visitorId) {
+          const old = active.get(event.visitorId);
+          if (!old || Date.parse(old.timestamp) < Date.parse(event.timestamp)) active.set(event.visitorId, event);
+        }
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        project: { id: project.id, name: project.name, origin: project.origin },
+        policy: project.policy,
+        metrics: { ...metrics, activeVisitors: active.size },
+        visitors: [...active.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 100),
+        threats: threats.slice(0, 100)
+      });
     }
-    if (req.method === 'POST') {
-      if (!sameOriginRequest(req)) return jsonResponse(req, { error: 'Cross-origin policy change rejected.' }, 403);
-      const auth = await requireSession(req);
-      if (auth.response) return auth.response;
-      const body = await readJson(req, 8192);
-      const project = await getJSON(`arix:project:${auth.session.account.projectId}`);
-      if (!project || project.ownerId !== auth.session.account.id) return jsonResponse(req, { error: 'Project not found.' }, 404);
-      if (body.action === 'policy') {
-        project.policy = normalizePolicy(body.policy, project.policy || {});
-        project.policy.allowedOrigins = Array.isArray(project.allowedOrigins) ? project.allowedOrigins : [];
-        await setJSON(`arix:project:${project.id}`, project);
-        return jsonResponse(req, { ok: true, policy: project.policy });
-      }
-      if (body.action === 'add_origin') {
-        const origin = normalizeOrigin(body.origin);
-        const origins = new Set(project.allowedOrigins || []);
-        origins.add(origin);
-        if (origins.size > 25) return jsonResponse(req, { error: 'A maximum of 25 origins is allowed.' }, 400);
-        project.allowedOrigins = [...origins];
-        project.policy = { ...(project.policy || {}), allowedOrigins: project.allowedOrigins };
-        await setJSON(`arix:project:${project.id}`, project);
-        return jsonResponse(req, { ok: true, allowedOrigins: project.allowedOrigins, policy: project.policy });
-      }
-      if (body.action === 'remove_origin') {
-        const origin = normalizeOrigin(body.origin);
-        project.allowedOrigins = (project.allowedOrigins || []).filter((item) => item !== origin);
-        project.policy = { ...(project.policy || {}), allowedOrigins: project.allowedOrigins };
-        await setJSON(`arix:project:${project.id}`, project);
-        return jsonResponse(req, { ok: true, allowedOrigins: project.allowedOrigins, policy: project.policy });
-      }
-      return jsonResponse(req, { error: 'Unsupported telemetry action.' }, 400);
+
+    if (!sameOriginRequest(req)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
+    const body = await readJson(req, 8000);
+    if (body.action !== 'policy') return sendJson(res, 400, { error: 'Unknown telemetry action.' });
+    const nextPolicy = { ...project.policy };
+    if (body.mode !== undefined) {
+      if (!['ENFORCE', 'DRY_RUN'].includes(body.mode)) return sendJson(res, 400, { error: 'Invalid enforcement mode.' });
+      nextPolicy.mode = body.mode;
     }
-    return jsonResponse(req, { error: 'Method not allowed.' }, 405, { Allow: 'GET, POST' });
+    if (body.rateLimitPerMinute !== undefined) {
+      const value = Number(body.rateLimitPerMinute);
+      if (!Number.isInteger(value) || value < 10 || value > 10000) return sendJson(res, 400, { error: 'Rate limit must be between 10 and 10,000 requests per minute.' });
+      nextPolicy.rateLimitPerMinute = value;
+    }
+    if (body.blockDatacenterAsn !== undefined) {
+      if (typeof body.blockDatacenterAsn !== 'boolean') return sendJson(res, 400, { error: 'blockDatacenterAsn must be boolean.' });
+      nextPolicy.blockDatacenterAsn = body.blockDatacenterAsn;
+    }
+    if (body.canaryRowsEnabled !== undefined) {
+      if (typeof body.canaryRowsEnabled !== 'boolean') return sendJson(res, 400, { error: 'canaryRowsEnabled must be boolean.' });
+      nextPolicy.canaryRowsEnabled = body.canaryRowsEnabled;
+    }
+    if (body.deceptionEnabled !== undefined) {
+      if (typeof body.deceptionEnabled !== 'boolean') return sendJson(res, 400, { error: 'deceptionEnabled must be boolean.' });
+      nextPolicy.deceptionEnabled = body.deceptionEnabled;
+    }
+    project.policy = nextPolicy;
+    project.updatedAt = new Date().toISOString();
+    await setJson(`arix:project:${project.id}`, project);
+    return sendJson(res, 200, { ok: true, policy: nextPolicy });
   } catch (error) {
-    return errorResponse(req, error, 'Telemetry service is temporarily unavailable.');
+    const status = Number(error.statusCode) || 503;
+    return sendJson(res, status, { error: status === 503 ? 'Telemetry service unavailable. Verify Upstash configuration.' : error.message });
   }
 }
