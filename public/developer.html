@@ -1,0 +1,58 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Create an ArixShield account and provision project integration keys.">
+  <title>Developer access — ArixShield</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body data-page="developer">
+  <header class="topbar"><div class="wrap nav"><a class="brand" href="/"><span class="brand-mark">A</span><span>ArixShield</span></a><nav class="nav-links"><a href="/#platform">Platform</a><a href="/#architecture">Architecture</a></nav><div class="nav-actions"><a class="btn btn-secondary" href="/dashboard">Dashboard</a><a class="btn btn-primary" href="/">Home</a></div></div></header>
+  <main class="page-shell">
+    <div class="wrap">
+      <div class="page-intro"><div class="eyebrow">Developer workspace</div><h1>Start securing your application.</h1><p>Create a project, receive your integration credentials once, and connect your first SDK.</p></div>
+      <div class="auth-layout">
+        <section class="card">
+          <div class="switch-tabs" role="tablist" aria-label="Account access"><button type="button" class="active" data-auth-mode="signup">Create account</button><button type="button" data-auth-mode="login">Sign in</button></div>
+          <form id="auth-form" class="form-grid">
+            <div class="field signup-field"><label for="full-name">Full name</label><input id="full-name" name="name" autocomplete="name" minlength="2" maxlength="80" required></div>
+            <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" maxlength="254" required></div>
+            <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required><small class="muted-note">Use at least 12 characters.</small></div>
+            <div class="field signup-field"><label for="project-name">Project name</label><input id="project-name" name="projectName" maxlength="80" required></div>
+            <div class="field signup-field"><label for="origin">Website origin</label><input id="origin" name="origin" type="url" placeholder="https://example.com" required><small class="muted-note">Enter the exact origin (scheme + host, no path). This is checked for browser telemetry.</small></div>
+            <div class="notice" id="auth-notice" role="status"></div>
+            <button class="btn btn-primary" id="auth-submit" type="submit">Create account & project</button>
+          </form>
+          <div class="keys-panel" id="keys-panel">
+            <div class="notice success show">Project created. Copy these credentials now; the server secret is not shown again.</div>
+            <div class="key-row"><label>Publishable project identifier</label><div class="key-value"><code id="live-key">—</code><button class="copy-btn" data-copy-target="live-key">Copy</button></div></div>
+            <div class="key-row"><label>Server integration secret · keep private</label><div class="key-value"><code id="server-key">—</code><button class="copy-btn" data-copy-target="server-key">Copy</button></div></div>
+            <div class="key-row"><label>Canary key · decoy only</label><div class="key-value"><code id="canary-key">—</code><button class="copy-btn" data-copy-target="canary-key">Copy</button></div></div>
+            <p class="muted-note">The `ARIX_LIVE_...` value is a public project identifier. The `ARIX_SECRET_...` value authenticates server-side telemetry and must never appear in browser JavaScript or source control.</p>
+            <a class="btn btn-primary" href="/dashboard">Open command center</a>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Integration in minutes</h2><p class="card-sub">Choose a runtime to see the corresponding local SDK integration. Protect your application routes inside your own server.</p>
+          <div class="docs-list">
+            <div class="docs-item"><span class="docs-num">1</span><div><strong>Install the ArixShield package files</strong><p>Keep the SDK module in your server repository and use a server-side environment variable for the secret.</p></div></div>
+            <div class="docs-item"><span class="docs-num">2</span><div><strong>Wrap your routes before business logic</strong><p>Inspection is local. Still perform object-level authorization, database parameterization and schema validation.</p></div></div>
+            <div class="docs-item"><span class="docs-num">3</span><div><strong>Enable visitor telemetry separately</strong><p>The browser script records page visits with a non-exportable DPoP key; it does not protect backend APIs on its own.</p></div></div>
+          </div>
+          <div class="snippet-card">
+            <div class="snippet-toolbar"><strong class="panel-title">Integration snippet</strong><select id="snippet-type" aria-label="Runtime snippet"><option value="html">HTML / browser telemetry</option><option value="node">Node / Express</option><option value="next">Next.js route handler</option><option value="python">Python / Flask / FastAPI telemetry</option><option value="curl">cURL server telemetry</option></select></div>
+            <pre class="code" id="snippet-code">&lt;!-- Create a project to generate your key --&gt;</pre>
+            <div class="snippet-copy-row"><button class="btn btn-secondary" id="copy-snippet" type="button">Copy snippet</button></div>
+          </div>
+          <p class="muted-note snippet-note">The server SDK includes local WAF inspection and an in-process limiter. For globally consistent quotas across serverless instances, use an explicitly shared Redis quota check in your own route or a future dedicated data-plane integration.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+  <footer class="footer"><div class="wrap footer-inner"><span>© 2026 ArixShield</span><span><a href="/">Home</a> · <a href="/dashboard">Dashboard</a></span></div></footer>
+</body>
+</html>
