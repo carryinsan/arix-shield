@@ -1,165 +1,127 @@
-import { command, getJSON, setJSON, rateLimit, assertProductionStore } from './_lib/redis.js';
-import { randomId, randomBytes, derivePassword, constantTimeEqual, issueApiKey, hashIdentifier, assertMasterSecret } from './_lib/crypto-trap.js';
-import { readJson, jsonResponse, errorResponse, getClientIp, sameOriginRequest, normalizeOrigin, safeString } from './_lib/http.js';
-import { createSession, getSession, destroySession, sessionCookie } from './_lib/session.js';
+import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey } from './_lib/http.js';
+import { rateLimit, getJson, setJson, setString, deleteKeys } from './_lib/redis.js';
+import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential } from './_lib/crypto-trap.js';
+import { createSession, getSession } from './_lib/session.js';
 
-const DEFAULT_POLICY = Object.freeze({
-  mode: 'DRY_RUN',
-  rateLimitRPM: 120,
-  rateAlgorithm: 'SLIDING_WINDOW',
-  blockDatacenter: false,
-  backendDnaLock: true,
-  tarpitEnabled: true,
-  canaryRows: false,
-  redactSecrets: true,
-  redactEmails: false,
-  blockBots: false,
-  allowedOrigins: []
-});
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
+const SESSION_TTL = Math.max(3600, Math.min(2592000, Number(process.env.ARIX_SESSION_TTL_SECONDS) || 604800));
+const DUMMY_PASSWORD = Object.freeze({ salt: 'MDEyMzQ1Njc4OWFiY2RlZg', hash: 'm5zv3v3aA0-2p-2D8uZpT_Es4q4QO1Jr5FS3YxTzTYA', iterations: 240000 });
 
-function isValidEmail(value) {
-  return typeof value === 'string' && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
-}
+function isSecure(req) { return process.env.VERCEL === '1' || process.env.NODE_ENV === 'production' || String(req.headers?.['x-forwarded-proto'] ?? '').split(',')[0] === 'https'; }
+function validName(value) { return typeof value === 'string' && value.trim().length >= 2 && value.trim().length <= 80; }
 
-async function makeKeys(projectId) {
-  const liveKey = await issueApiKey('LIVE', projectId);
-  const serverKey = await issueApiKey('SERVER', projectId);
-  const canaryKey = await issueApiKey('CANARY', projectId);
-  const liveHash = await hashIdentifier(liveKey);
-  const serverHash = await hashIdentifier(serverKey);
-  const canaryHash = await hashIdentifier(canaryKey);
-  await Promise.all([
-    setJSON(`arix:key:${liveHash}`, { projectId, kind: 'LIVE', createdAt: new Date().toISOString() }),
-    setJSON(`arix:key:${serverHash}`, { projectId, kind: 'SERVER', createdAt: new Date().toISOString() }),
-    setJSON(`arix:key:${canaryHash}`, { projectId, kind: 'CANARY', createdAt: new Date().toISOString() })
-  ]);
-  return { liveKey, serverKey, canaryKey, liveHash, serverHash, canaryHash };
-}
+async function provisionAccount(body, req, res) {
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = String(body.password ?? '');
+  const name = String(body.name ?? '').trim();
+  const projectName = String(body.projectName ?? 'My Project').trim();
+  const origin = normalizeOrigin(body.origin);
+  if (!EMAIL_RE.test(email) || email.length > 254) return sendJson(res, 400, { error: 'Enter a valid email address.' });
+  if (password.length < 12 || password.length > 128) return sendJson(res, 400, { error: 'Password must be 12–128 characters.' });
+  if (!validName(name) || !validName(projectName) || !origin) return sendJson(res, 400, { error: 'Provide your name, a project name and an HTTPS site origin (localhost is allowed for development).' });
 
-async function createAccount(body, req) {
-  const email = String(body.email || '').trim().toLowerCase();
-  const password = String(body.password || '');
-  const projectName = safeString(body.projectName || 'My first project', 80).trim() || 'My first project';
-  if (!isValidEmail(email)) throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
-  if (password.length < 12 || password.length > 128) throw Object.assign(new Error('Use a password between 12 and 128 characters.'), { status: 400 });
-  const origin = normalizeOrigin(body.allowedOrigin);
-  const ipHash = await hashIdentifier(getClientIp(req));
-  const registrationLimit = await rateLimit({ key: `arix:rl:signup:${ipHash}`, limit: 3, windowMs: 3600000 });
-  if (!registrationLimit.allowed) throw Object.assign(new Error('Registration limit reached. Try again later.'), { status: 429 });
-  const emailHash = await hashIdentifier(`email:${email}`);
-  const accountId = `acc_${randomId(12)}`;
-  const reserved = await command('SET', `arix:account:email:${emailHash}`, accountId, 'NX', 'EX', 31536000);
-  if (reserved !== 'OK') throw Object.assign(new Error('An account with this email already exists. Sign in instead.'), { status: 409 });
+  const emailHash = await sha256Hex(email);
+  const ownerId = `usr_${randomToken(12)}`;
+  const projectId = `prj_${randomToken(9)}`;
+  const emailIndex = `arix:user-email:${emailHash}`;
+  const indexResult = await setString(emailIndex, ownerId, null, true);
+  if (indexResult !== 'OK') return sendJson(res, 409, { error: 'An account with this email already exists. Sign in instead.' });
 
   try {
-    const salt = randomBytes(16);
-    const passwordHash = await derivePassword(password, salt);
-    const projectId = randomId(9);
-    const keys = await makeKeys(projectId);
+    const passwordRecord = await derivePassword(password);
+    const liveKey = `ARIX_LIVE_${randomToken(18)}`;
+    const serverKey = `ARIX_SECRET_${randomToken(32)}`;
+    const canaryKey = `ARIX_CANARY_${randomToken(18)}`;
+    const [liveHash, serverHash, canaryHash] = await Promise.all([
+      hashCredential(liveKey), hashCredential(serverKey), hashCredential(canaryKey)
+    ]);
+    const now = new Date().toISOString();
+    const user = { id: ownerId, name, email, password: passwordRecord, createdAt: now };
     const project = {
       id: projectId,
-      ownerId: accountId,
+      ownerId,
       name: projectName,
-      createdAt: new Date().toISOString(),
-      keyVersion: 1,
+      origin,
       allowedOrigins: [origin],
-      liveKeyHash: keys.liveHash,
-      serverKeyHash: keys.serverHash,
-      canaryKeyHash: keys.canaryHash,
-      policy: { ...DEFAULT_POLICY, allowedOrigins: [origin] }
+      liveKeyHash: liveHash,
+      serverKeyHash: serverHash,
+      canaryKeyHash: canaryHash,
+      policy: { mode: 'ENFORCE', rateLimitPerMinute: 120, blockDatacenterAsn: false, canaryRowsEnabled: false, deceptionEnabled: true },
+      createdAt: now
     };
-    const account = { id: accountId, email, passwordHash, salt: Array.from(salt), createdAt: new Date().toISOString(), projectId };
     await Promise.all([
-      setJSON(`arix:account:id:${accountId}`, account),
-      setJSON(`arix:project:${projectId}`, project),
-      setJSON(`arix:metrics:${projectId}`, { totalRequests: 0, blockedAttacks: 0, trappedHackers: 0, tarpitMsServed: 0, activeVisitorCount: 0 })
+      setJson(`arix:user:${ownerId}`, user),
+      setJson(`arix:project:${projectId}`, project),
+      setString(`arix:owner-project:${ownerId}`, projectId),
+      setJson(`arix:key:${liveHash}`, { projectId, type: 'live', createdAt: Date.now() }),
+      setJson(`arix:key:${serverHash}`, { projectId, type: 'server', createdAt: Date.now() }),
+      setJson(`arix:key:${canaryHash}`, { projectId, type: 'canary', createdAt: Date.now() })
     ]);
-    const token = await createSession(accountId);
-    return {
-      status: 201,
-      body: {
-        ok: true,
-        user: { id: accountId, email },
-        project: { id: projectId, name: projectName, allowedOrigins: [origin] },
-        keys: { liveKey: keys.liveKey, serverKey: keys.serverKey, canaryKey: keys.canaryKey, shownOnce: true },
-        policy: project.policy
-      },
-      cookie: sessionCookie(req, token)
-    };
+    const session = await createSession(ownerId, projectId);
+    setSessionCookie(res, session.token, session.ttl, isSecure(req));
+    return sendJson(res, 201, {
+      ok: true,
+      user: { id: ownerId, name, email },
+      project: { id: projectId, name: projectName, origin },
+      keys: { liveKey, serverKey, canaryKey },
+      keyNotice: 'ARIX_LIVE is a publishable project identifier. Store ARIX_SECRET only in server-side environment variables. These credentials are shown once.'
+    });
   } catch (error) {
-    await command('DEL', `arix:account:email:${emailHash}`);
+    await deleteKeys(emailIndex);
     throw error;
   }
 }
 
-async function login(body, req) {
-  const email = String(body.email || '').trim().toLowerCase();
-  const password = String(body.password || '');
-  if (!isValidEmail(email) || password.length > 128) throw Object.assign(new Error('Invalid email or password.'), { status: 400 });
-  const ipHash = await hashIdentifier(getClientIp(req));
-  const emailHash = await hashIdentifier(`email:${email}`);
-  const limits = await Promise.all([
-    rateLimit({ key: `arix:rl:login:ip:${ipHash}`, limit: 10, windowMs: 900000 }),
-    rateLimit({ key: `arix:rl:login:email:${emailHash}`, limit: 8, windowMs: 900000 })
-  ]);
-  if (limits.some((item) => !item.allowed)) throw Object.assign(new Error('Too many login attempts. Try again later.'), { status: 429 });
-  const accountId = await command('GET', `arix:account:email:${emailHash}`);
-  const account = accountId ? await getJSON(`arix:account:id:${accountId}`) : null;
-  if (!account?.salt || !account?.passwordHash) throw Object.assign(new Error('Invalid email or password.'), { status: 401 });
-  const supplied = await derivePassword(password, new Uint8Array(account.salt));
-  if (!constantTimeEqual(supplied, account.passwordHash)) throw Object.assign(new Error('Invalid email or password.'), { status: 401 });
-  const project = await getJSON(`arix:project:${account.projectId}`);
-  if (!project) throw Object.assign(new Error('Project is unavailable. Contact support.'), { status: 503 });
-  const token = await createSession(account.id);
-  return {
-    status: 200,
-    body: { ok: true, user: { id: account.id, email: account.email }, project: { id: project.id, name: project.name, allowedOrigins: project.allowedOrigins || [] }, policy: project.policy },
-    cookie: sessionCookie(req, token)
-  };
+async function loginAccount(body, req, res) {
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = String(body.password ?? '');
+  if (!EMAIL_RE.test(email) || password.length > 128 || password.length === 0) return sendJson(res, 401, { error: 'Email or password is incorrect.' });
+  const emailHash = await sha256Hex(email);
+  const ownerId = await import('./_lib/redis.js').then(({ getString }) => getString(`arix:user-email:${emailHash}`));
+  const user = ownerId ? await getJson(`arix:user:${ownerId}`) : null;
+  const passwordRecord = user?.password ?? DUMMY_PASSWORD;
+  const valid = await verifyPassword(password, passwordRecord);
+  if (!user || !valid) return sendJson(res, 401, { error: 'Email or password is incorrect.' });
+  const projectId = await findOwnedProject(ownerId);
+  if (!projectId) return sendJson(res, 403, { error: 'This account has no active project.' });
+  const session = await createSession(ownerId, projectId);
+  setSessionCookie(res, session.token, session.ttl, isSecure(req));
+  return sendJson(res, 200, { ok: true, user: { id: user.id, name: user.name, email: user.email }, project: { id: projectId } });
 }
 
-async function rotateKeys(req) {
-  const session = await getSession(req);
-  if (!session) throw Object.assign(new Error('Authentication required.'), { status: 401 });
-  const project = await getJSON(`arix:project:${session.account.projectId}`);
-  if (!project || project.ownerId !== session.account.id) throw Object.assign(new Error('Project not found.'), { status: 404 });
-  const keys = await makeKeys(project.id);
-  if (project.liveKeyHash) await command('DEL', `arix:key:${project.liveKeyHash}`);
-  if (project.serverKeyHash) await command('DEL', `arix:key:${project.serverKeyHash}`);
-  if (project.canaryKeyHash) await command('DEL', `arix:key:${project.canaryKeyHash}`);
-  project.liveKeyHash = keys.liveHash;
-  project.serverKeyHash = keys.serverHash;
-  project.canaryKeyHash = keys.canaryHash;
-  project.keyVersion = Number(project.keyVersion || 1) + 1;
-  project.rotatedAt = new Date().toISOString();
-  await command('DEL', `arix:dna:${project.id}`);
-  await setJSON(`arix:project:${project.id}`, project);
-  return {
-    status: 200,
-    body: { ok: true, keys: { liveKey: keys.liveKey, serverKey: keys.serverKey, canaryKey: keys.canaryKey, shownOnce: true } }
-  };
+async function findOwnedProject(ownerId) {
+  // Project IDs are stored in a small owner index when provisioned; avoid global Redis key scans.
+  return (await import('./_lib/redis.js').then(({ getString }) => getString(`arix:owner-project:${ownerId}`))) || null;
 }
 
-export default async function handler(req) {
-  try {
-    assertProductionStore();
-    assertMasterSecret();
-    if (req.method !== 'POST') return jsonResponse(req, { error: 'Method not allowed.' }, 405, { Allow: 'POST' });
-    if (!sameOriginRequest(req)) return jsonResponse(req, { error: 'Cross-origin control-plane request rejected.' }, 403);
-    const body = await readJson(req, 16384);
-    const action = String(body.action || 'login').toLowerCase();
-    let result;
-    if (action === 'register') result = await createAccount(body, req);
-    else if (action === 'login') result = await login(body, req);
-    else if (action === 'logout') {
+export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    try {
       const session = await getSession(req);
-      await destroySession(session);
-      result = { status: 200, body: { ok: true, loggedOut: true }, cookie: sessionCookie(req, '', true) };
-    } else if (action === 'rotate_keys') result = await rotateKeys(req);
-    else return jsonResponse(req, { error: 'Unsupported action.' }, 400);
-    const headers = result.cookie ? { 'Set-Cookie': result.cookie } : {};
-    return jsonResponse(req, result.body, result.status || 200, headers);
+      if (!session) return sendJson(res, 200, { authenticated: false });
+      const user = await getJson(`arix:user:${session.ownerId}`);
+      const project = await getJson(`arix:project:${session.projectId}`);
+      if (!user || !project) return sendJson(res, 200, { authenticated: false });
+      return sendJson(res, 200, { authenticated: true, user: { id: user.id, name: user.name, email: user.email }, project: { id: project.id, name: project.name, origin: project.origin } });
+    } catch (error) { return sendJson(res, 503, { error: error.message }); }
+  }
+  if (req.method !== 'POST') return methodNotAllowed(res, ['GET', 'POST']);
+  if (!sameOriginRequest(req)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
+  try {
+    const limit = await rateLimit({ key: `arix:auth:limit:${await sha256Hex(clientRateKey(req))}`, algorithm: 'SLIDING_WINDOW', limit: 8, windowMs: 60000 });
+    if (!limit.allowed) return sendJson(res, 429, { error: 'Too many account requests. Try again shortly.' }, { 'Retry-After': String(Math.ceil(limit.retryAfterMs / 1000)) });
+    const body = await readJson(req, 12000);
+    if (body.action === 'signup') return await provisionAccount(body, req, res);
+    if (body.action === 'login') return await loginAccount(body, req, res);
+    if (body.action === 'logout') {
+      const session = await getSession(req);
+      if (session) await deleteKeys(`arix:session:${session.tokenHash}`);
+      clearSessionCookie(res, isSecure(req));
+      return sendJson(res, 200, { ok: true });
+    }
+    return sendJson(res, 400, { error: 'Unknown account action.' });
   } catch (error) {
-    return errorResponse(req, error, 'Authentication service is temporarily unavailable.');
+    const status = Number(error.statusCode) || 503;
+    return sendJson(res, status, { error: status === 503 ? 'Account service temporarily unavailable. Check Redis and server configuration.' : error.message });
   }
 }
