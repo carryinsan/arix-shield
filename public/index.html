@@ -14,7 +14,7 @@
     <div class="wrap nav">
       <a class="brand" href="/"><span class="brand-mark">A</span><span>ArixShield</span></a>
       <nav class="nav-links" aria-label="Main navigation">
-        <a href="#platform">Platform</a><a href="#demo">Live demo</a><a href="#architecture">Architecture</a>
+        <a href="#platform">Platform</a><a href="#architecture">Architecture</a>
       </nav>
       <div class="nav-actions"><a class="btn btn-secondary" href="/dashboard">Dashboard</a><a class="btn btn-primary" href="/developer">Start building <span aria-hidden="true">↗</span></a></div>
     </div>
@@ -26,18 +26,18 @@
           <div class="eyebrow"><span class="pulse"></span> Hybrid application security</div>
           <h1>Protect the API.<br><span class="grad">Understand the threat.</span></h1>
           <p class="hero-copy">A practical security layer for modern SaaS and AI applications. Inspect requests inside your application, coordinate shared limits with Redis, and turn suspicious key use into observable deception events.</p>
-          <div class="hero-actions"><a class="btn btn-primary" href="/developer">Create developer account</a><a class="btn btn-secondary" href="#demo">Explore the live engine</a></div>
+          <div class="hero-actions"><a class="btn btn-primary" href="/developer">Create developer account</a><a class="btn btn-secondary" href="#architecture">See the deployment model</a></div>
           <div class="microcopy">Local SDK inspection · Redis-backed control plane · DPoP browser telemetry</div>
         </div>
         <aside class="hero-panel" aria-label="Platform capabilities">
-          <div class="panel-head"><span class="panel-title">ArixShield control plane</span><span class="status-pill">ENGINE READY</span></div>
+          <div class="panel-head"><span class="panel-title">ArixShield control plane</span><span class="status-pill">CONTROL PLANE</span></div>
           <div class="stat-grid">
             <div class="stat"><span>Rate-limit algorithms</span><strong>04</strong></div>
             <div class="stat"><span>Request inspection</span><strong>10+</strong></div>
             <div class="stat"><span>Proof of possession</span><strong>P-256</strong></div>
             <div class="stat"><span>Event retention</span><strong>500</strong></div>
           </div>
-          <div class="architecture-note"><strong>Live project telemetry</strong><p>Visitor heartbeats and server-side SDK events are written to the project event ring and streamed into the dashboard while it is open.</p><span>Upstash Redis · 500-event ring buffer · 1.5-second dashboard polling</span></div>
+          <div class="architecture-note"><strong>Project telemetry</strong><p>Authenticated visitor heartbeats and server-side SDK events are stored in bounded project event rings and displayed in the dashboard.</p><span>Upstash Redis · 500-event ring buffer · 1.5-second dashboard polling</span></div>
         </aside>
       </div>
     </section>
@@ -56,23 +56,6 @@
       </div>
     </section>
 
-    <section class="section section-white" id="demo">
-      <div class="wrap">
-        <div class="section-heading"><div class="eyebrow">Interactive engine test</div><h2>Run a real request through the demo API.</h2><p>Each action calls the deployed server endpoint and executes the actual inspection, deception or watermark module. Public demo traffic is rate-limited.</p></div>
-        <div class="console">
-          <div class="console-bar"><div class="traffic-lights"><i></i><i></i><i></i></div><strong class="panel-title">arixshield / attack-console</strong><span class="microcopy">POST /api/shield</span></div>
-          <div class="console-body">
-            <div class="demo-actions">
-              <button class="demo-action" data-demo="legitimate"><strong>01 · Legitimate request</strong><small>Expected allow decision</small></button>
-              <button class="demo-action" data-demo="sqli"><strong>02 · SQL injection probe</strong><small>Run WAF pattern inspection</small></button>
-              <button class="demo-action" data-demo="replay"><strong>03 · Stolen-key replay</strong><small>Trigger Phantom Sandbox path</small></button>
-              <button class="demo-action" data-demo="watermark"><strong>04 · Leak attribution</strong><small>Embed and resolve hidden marker</small></button>
-            </div>
-            <div class="terminal" id="demo-output" aria-live="polite"><div class="muted">ArixShield demo console · ready</div><div class="muted">Select a scenario to send a request to the live demo endpoint.</div><div class="muted">────────────────────────────────────────────────────</div></div>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <section class="section" id="architecture">
       <div class="wrap">
