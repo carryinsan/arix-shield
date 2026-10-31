@@ -1,0 +1,18 @@
+{
+  "name": "arixshield",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hybrid API security SDK and serverless control plane for ArixShield",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "exports": {
+    "./node": "./sdk/node.js",
+    "./next": "./sdk/next.js",
+    "./waf": "./api/_lib/waf-engine.js",
+    "./watermark": "./api/_lib/watermark.js"
+  }
+}
