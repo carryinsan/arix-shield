@@ -1,8 +1,9 @@
+import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, sameOriginRequest } from './_lib/http.js';
 import { requireSession } from './_lib/session.js';
 import { decodeInvisibleWatermark } from './_lib/watermark.js';
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== 'POST') return methodNotAllowed(res, ['POST']);
   if (!sameOriginRequest(req)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
   try {
@@ -13,7 +14,10 @@ export default async function handler(req, res) {
     const result = await decodeInvisibleWatermark(body.text, auth.project.id);
     return sendJson(res, 200, result);
   } catch (error) {
+    console.error('[ArixShield] /api/decode-leak request failed:', error?.stack || error);
     const status = Number(error.statusCode) || 503;
-    return sendJson(res, status, { error: status === 503 ? 'Watermark decoder unavailable. Verify Redis and master-secret configuration.' : error.message });
+    return sendJson(res, status, { error: status === 503 ? 'Watermark decoder unavailable. Verify Upstash REST URL/token and ARIX_MASTER_SECRET.' : error.message });
   }
 }
+
+export default createCompatibleHandler(handler);
