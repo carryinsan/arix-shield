@@ -33,49 +33,6 @@
     if (!copied) throw new Error('Clipboard access was denied.');
   };
 
-  async function initHome() {
-    const output = $('#demo-output');
-    if (!output) return;
-    const run = async (button) => {
-      $$('.demo-action').forEach((item) => item.classList.toggle('active', item === button));
-      output.replaceChildren();
-      const start = document.createElement('div');
-      start.className = 'info';
-      start.textContent = `POST /api/shield · scenario=${button.dataset.demo}`;
-      output.append(start);
-      const waiting = document.createElement('div');
-      waiting.className = 'muted';
-      waiting.textContent = 'Executing server-side security module…';
-      output.append(waiting);
-      button.disabled = true;
-      try {
-        const result = await jsonFetch('/api/shield', { method: 'POST', body: JSON.stringify({ action: 'demo', scenario: button.dataset.demo }) });
-        waiting.remove();
-        const state = document.createElement('div');
-        state.className = result.result === 'BLOCKED' || result.result === 'PHANTOM_SANDBOX' ? 'danger' : 'success';
-        state.textContent = `Decision: ${result.result || 'COMPLETED'} · HTTP ${result.httpStatus ?? 200}`;
-        output.append(state);
-        const message = document.createElement('div');
-        message.textContent = result.message || 'Scenario completed.';
-        output.append(message);
-        const details = document.createElement('pre');
-        details.textContent = JSON.stringify(result.inspection || result.payload || result.decoded || result, null, 2).slice(0, 8500);
-        output.append(details);
-        if (result.markedText) {
-          const note = document.createElement('div');
-          note.className = 'muted';
-          note.textContent = `Watermark was embedded in a server-side record (${result.markedText.length} characters including invisible marker).`;
-          output.append(note);
-        }
-      } catch (error) {
-        waiting.textContent = error.message;
-        waiting.className = 'danger';
-      } finally {
-        button.disabled = false;
-      }
-    };
-    $$('.demo-action').forEach((button) => button.addEventListener('click', () => run(button)));
-  }
 
   async function initDeveloper() {
     const form = $('#auth-form');
@@ -351,7 +308,6 @@ def arix_telemetry(response):
 
   document.addEventListener('DOMContentLoaded', () => {
     const page = document.body.dataset.page;
-    if (page === 'home') initHome();
     if (page === 'developer') initDeveloper();
     if (page === 'dashboard') initDashboard();
   });
