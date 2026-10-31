@@ -1,3 +1,4 @@
+import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey } from './_lib/http.js';
 import { rateLimit, getJson, setJson, setString, deleteKeys } from './_lib/redis.js';
 import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential } from './_lib/crypto-trap.js';
@@ -94,7 +95,7 @@ async function findOwnedProject(ownerId) {
   return (await import('./_lib/redis.js').then(({ getString }) => getString(`arix:owner-project:${ownerId}`))) || null;
 }
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method === 'GET') {
     try {
       const session = await getSession(req);
@@ -103,7 +104,10 @@ export default async function handler(req, res) {
       const project = await getJson(`arix:project:${session.projectId}`);
       if (!user || !project) return sendJson(res, 200, { authenticated: false });
       return sendJson(res, 200, { authenticated: true, user: { id: user.id, name: user.name, email: user.email }, project: { id: project.id, name: project.name, origin: project.origin } });
-    } catch (error) { return sendJson(res, 503, { error: error.message }); }
+    } catch (error) {
+      console.error('[ArixShield] /api/auth session lookup failed:', error?.stack || error);
+      return sendJson(res, 503, { error: 'Account service unavailable. Check Upstash Redis configuration and function logs.' });
+    }
   }
   if (req.method !== 'POST') return methodNotAllowed(res, ['GET', 'POST']);
   if (!sameOriginRequest(req)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
@@ -121,7 +125,10 @@ export default async function handler(req, res) {
     }
     return sendJson(res, 400, { error: 'Unknown account action.' });
   } catch (error) {
+    console.error('[ArixShield] /api/auth request failed:', error?.stack || error);
     const status = Number(error.statusCode) || 503;
-    return sendJson(res, status, { error: status === 503 ? 'Account service temporarily unavailable. Check Redis and server configuration.' : error.message });
+    return sendJson(res, status, { error: status === 503 ? 'Account service temporarily unavailable. Verify Upstash REST URL/token and inspect Vercel Function logs.' : error.message });
   }
 }
+
+export default createCompatibleHandler(handler);
