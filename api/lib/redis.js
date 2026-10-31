@@ -389,6 +389,21 @@ export async function hashSet(key, values) {
 export async function hashGetMany(key, ...fields) { return command(['HMGET', key, ...fields]); }
 export async function isUsingUpstash() { return redisConfigured(); }
 
+export async function pingRedis() {
+  return command(['PING']);
+}
+
+export function getRedisConfigurationStatus() {
+  const hasUrl = Boolean(process.env.UPSTASH_REDIS_REST_URL);
+  const hasToken = Boolean(process.env.UPSTASH_REDIS_REST_TOKEN);
+  return {
+    configured: hasUrl && hasToken,
+    hasUrl,
+    hasToken,
+    mode: hasUrl && hasToken ? 'upstash' : (localModeAllowed() ? 'ephemeral-local' : 'unconfigured')
+  };
+}
+
 export async function recordProjectEvent(projectId, event, { threat = false } = {}) {
   const keep = Math.max(100, Math.min(1000, Number(process.env.ARIX_EVENT_RETENTION) || 500));
   const kind = threat ? 'threat_logs' : 'live_visitors';
