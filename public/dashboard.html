@@ -10,49 +10,116 @@
   <script src="/app.js" defer></script>
 </head>
 <body data-page="dashboard">
-  <header class="topbar"><div class="wrap nav"><a class="brand" href="/"><span class="brand-mark">A</span><span>ArixShield</span></a><nav class="nav-links"><a href="/">Platform</a><a href="/developer">Developer</a></nav><div class="nav-actions"><span class="microcopy" id="dash-user">Loading account…</span><button class="btn btn-secondary" id="logout" type="button">Sign out</button></div></div></header>
+  <header class="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="/"><span class="brand-mark">A</span><span>ArixShield</span></a>
+      <nav class="nav-links"><a href="/">Platform</a><a href="/developer">Developer</a></nav>
+      <div class="nav-actions">
+        <span class="microcopy" id="dash-user">Loading account…</span>
+        <button class="btn btn-secondary" id="logout" type="button">Sign out</button>
+      </div>
+    </div>
+  </header>
+
   <main class="dashboard-shell">
     <div class="wrap">
-      <div class="dash-head"><div><div class="eyebrow"><span class="pulse"></span> Live command center</div><h1 id="project-title">Project telemetry</h1><p id="project-origin">Connecting to ArixShield control plane…</p></div><span class="status-pill" id="connection-status">CONNECTING</span></div>
+      <div class="dash-head">
+        <div>
+          <div class="eyebrow"><span class="pulse"></span> Live command center</div>
+          <h1 id="project-title">Project telemetry</h1>
+          <p id="project-origin">Connecting to ArixShield control plane…</p>
+        </div>
+        <span class="status-pill" id="connection-status">CONNECTING</span>
+      </div>
+
       <div class="dash-grid">
         <article class="metric-card"><span>Total observed requests</span><strong id="metric-requests">—</strong><small>Recorded by ArixShield SDK / browser heartbeat</small></article>
         <article class="metric-card"><span>Blocked attacks</span><strong id="metric-blocked">—</strong><small>Enforced threat decisions</small></article>
         <article class="metric-card"><span>Trapped key events</span><strong id="metric-trapped">—</strong><small>Canary use and failed DPoP</small></article>
         <article class="metric-card"><span>Active visitors</span><strong id="metric-visitors">—</strong><small>Unique DPoP visitors in last 60 seconds</small></article>
       </div>
+
       <div class="dash-two">
         <section class="card">
-          <div class="snippet-toolbar"><div><h2>Live visitors</h2><p class="card-sub">Refreshes every 1.5 seconds · last-seen window: 60 seconds</p></div><span class="status-tag" id="visitor-count">0 active</span></div>
-          <div class="table-wrap"><table><thead><tr><th>Visitor / IP hint</th><th>Location / ASN</th><th>Path</th><th>PoP</th></tr></thead><tbody id="visitor-table"><tr><td colspan="4" class="empty">No visitor events yet.</td></tr></tbody></table></div>
+          <div class="snippet-toolbar">
+            <div><h2>Live visitors</h2><p class="card-sub">Refreshes every 1.5 seconds · last-seen window: 60 seconds</p></div>
+            <span class="status-tag" id="visitor-count">0 active</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Visitor / IP hint</th><th>Location / ASN</th><th>Path</th><th>PoP</th></tr></thead>
+              <tbody id="visitor-table"><tr><td colspan="4" class="empty">No visitor events yet.</td></tr></tbody>
+            </table>
+          </div>
         </section>
         <section class="card">
-          <div class="snippet-toolbar"><div><h2>Hacker cinema</h2><p class="card-sub">Recent threat and Phantom Sandbox events</p></div><span class="status-tag blocked">Threat feed</span></div>
+          <div class="snippet-toolbar">
+            <div><h2>Hacker cinema</h2><p class="card-sub">Recent threat and Phantom Sandbox events</p></div>
+            <span class="status-tag blocked">Threat feed</span>
+          </div>
           <div class="terminal-small" id="threat-terminal">Waiting for threat events…</div>
         </section>
       </div>
+
       <div class="dash-two">
         <section class="card">
-          <h2>Security policy</h2><p class="card-sub">Changes are stored in your project record in Redis.</p>
+          <h2>Application origins</h2>
+          <p class="card-sub">Change the website origin used by browser telemetry. Updates are saved to the project immediately; no redeployment is required.</p>
+          <form id="origins-form" class="form-grid">
+            <div class="field">
+              <label for="primary-origin">Primary app origin</label>
+              <input id="primary-origin" name="origin" type="url" inputmode="url" maxlength="240" placeholder="https://example.com" required>
+              <small class="muted-note">Enter only the scheme and host, for example https://app.example.com. Do not include a path.</small>
+            </div>
+            <div class="field">
+              <label for="custom-origins">Additional allowed origins (comma-separated, maximum 10)</label>
+              <textarea id="custom-origins" name="customOrigins" rows="3" spellcheck="false" placeholder="https://staging.example.com, https://admin.example.com"></textarea>
+              <small class="muted-note">Use exact HTTPS origins. Localhost is allowed for development. Duplicate entries are removed automatically.</small>
+            </div>
+            <div class="inline-form">
+              <button class="btn btn-primary" id="save-origins" type="submit">Save origins</button>
+              <span class="microcopy" id="origin-count">1 / 11 origins configured</span>
+            </div>
+            <div class="notice" id="origins-notice" role="status"></div>
+          </form>
+          <p class="muted-note">Saved origins are checked against each incoming browser telemetry request. Changes take effect on the next request.</p>
+        </section>
+
+        <section class="card">
+          <h2>Security policy</h2>
+          <p class="card-sub">Changes are stored in your project record in Redis.</p>
           <div class="policy-grid">
             <div class="policy-item"><div><strong>Enforcement mode</strong><small>Observe findings or block matching requests</small></div><select id="policy-mode"><option value="ENFORCE">ENFORCE</option><option value="DRY_RUN">DRY_RUN</option></select></div>
             <div class="policy-item"><div><strong>Datacenter ASN checks</strong><small>Apply to login, signup and checkout paths only</small></div><input class="toggle" id="policy-dc" type="checkbox" aria-label="Toggle datacenter ASN checks"></div>
             <div class="policy-item"><div><strong>Deception responses</strong><small>Known invalid proofs and canary keys get synthetic data</small></div><input class="toggle" id="policy-deception" type="checkbox" aria-label="Toggle deception responses"></div>
           </div>
-          <div class="inline-form policy-save-row"><label for="policy-limit" class="microcopy">Requests / minute</label><input id="policy-limit" type="number" min="10" max="10000" value="120"><button class="btn btn-primary" id="save-policy" type="button">Save policy</button></div>
+          <div class="inline-form policy-save-row">
+            <label for="policy-limit" class="microcopy">Requests / minute</label>
+            <input id="policy-limit" type="number" min="10" max="10000" value="120">
+            <button class="btn btn-primary" id="save-policy" type="button">Save policy</button>
+          </div>
           <p class="muted-note policy-note">Long-lived Slowloris tarpit streams are deliberately not offered on serverless functions; they can exhaust the service and affect legitimate traffic. The deception response is bounded and immediate.</p>
           <div class="notice" id="policy-notice" role="status"></div>
         </section>
+      </div>
+
+      <div class="dash-two">
         <section class="card">
-          <h2>Forensic watermark decoder</h2><p class="card-sub">Paste leaked text or JSON containing an ArixShield zero-width marker.</p>
+          <h2>Forensic watermark decoder</h2>
+          <p class="card-sub">Paste leaked text or JSON containing an ArixShield zero-width marker.</p>
           <div class="field"><label for="leak-input">Leaked content</label><textarea id="leak-input" placeholder="Paste a suspected leaked record or text snippet…"></textarea></div>
           <button class="btn btn-primary decode-button" id="decode-leak" type="button">Decode origin</button>
           <div class="notice" id="decode-notice" role="status"></div>
           <div id="decode-result" class="key-row hidden decode-result"></div>
         </section>
       </div>
+
       <p class="muted-note">Network IP, country and ASN are telemetry hints supplied by the hosting platform and are not treated as cryptographic identity. Dashboard polling is active only while this page is open.</p>
     </div>
   </main>
-  <footer class="footer"><div class="wrap footer-inner"><span>© 2026 ArixShield</span><span><a href="/">Home</a> · <a href="/developer">Developer access</a></span></div></footer>
+
+  <footer class="footer">
+    <div class="wrap footer-inner"><span>© 2026 ArixShield</span><span><a href="/">Home</a> · <a href="/developer">Developer access</a></span></div>
+  </footer>
 </body>
 </html>
