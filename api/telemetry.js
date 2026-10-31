@@ -1,3 +1,4 @@
+import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, sameOriginRequest, getNetworkHints } from './_lib/http.js';
 import { requireSession } from './_lib/session.js';
 import { getJson, setJson, getProjectDashboardSnapshot } from './_lib/redis.js';
@@ -9,7 +10,7 @@ function parseEvents(values) {
   });
 }
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (!['GET', 'POST'].includes(req.method)) return methodNotAllowed(res, ['GET', 'POST']);
   try {
     const auth = await requireSession(req);
@@ -68,7 +69,10 @@ export default async function handler(req, res) {
     await setJson(`arix:project:${project.id}`, project);
     return sendJson(res, 200, { ok: true, policy: nextPolicy });
   } catch (error) {
+    console.error('[ArixShield] /api/telemetry request failed:', error?.stack || error);
     const status = Number(error.statusCode) || 503;
-    return sendJson(res, status, { error: status === 503 ? 'Telemetry service unavailable. Verify Upstash configuration.' : error.message });
+    return sendJson(res, status, { error: status === 503 ? 'Telemetry service unavailable. Verify Upstash REST URL/token and inspect Vercel Function logs.' : error.message });
   }
 }
+
+export default createCompatibleHandler(handler);
