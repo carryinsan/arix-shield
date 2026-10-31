@@ -3,23 +3,36 @@
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
   const jsonFetch = async (url, options = {}) => {
     const response = await fetch(url, {
       credentials: 'same-origin',
       ...options,
-      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) }
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers || {})
+      }
     });
     let data;
-    try { data = await response.json(); } catch { data = {}; }
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
     return data;
   };
+
   const showNotice = (node, message, type = 'success') => {
     if (!node) return;
     node.textContent = message;
     node.className = `notice show ${type}`;
   };
-  const hideNotice = (node) => { if (node) node.className = 'notice'; };
+
+  const hideNotice = (node) => {
+    if (node) node.className = 'notice';
+  };
+
   const copyText = async (value) => {
     if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value);
     const input = document.createElement('textarea');
@@ -33,10 +46,10 @@
     if (!copied) throw new Error('Clipboard access was denied.');
   };
 
-
   async function initDeveloper() {
     const form = $('#auth-form');
     if (!form) return;
+
     const tabs = $$('[data-auth-mode]');
     const nameField = $('#full-name');
     const projectField = $('#project-name');
@@ -110,11 +123,14 @@ def arix_telemetry(response):
       authMode = mode;
       tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.authMode === mode));
       $$('.signup-field').forEach((element) => element.classList.toggle('hidden', mode !== 'signup'));
-      [nameField, projectField, originField].forEach((field) => { if (field) field.required = mode === 'signup'; });
+      [nameField, projectField, originField].forEach((field) => {
+        if (field) field.required = mode === 'signup';
+      });
       if (passField) passField.autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
       submit.textContent = mode === 'signup' ? 'Create account & project' : 'Sign in';
       hideNotice(notice);
     };
+
     tabs.forEach((tab) => tab.addEventListener('click', () => changeMode(tab.dataset.authMode)));
 
     try {
@@ -123,7 +139,9 @@ def arix_telemetry(response):
         location.replace('/dashboard');
         return;
       }
-    } catch { /* The form remains available; a submit will show the actionable error. */ }
+    } catch {
+      // Keep the form available; submit will show the actionable service error.
+    }
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -132,6 +150,7 @@ def arix_telemetry(response):
       submit.textContent = authMode === 'signup' ? 'Creating secure project…' : 'Signing in…';
       const data = Object.fromEntries(new FormData(form).entries());
       data.action = authMode;
+
       try {
         const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) });
         if (authMode === 'login') {
@@ -139,6 +158,7 @@ def arix_telemetry(response):
           location.href = '/dashboard';
           return;
         }
+
         activeKeys = result.keys;
         $('#live-key').textContent = result.keys.liveKey;
         $('#server-key').textContent = result.keys.serverKey;
@@ -158,33 +178,116 @@ def arix_telemetry(response):
 
     $('#snippet-type')?.addEventListener('change', updateSnippet);
     $('#copy-snippet')?.addEventListener('click', async () => {
-      try { await copyText($('#snippet-code').textContent); showNotice(notice, 'Snippet copied.', 'success'); }
-      catch (error) { showNotice(notice, error.message, 'error'); }
+      try {
+        await copyText($('#snippet-code').textContent);
+        showNotice(notice, 'Snippet copied.', 'success');
+      } catch (error) {
+        showNotice(notice, error.message, 'error');
+      }
     });
+
     $$('[data-copy-target]').forEach((button) => button.addEventListener('click', async () => {
-      try { await copyText($(`#${button.dataset.copyTarget}`).textContent); button.textContent = 'Copied'; }
-      catch (error) { showNotice(notice, error.message, 'error'); }
+      try {
+        await copyText($(`#${button.dataset.copyTarget}`).textContent);
+        button.textContent = 'Copied';
+      } catch (error) {
+        showNotice(notice, error.message, 'error');
+      }
     }));
+
     updateSnippet();
   }
 
   async function initDashboard() {
     if (!$('#visitor-table')) return;
+
     const status = $('#connection-status');
+    const primaryOriginInput = $('#primary-origin');
+    const customOriginsInput = $('#custom-origins');
+    const originsForm = $('#origins-form');
+    const originsNotice = $('#origins-notice');
+    let originsDirty = false;
+
     const showDashError = (message) => {
       status.textContent = 'DISCONNECTED';
       status.classList.add('is-danger');
       status.classList.remove('is-good');
       $('#project-origin').textContent = message;
     };
+
+    const updateOriginCount = () => {
+      if (!primaryOriginInput || !customOriginsInput) return;
+      const primary = primaryOriginInput.value.trim().replace(/\/$/, '');
+      const extras = [...new Set(customOriginsInput.value
+        .split(/[\n,]+/)
+        .map((value) => value.trim().replace(/\/$/, ''))
+        .filter((value) => value && value !== primary))];
+      $('#origin-count').textContent = `${1 + extras.length} / 11 origins configured`;
+    };
+
+    const syncOrigins = (project) => {
+      if (!primaryOriginInput || !customOriginsInput) return;
+      const primary = project.origin || '';
+      const allowed = Array.isArray(project.allowedOrigins) && project.allowedOrigins.length
+        ? project.allowedOrigins
+        : [primary].filter(Boolean);
+      primaryOriginInput.value = primary;
+      customOriginsInput.value = allowed.filter((origin) => origin && origin !== primary).join(', ');
+      originsDirty = false;
+      updateOriginCount();
+    };
+
+    primaryOriginInput?.addEventListener('input', () => {
+      originsDirty = true;
+      updateOriginCount();
+      hideNotice(originsNotice);
+    });
+    customOriginsInput?.addEventListener('input', () => {
+      originsDirty = true;
+      updateOriginCount();
+      hideNotice(originsNotice);
+    });
+
+    originsForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const saveButton = $('#save-origins');
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving origins…';
+      hideNotice(originsNotice);
+
+      try {
+        const result = await jsonFetch('/api/telemetry', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'origins',
+            origin: primaryOriginInput.value.trim(),
+            customOrigins: customOriginsInput.value
+          })
+        });
+        syncOrigins(result.project);
+        showNotice(originsNotice, 'Origin allowlist saved. It is active for the next browser telemetry request; no redeployment is required.', 'success');
+      } catch (error) {
+        showNotice(originsNotice, error.message, 'error');
+      } finally {
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save origins';
+      }
+    });
+
     try {
       const account = await jsonFetch('/api/auth');
-      if (!account.authenticated) { location.href = '/developer'; return; }
+      if (!account.authenticated) {
+        location.href = '/developer';
+        return;
+      }
       $('#dash-user').textContent = account.user.email;
+
       const poll = async () => {
         const data = await jsonFetch('/api/telemetry');
         $('#project-title').textContent = data.project.name;
         $('#project-origin').textContent = `${data.project.origin} · ${data.project.id}`;
+        if (!originsDirty) syncOrigins(data.project);
+
         status.textContent = 'LIVE · 1.5S POLL';
         status.classList.add('is-good');
         status.classList.remove('is-danger');
@@ -197,6 +300,7 @@ def arix_telemetry(response):
         renderThreats(data.threats || []);
         syncPolicy(data.policy || {});
       };
+
       await poll();
       window.setInterval(() => poll().catch((error) => showDashError(error.message)), 1500);
     } catch (error) {
@@ -213,8 +317,11 @@ def arix_telemetry(response):
         td.colSpan = 4;
         td.className = 'empty';
         td.textContent = 'No visitor events yet. Add the browser script to your configured site origin.';
-        tr.append(td); body.append(tr); return;
+        tr.append(td);
+        body.append(tr);
+        return;
       }
+
       rows.forEach((row) => {
         const tr = document.createElement('tr');
         const values = [
@@ -223,10 +330,15 @@ def arix_telemetry(response):
           row.path || '/',
           row.dpopVerified ? 'Verified' : '—'
         ];
-        values.forEach((value, i) => {
+        values.forEach((value, index) => {
           const td = document.createElement('td');
           td.textContent = value;
-          if (i === 3 && row.dpopVerified) { const tag = document.createElement('span'); tag.className = 'status-tag'; tag.textContent = 'DPoP'; td.replaceChildren(tag); }
+          if (index === 3 && row.dpopVerified) {
+            const tag = document.createElement('span');
+            tag.className = 'status-tag';
+            tag.textContent = 'DPoP';
+            td.replaceChildren(tag);
+          }
           tr.append(td);
         });
         body.append(tr);
@@ -236,17 +348,24 @@ def arix_telemetry(response):
     function renderThreats(rows) {
       const terminal = $('#threat-terminal');
       terminal.replaceChildren();
-      if (!rows.length) { terminal.textContent = 'No threats recorded for this project.'; return; }
+      if (!rows.length) {
+        terminal.textContent = 'No threats recorded for this project.';
+        return;
+      }
+
       rows.slice(0, 18).forEach((row) => {
         const line = document.createElement('div');
         const time = row.timestamp ? new Date(row.timestamp).toLocaleTimeString() : '--:--:--';
         const label = row.type || 'SECURITY_EVENT';
-        const detail = row.reason || (Array.isArray(row.findings) ? row.findings.map((item) => item.category).join(', ') : row.path || 'Event recorded');
+        const detail = row.reason || (Array.isArray(row.findings)
+          ? row.findings.map((item) => item.category).join(', ')
+          : row.path || 'Event recorded');
         line.textContent = `[${time}] ${label} :: ${detail}`;
         terminal.append(line);
+
         if (row.mirage) {
           const payload = document.createElement('div');
-          payload.textContent = `  ↳ synthetic response ${JSON.stringify(row.mirage).slice(0, 360)}`;
+          payload.textContent = ` !³ synthetic response ${JSON.stringify(row.mirage).slice(0, 360)}`;
           terminal.append(payload);
         }
       });
@@ -268,41 +387,69 @@ def arix_telemetry(response):
         deceptionEnabled: $('#policy-deception').checked,
         rateLimitPerMinute: Number($('#policy-limit').value)
       };
+
       try {
         const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) });
         syncPolicy(result.policy);
         showNotice(notice, 'Security policy saved.', 'success');
-      } catch (error) { showNotice(notice, error.message, 'error'); }
+      } catch (error) {
+        showNotice(notice, error.message, 'error');
+      }
     });
 
     $('#decode-leak')?.addEventListener('click', async () => {
       const notice = $('#decode-notice');
       const resultNode = $('#decode-result');
       resultNode.classList.add('hidden');
+
       try {
-        const result = await jsonFetch('/api/decode-leak', { method: 'POST', body: JSON.stringify({ text: $('#leak-input').value }) });
+        const result = await jsonFetch('/api/decode-leak', {
+          method: 'POST',
+          body: JSON.stringify({ text: $('#leak-input').value })
+        });
         if (!result.found) {
           showNotice(notice, `No valid watermark found (${result.reason || 'unknown'}).`, 'error');
           return;
         }
-        showNotice(notice, result.attributed ? 'Signed watermark verified and attribution resolved.' : 'Marker is valid, but its attribution record is no longer available.', result.attributed ? 'success' : 'error');
+
+        showNotice(
+          notice,
+          result.attributed
+            ? 'Signed watermark verified and attribution resolved.'
+            : 'Marker is valid, but its attribution record is no longer available.',
+          result.attributed ? 'success' : 'error'
+        );
         resultNode.replaceChildren();
         const fields = [
-          ['Attribution ID', result.attributionId], ['Session ID', result.sessionId], ['User ID', result.userId], ['IP hint', result.ip], ['Timestamp', result.timestamp], ['Country / ASN', `${result.country || 'not recorded'} / ${result.asn || 'not recorded'}`]
+          ['Attribution ID', result.attributionId],
+          ['Session ID', result.sessionId],
+          ['User ID', result.userId],
+          ['IP hint', result.ip],
+          ['Timestamp', result.timestamp],
+          ['Country / ASN', `${result.country || 'not recorded'} / ${result.asn || 'not recorded'}`]
         ];
         fields.forEach(([key, value]) => {
           const line = document.createElement('div');
-          const label = document.createElement('label'); label.textContent = key;
-          const text = document.createElement('div'); text.textContent = value || '—'; text.className = 'key-value';
-          line.append(label, text); resultNode.append(line);
+          const label = document.createElement('label');
+          label.textContent = key;
+          const valueNode = document.createElement('div');
+          valueNode.textContent = value || '—';
+          valueNode.className = 'key-value';
+          line.append(label, valueNode);
+          resultNode.append(line);
         });
         resultNode.classList.remove('hidden');
-      } catch (error) { showNotice(notice, error.message, 'error'); }
+      } catch (error) {
+        showNotice(notice, error.message, 'error');
+      }
     });
 
     $('#logout')?.addEventListener('click', async () => {
-      try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'logout' }) }); }
-      finally { location.href = '/'; }
+      try {
+        await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'logout' }) });
+      } finally {
+        location.href = '/';
+      }
     });
   }
 
