@@ -7,6 +7,11 @@
     { "source": "/developer", "destination": "/developer.html" },
     { "source": "/dashboard", "destination": "/dashboard.html" }
   ],
+  "crons": [
+    { "path": "/api/cron/threat-feeds", "schedule": "15 2 * * *" },
+    { "path": "/api/cron/analytics-flush", "schedule": "5 3 * * *" },
+    { "path": "/api/cron/audit-anchor", "schedule": "25 3 * * *" }
+  ],
   "headers": [
     {
       "source": "/(.*)",

@@ -1,0 +1,7 @@
+{
+  "crons": [
+    { "path": "/api/cron/threat-feeds", "schedule": "0 2 * * *" },
+    { "path": "/api/cron/analytics-flush", "schedule": "* * * * *" },
+    { "path": "/api/cron/audit-anchor", "schedule": "* * * * *" }
+  ]
+}

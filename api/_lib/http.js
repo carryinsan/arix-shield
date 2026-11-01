@@ -74,7 +74,10 @@ export function getNetworkHints(req) {
   const asn = typeof req.headers?.['x-vercel-ip-as-number'] === 'string' ? req.headers['x-vercel-ip-as-number'].slice(0, 16) : '—';
   const ja3 = typeof req.headers?.['x-vercel-ja3-digest'] === 'string' ? req.headers['x-vercel-ja3-digest'].slice(0, 128) : '—';
   const ja4 = typeof req.headers?.['x-vercel-ja4-digest'] === 'string' ? req.headers['x-vercel-ja4-digest'].slice(0, 128) : '—';
-  return { ip, country, city, asn, ja3, ja4 };
+  const latValue = Number(req.headers?.['x-vercel-ip-latitude']);
+  const lonValue = Number(req.headers?.['x-vercel-ip-longitude']);
+  const hasCoordinates = Number.isFinite(latValue) && Number.isFinite(lonValue) && latValue >= -90 && latValue <= 90 && lonValue >= -180 && lonValue <= 180;
+  return { ip, country, city, asn, ja3, ja4, ...(hasCoordinates ? { latitude: latValue, longitude: lonValue } : {}) };
 }
 
 function decodeURIComponentSafe(value) {

@@ -1,18 +1,24 @@
 {
   "name": "arixshield",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Hybrid API security SDK and serverless control plane for ArixShield",
   "engines": { "node": "22.x" },
   "scripts": {
     "check": "node scripts/check.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "generate:clearance-keys": "node scripts/generate-clearance-keys.mjs"
   },
   "exports": {
+    ".": "./sdk/node.js",
     "./node": "./sdk/node.js",
     "./next": "./sdk/next.js",
     "./waf": "./api/_lib/waf-engine.js",
+    "./schema": "./api/_lib/schema.js",
+    "./cidr": "./api/_lib/cidr.js",
+    "./reputation": "./api/_lib/reputation.js",
+    "./analytics": "./api/_lib/analytics.js",
     "./watermark": "./api/_lib/watermark.js"
   }
 }

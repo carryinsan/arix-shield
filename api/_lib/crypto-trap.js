@@ -146,3 +146,42 @@ export async function hashCredential(value) {
 export async function markDpopReplay(key) {
   return setString(key, '1', 120, true);
 }
+
+function parseClearanceJwk(raw) {
+  if (!raw || typeof raw !== 'string' || raw.length > 16000) return null;
+  try {
+    const jwk = JSON.parse(raw);
+    if (jwk?.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') return null;
+    return jwk;
+  } catch { return null; }
+}
+
+export function getClearancePublicJwk() {
+  const privateJwk = parseClearanceJwk(process.env.ARIX_CLEARANCE_PRIVATE_JWK);
+  if (!privateJwk) return null;
+  return {
+    kty: 'RSA', n: privateJwk.n, e: privateJwk.e,
+    alg: 'RSA-OAEP-256', use: 'enc', kid: String(privateJwk.kid || 'arix-clearance-v1'), ext: true
+  };
+}
+
+export async function decryptClearanceJwe(compact) {
+  if (typeof compact !== 'string' || compact.length > 24000) throw new Error('Invalid clearance token size.');
+  const parts = compact.split('.');
+  if (parts.length !== 5 || parts.some((part) => !part)) throw new Error('Malformed compact JWE.');
+  const [protectedHeader, encryptedKey, ivPart, cipherPart, tagPart] = parts;
+  const header = JSON.parse(Buffer.from(base64urlDecode(protectedHeader)).toString('utf8'));
+  if (header.alg !== 'RSA-OAEP-256' || header.enc !== 'A256GCM' || header.kid !== String(process.env.ARIX_CLEARANCE_KID || 'arix-clearance-v1')) throw new Error('Unsupported clearance encryption header.');
+  const privateJwk = parseClearanceJwk(process.env.ARIX_CLEARANCE_PRIVATE_JWK);
+  if (!privateJwk?.d) throw new Error('Clearance decryption key is not configured.');
+  const subtle = cryptoApi.subtle;
+  if (!subtle) throw new Error('WebCrypto is unavailable in this runtime.');
+  const privateKey = await subtle.importKey('jwk', privateJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
+  const cek = await subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, base64urlDecode(encryptedKey));
+  const aesKey = await subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['decrypt']);
+  const ciphertextAndTag = Buffer.concat([base64urlDecode(cipherPart), base64urlDecode(tagPart)]);
+  const plaintext = await subtle.decrypt({ name: 'AES-GCM', iv: base64urlDecode(ivPart), additionalData: Buffer.from(protectedHeader), tagLength: 128 }, aesKey, ciphertextAndTag);
+  const value = JSON.parse(Buffer.from(plaintext).toString('utf8'));
+  if (!value || typeof value !== 'object' || !Number.isFinite(value.iat) || Math.abs(Date.now() - value.iat) > 120000) throw new Error('Clearance telemetry is expired or has an invalid timestamp.');
+  return value;
+}

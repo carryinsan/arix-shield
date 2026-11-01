@@ -2,6 +2,7 @@ import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, sameOriginRequest, getNetworkHints, normalizeOrigin } from './_lib/http.js';
 import { requireSession } from './_lib/session.js';
 import { getJson, setJson, getProjectDashboardSnapshot } from './_lib/redis.js';
+import { queryClickHouseSnapshot, queryTinybirdSnapshot } from './_lib/analytics.js';
 
 function parseEvents(values) {
   return (values ?? []).flatMap((value) => {
@@ -57,6 +58,8 @@ async function handler(req, res) {
       const visitors = parseEvents(snapshot.visitors);
       const threats = parseEvents(snapshot.threats);
       const metrics = snapshot.metrics;
+      let analytics = null;
+      try { analytics = await queryClickHouseSnapshot(project.id) || await queryTinybirdSnapshot(project.id); } catch (error) { console.warn('[ArixShield] External analytics dashboard query unavailable:', error?.message || error); }
       const cutoff = Date.now() - 60_000;
       const active = new Map();
 
@@ -84,7 +87,11 @@ async function handler(req, res) {
         visitors: [...active.values()]
           .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
           .slice(0, 100),
-        threats: threats.slice(0, 100)
+        threats: threats.slice(0, 100),
+        forensicReplay: parseEvents(snapshot.forensicReplay).slice(0, 100),
+        apiCatalog: Array.isArray(snapshot.apiCatalog) ? snapshot.apiCatalog : [],
+        auditAnchor: snapshot.auditAnchor || null,
+        analytics
       });
     }
 
@@ -146,6 +153,12 @@ async function handler(req, res) {
         return sendJson(res, 400, { error: 'deceptionEnabled must be boolean.' });
       }
       nextPolicy.deceptionEnabled = body.deceptionEnabled;
+    }
+    for (const flag of ['abuseProtectionEnabled', 'geoVelocityEnabled', 'threatFeedEnabled', 'shadowApiCatalogEnabled', 'forensicReplayEnabled']) {
+      if (body[flag] !== undefined) {
+        if (typeof body[flag] !== 'boolean') return sendJson(res, 400, { error: `${flag} must be boolean.` });
+        nextPolicy[flag] = body[flag];
+      }
     }
 
     project.policy = nextPolicy;

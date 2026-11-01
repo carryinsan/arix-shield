@@ -47,7 +47,7 @@ async function provisionAccount(body, req, res) {
       liveKeyHash: liveHash,
       serverKeyHash: serverHash,
       canaryKeyHash: canaryHash,
-      policy: { mode: 'ENFORCE', rateLimitPerMinute: 120, blockDatacenterAsn: false, canaryRowsEnabled: false, deceptionEnabled: true },
+      policy: { mode: 'ENFORCE', rateLimitPerMinute: 120, blockDatacenterAsn: false, canaryRowsEnabled: false, deceptionEnabled: true, abuseProtectionEnabled: false, geoVelocityEnabled: false, threatFeedEnabled: true, shadowApiCatalogEnabled: false, forensicReplayEnabled: false },
       createdAt: now
     };
     await Promise.all([
@@ -127,7 +127,7 @@ async function handler(req, res) {
   } catch (error) {
     console.error('[ArixShield] /api/auth request failed:', error?.stack || error);
     const status = Number(error.statusCode) || 503;
-    return sendJson(res, status, { error: status === 503 ? 'Account service temporarily unavailable. Verify Upstash REST URL/token and inspect Vercel Function logs.' : error.message });
+    return sendJson(res, status, { error: status === 503 ? 'Account service temporarily unavailable. Verify Upstash Redis REST URL/token and inspect Vercel Function logs.' : error.message });
   }
 }
 
