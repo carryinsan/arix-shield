@@ -19,7 +19,7 @@ ArixShield is a hybrid application-layer API security SDK and Vercel-hosted cont
 
 The repository is a Vercel project and Node.js 22 ESM package. Deploy this repository to Vercel, configure the required environment variables from `.env.example`, then deploy the matching SDK files/package to customer services.
 
-Read [docs/OPERATIONS.md](docs/OPERATIONS.md) before production rollout, [docs/SECURITY-BOUNDARIES.md](docs/SECURITY-BOUNDARIES.md) for limitations and intentionally excluded countermeasures, and [BUILD-REPORT.md](BUILD-REPORT.md) for the exact verification status and feature boundaries.
+Read [docs/OPERATIONS.md](docs/OPERATIONS.md) before production rollout, [docs/NEXTJS-INTEGRATION.md](docs/NEXTJS-INTEGRATION.md) for the supported Next.js multi-website integration, [docs/SECURITY-BOUNDARIES.md](docs/SECURITY-BOUNDARIES.md) for limitations and intentionally excluded countermeasures, and [BUILD-REPORT.md](BUILD-REPORT.md) for the exact verification status and feature boundaries.
 
 ## Local checks
 

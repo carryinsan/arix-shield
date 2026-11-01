@@ -26,3 +26,21 @@ test('honeypot bans both an actor identity and its verified source IP for 24 hou
 test('anonymous honeypot hits never create a project-wide anonymous ban', async () => { const projectId = 'project_anonymous_honeypot_test'; await banActorForHoneypot(projectId, 'anonymous', ''); assert.equal((await isActorBackedOff(projectId, 'anonymous', '')).blocked, false); await banActorForHoneypot(projectId, 'anonymous', '203.0.113.99'); assert.equal((await isActorBackedOff(projectId, 'anonymous', '203.0.113.99')).blocked, true); assert.equal((await isActorBackedOff(projectId, 'another-user', '203.0.113.99')).blocked, true); });
 test('watermark markers are stable per session and attribution decodes', async () => { const projectId = 'project_watermark_test'; const context = { projectId, sessionId: 'session-stable-1', userId: 'user-42', ip: '203.0.113.20' }; const markerA = await createInvisibleWatermarkMarker(context); const markerB = await createInvisibleWatermarkMarker(context); assert.equal(markerA, markerB); const decoded = await decodeInvisibleWatermark(`A${markerA}B`, projectId); assert.equal(decoded.found, true); assert.equal(decoded.attributed, true); assert.equal(decoded.userId, 'user-42'); });
 test('watermarking touches safe display text but preserves IDs, emails and credentials', async () => { const marker = await createInvisibleWatermarkMarker({ projectId: 'watermark-field-test', sessionId: 'session-1', userId: 'user-1' }); const original = { data: [{ id: 'order-123', email: 'person@example.com', title: 'Invoice', api_token: 'secret-token' }] }; const marked = watermarkPayloadWithMarker(original, marker); assert.equal(marked.data[0].id, 'order-123'); assert.equal(marked.data[0].email, 'person@example.com'); assert.equal(marked.data[0].api_token, 'secret-token'); assert.notEqual(marked.data[0].title, 'Invoice'); assert.equal(original.data[0].title, 'Invoice'); });
+
+
+test('Next.js integration partitions local rate limits by applicationId for websites sharing one ArixShield project', async () => {
+  const { withArixShield } = await import('../sdk/next.js');
+  const makeRequest = () => new Request('https://site-a.example/api/action');
+  const handlerA = withArixShield(async () => Response.json({ ok: true }), { applicationId: 'site-a', mode: 'ENFORCE', globalRateLimit: false, rateLimitPerMinute: 1, getIdentity: () => 'user-1' });
+  const handlerB = withArixShield(async () => Response.json({ ok: true }), { applicationId: 'site-b', mode: 'ENFORCE', globalRateLimit: false, rateLimitPerMinute: 1, getIdentity: () => 'user-1' });
+  assert.equal((await handlerA(makeRequest())).status, 200);
+  assert.equal((await handlerA(makeRequest())).status, 429);
+  assert.equal((await handlerB(makeRequest())).status, 200);
+});
+
+test('Next.js integration rejects invalid client IPs returned by a custom resolver', async () => {
+  const { protectRequest } = await import('../sdk/next.js');
+  const decision = await protectRequest(new Request('https://site.example/api/read'), { mode: 'DRY_RUN', globalRateLimit: false, applicationId: 'site', getIdentity: () => 'user-1', getClientIp: () => 'not-an-ip' });
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.ip, '');
+});

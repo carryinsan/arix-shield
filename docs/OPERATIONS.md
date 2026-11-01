@@ -87,13 +87,9 @@ app.use(createArixShield({ endpoint: process.env.ARIXSHIELD_ENDPOINT, serverKey:
 
 ### Next.js App Router
 
-```js
-import { withArixShield } from 'arixshield/next';
-async function handler(request) { return Response.json({ ok: true }); }
-export const GET = withArixShield(handler, { endpoint: process.env.ARIXSHIELD_ENDPOINT, serverKey: process.env.ARIXSHIELD_SERVER_KEY, mode: 'ENFORCE', abuseProtection: true, openapiDocument, shadowApiCatalog: true, getIdentity: (request, { ip }) => `${request.headers.get('x-user-id') || 'anonymous'}:${ip}`, getRateLimitWeight: (request, { body }) => Math.max(1, Math.ceil(Number(body?.estimatedTokens || 1) / 1000)), requestDlp: true, reportAllRequests: true, waitUntil: globalThis.waitUntil });
-```
+Use the supported installation and route-wrapper instructions in [NEXTJS-INTEGRATION.md](./NEXTJS-INTEGRATION.md). The endpoint is the central ArixShield API origin; do not import JavaScript modules from the deployed website URL. Each website using the same ArixShield project must set a different `applicationId` so its local and distributed quotas and actor identifiers are isolated.
 
-Do not pass server keys to browsers. Existing customers who only use the browser SDK can continue to use their current route setup; advanced response-outcome analysis requires server-side SDK reporting. Add only app-owned unused paths to optional honeypot routes. Canary rows are opt-in synthetic records; filter them from user views. Watermarking modifies safe display-text fields only.
+Do not pass server keys to browsers. Derive identities from your server-side authentication/session system, never from a client-controlled `x-user-id` header. The SDK runs in the Node.js runtime; browser telemetry is a separate optional integration. Add only app-owned unused paths to optional honeypot routes. Canary rows are opt-in synthetic records; filter them from user views. Watermarking modifies safe display-text fields only.
 
 ## 11. Verification
 
