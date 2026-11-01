@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const localStore = globalThis.__ARIXSHIELD_LOCAL_REDIS__ ??= new Map();
 let warned = false;
@@ -66,6 +66,8 @@ function localCommand(parts) {
     case 'ZCARD': return item?.type === 'zset' ? item.value.size : 0;
     case 'PEXPIRE': { if (!item) return 0; item.expiresAt = Date.now() + Number(args[1]); return 1; }
     case 'SADD': { const set = item?.type === 'set' ? item.value : new Set(); let added = 0; for (const member of args.slice(1)) { const before = set.size; set.add(String(member)); if (set.size > before) added++; } setLocal(key, 'set', set, item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return added; }
+    case 'SCARD': return item?.type === 'set' ? item.value.size : 0;
+    case 'SREM': { if (!item || item.type !== 'set') return 0; let removed = 0; for (const member of args.slice(1)) if (item.value.delete(String(member))) removed++; return removed; }
     case 'SMEMBERS': return item?.type === 'set' ? [...item.value] : [];
     case 'HSET': { const hash = item?.type === 'hash' ? item.value : new Map(); let added = 0; for (let i = 1; i + 1 < args.length; i += 2) { const field = String(args[i]); if (!hash.has(field)) added++; hash.set(field, String(args[i + 1])); } setLocal(key, 'hash', hash, item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return added; }
     case 'HMGET': { const hash = item?.type === 'hash' ? item.value : new Map(); return args.slice(1).map((field) => hash.get(String(field)) ?? null); }
@@ -179,6 +181,12 @@ export async function setString(key, value, ttlSeconds = null, nx = false) { con
 export async function getString(key) { return command(['GET', key]); }
 export async function deleteKeys(...keys) { return keys.length ? command(['DEL', ...keys]) : 0; }
 export async function increment(key, amount = 1) { return command(['INCRBY', key, String(amount)]); }
+const ADD_SET_MEMBER_LUA = `
+local added = redis.call('SADD', KEYS[1], ARGV[1])
+local ttl = tonumber(ARGV[2])
+if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end
+return added
+`;
 const PUSH_TRIM_LUA = `
 redis.call('LPUSH', KEYS[1], ARGV[1])
 redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
@@ -191,8 +199,11 @@ export async function listPushTrim(key, event, keep = 500) {
 }
 export async function listRange(key, start = 0, end = 99) { return command(['LRANGE', key, String(start), String(end)]); }
 export async function expire(key, seconds) { return command(['EXPIRE', key, String(seconds)]); }
-export async function setAdd(key, member, ttlSeconds = null) { const result = await command(['SADD', key, String(member)]); if (ttlSeconds) await expire(key, ttlSeconds); return result; }
+export async function setAdd(key, member, ttlSeconds = null) { const ttl = Math.max(0, Math.min(31536000, Math.floor(Number(ttlSeconds) || 0))); if (!redisConfigured()) { if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.'); warnFallback(); const result = await localCommand(['SADD', key, String(member)]); if (ttl) await localCommand(['EXPIRE', key, String(ttl)]); return result; } return command(['EVAL', ADD_SET_MEMBER_LUA, '1', key, String(member), String(ttl)]); }
 export async function setMembers(key) { return command(['SMEMBERS', key]); }
+export async function setCard(key) { return command(['SCARD', key]); }
+export async function getStrings(...keys) { if (!keys.length) return []; const result = await command(['MGET', ...keys.map(String)]); return Array.isArray(result) ? result : []; }
+export async function setRemoveMany(key, members = []) { const bounded = members.slice(0, 2000).map(String); return bounded.length ? command(['SREM', key, ...bounded]) : 0; }
 export async function hashSet(key, values) { const args = ['HSET', key]; for (const [field, value] of Object.entries(values)) args.push(field, String(value)); return command(args); }
 export async function hashGetMany(key, ...fields) { return command(['HMGET', key, ...fields]); }
 export async function isUsingUpstash() { return redisConfigured(); }
@@ -200,19 +211,40 @@ export async function pingRedis() { return command(['PING']); }
 export function getRedisConfigurationStatus() { const hasUrl = Boolean(process.env.UPSTASH_REDIS_REST_URL); const hasToken = Boolean(process.env.UPSTASH_REDIS_REST_TOKEN); return { configured: hasUrl && hasToken, hasUrl, hasToken, mode: hasUrl && hasToken ? 'upstash' : (localModeAllowed() ? 'ephemeral-local' : 'unconfigured') }; }
 
 export async function recordProjectEvent(projectId, event, { threat = false, countRequest = true } = {}) {
-  const keep = Math.max(100, Math.min(1000, Number(process.env.ARIX_EVENT_RETENTION) || 500)); const kind = threat ? 'threat_logs' : 'live_visitors'; const key = `arix:${kind}:${projectId}`; const safeEvent = event && typeof event === 'object' ? event : { type: 'UNKNOWN_EVENT' };
-  await listPushTrim(key, safeEvent, keep); const metrics = `arix:metrics:${projectId}`;
-  if (countRequest) await increment(`${metrics}:total_requests`, 1);
-  if (threat && safeEvent.blocked !== false) await increment(`${metrics}:blocked_attacks`, 1);
-  if (safeEvent.type === 'TRAPPED_HACKER') await increment(`${metrics}:trapped_hackers`, 1);
-  if (threat) { const { appendAuditEvent } = await import('./audit.js'); await appendAuditEvent(projectId, safeEvent); }
+  const keep = Math.max(100, Math.min(1000, Number(process.env.ARIX_EVENT_RETENTION) || 500));
+  const kind = threat ? 'threat_logs' : 'live_visitors';
+  const safeEvent = event && typeof event === 'object' ? event : { type: 'UNKNOWN_EVENT' };
+  const metrics = `arix:metrics:${projectId}`;
+  const commands = [
+    ['LPUSH', `arix:${kind}:${projectId}`, JSON.stringify(safeEvent)],
+    ['LTRIM', `arix:${kind}:${projectId}`, '0', String(keep - 1)]
+  ];
+  if (countRequest) commands.push(['INCRBY', `${metrics}:total_requests`, '1']);
+  if (threat && safeEvent.blocked !== false) commands.push(['INCRBY', `${metrics}:blocked_attacks`, '1']);
+  if (safeEvent.type === 'TRAPPED_HACKER') commands.push(['INCRBY', `${metrics}:trapped_hackers`, '1']);
+  if (threat) {
+    const digest = createHash('sha256').update(JSON.stringify({ projectId, event: safeEvent })).digest('hex');
+    const auditRow = JSON.stringify({ hash: digest, timestamp: Date.now(), type: String(safeEvent.type || 'SECURITY_EVENT').slice(0, 64) });
+    commands.push(['LPUSH', `arix:audit:pending:${projectId}`, auditRow], ['LTRIM', `arix:audit:pending:${projectId}`, '0', '9999'], ['SADD', 'arix:audit:projects', String(projectId)]);
+  }
   const analytics = await import('./analytics.js');
-  if (analytics.analyticsConfigured()) { await setAdd('arix:analytics:projects', projectId); await listPushTrim(`arix:analytics:queue:${projectId}`, safeEvent, Math.max(5000, Math.min(100000, Number(process.env.ARIX_ANALYTICS_QUEUE_RETENTION) || 50000))); }
+  if (analytics.analyticsConfigured()) {
+    const queueLimit = Math.max(5000, Math.min(100000, Number(process.env.ARIX_ANALYTICS_QUEUE_RETENTION) || 50000));
+    commands.push(['SADD', 'arix:analytics:projects', String(projectId)], ['LPUSH', `arix:analytics:queue:${projectId}`, JSON.stringify(safeEvent)], ['LTRIM', `arix:analytics:queue:${projectId}`, '0', String(queueLimit - 1)]);
+  }
+  // One durable Redis pipeline replaces multiple sequential REST round-trips.
+  await pipeline(commands);
 }
 
 export async function recordApiTelemetryEvent(projectId, event) {
-  await increment(`arix:metrics:${projectId}:total_requests`, 1); const analytics = await import('./analytics.js');
-  if (analytics.analyticsConfigured()) { await setAdd('arix:analytics:projects', projectId); await listPushTrim(`arix:analytics:queue:${projectId}`, event, Math.max(5000, Math.min(100000, Number(process.env.ARIX_ANALYTICS_QUEUE_RETENTION) || 50000))); }
+  const metrics = `arix:metrics:${projectId}`;
+  const commands = [['INCRBY', `${metrics}:total_requests`, '1']];
+  const analytics = await import('./analytics.js');
+  if (analytics.analyticsConfigured()) {
+    const queueLimit = Math.max(5000, Math.min(100000, Number(process.env.ARIX_ANALYTICS_QUEUE_RETENTION) || 50000));
+    commands.push(['SADD', 'arix:analytics:projects', String(projectId)], ['LPUSH', `arix:analytics:queue:${projectId}`, JSON.stringify(event)], ['LTRIM', `arix:analytics:queue:${projectId}`, '0', String(queueLimit - 1)]);
+  }
+  await pipeline(commands);
 }
 
 export async function getProjectDashboardSnapshot(projectId) {
@@ -257,6 +289,60 @@ local rows = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
 if #rows > 0 then redis.call('LTRIM', KEYS[1], #rows, -1) end
 return rows
 `;
+const RESOURCE_VELOCITY_LUA = `
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local resourceId = ARGV[3]
+local numericId = tonumber(resourceId)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+redis.call('ZADD', KEYS[1], now, resourceId)
+redis.call('PEXPIRE', KEYS[1], window + 60000)
+local distinct = redis.call('ZCARD', KEYS[1])
+local sequential = 0
+if numericId then
+  local last = tonumber(redis.call('GET', KEYS[2]))
+  local previous = tonumber(redis.call('GET', KEYS[3])) or 0
+  if last and (numericId - last == 1 or numericId - last == -1) then sequential = previous + 1 end
+  redis.call('SET', KEYS[2], numericId, 'PX', window + 60000)
+  redis.call('SET', KEYS[3], sequential, 'PX', window + 60000)
+else
+  redis.call('DEL', KEYS[2], KEYS[3])
+end
+return {distinct, sequential}
+`;
+
+/** Atomically records distinct resource IDs and consecutive numeric-ID deltas. */
+export async function trackResourceVelocity(key, resourceId, windowMs = 60000) {
+  if (typeof key !== 'string' || !key || key.length > 480) throw new TypeError('A valid resource velocity key is required.');
+  const member = String(resourceId).slice(0, 80);
+  const period = Math.max(1000, Math.min(86400000, Math.floor(Number(windowMs) || 60000)));
+  const now = Date.now();
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.');
+    warnFallback();
+    const zsetItem = getLocal(key);
+    const zset = zsetItem?.type === 'zset' ? zsetItem.value : new Map();
+    for (const [id, score] of zset) if (score <= now - period) zset.delete(id);
+    zset.set(member, now);
+    setLocal(key, 'zset', zset, Math.ceil((period + 60000) / 1000));
+    let sequential = 0;
+    if (/^\d{1,20}$/.test(member)) {
+      const last = getLocal(`${key}:last`);
+      const previous = getLocal(`${key}:seq`);
+      const current = Number(member);
+      if (last && (current - Number(last.value) === 1 || current - Number(last.value) === -1)) sequential = Number(previous?.value || 0) + 1;
+      setLocal(`${key}:last`, 'string', String(current), Math.ceil((period + 60000) / 1000));
+      setLocal(`${key}:seq`, 'string', String(sequential), Math.ceil((period + 60000) / 1000));
+    } else {
+      localStore.delete(`${key}:last`); localStore.delete(`${key}:seq`);
+    }
+    return { distinct: zset.size, sequential };
+  }
+  const result = await command(['EVAL', RESOURCE_VELOCITY_LUA, '3', key, `${key}:last`, `${key}:seq`, String(now), String(period), member]);
+  if (!Array.isArray(result) || result.length < 2) throw new Error('Invalid resource velocity response.');
+  return { distinct: Math.max(0, Number(result[0]) || 0), sequential: Math.max(0, Number(result[1]) || 0) };
+}
+
 export async function listPopBatch(key, count = 500) {
   const bounded = Math.max(1, Math.min(1000, Math.floor(Number(count) || 500)));
   if (!redisConfigured()) { if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.'); warnFallback(); const item = getLocal(key); if (!item || item.type !== 'list') return []; return item.value.splice(0, bounded); }

@@ -1,8 +1,9 @@
-import { webcrypto, timingSafeEqual } from 'node:crypto';
+import { webcrypto, timingSafeEqual, createHmac } from 'node:crypto';
 import { setString } from './redis.js';
 
 const cryptoApi = globalThis.crypto ?? webcrypto;
 const encoder = new TextEncoder();
+const dpopReplayRing = globalThis.__ARIX_DPOP_REPLAY_RING__ ??= new Map();
 
 export function base64urlEncode(input) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
@@ -56,6 +57,84 @@ export function getMasterSecret() {
   return globalThis.__ARIX_LOCAL_MASTER_SECRET__;
 }
 
+const RESOURCE_ID_KEYS = new Set(['id', 'orderid', 'docid', 'documentid', 'accountid', 'invoiceid', 'paymentid', 'resourceid']);
+const OWNER_ID_KEYS = new Set(['userid', 'user_id', 'ownerid', 'owner_id', 'accountid', 'customerid']);
+
+/** Deterministic user-bound capability marker. Requires the existing ARIX_MASTER_SECRET. */
+export function sealResourceId(resourceId, identity) {
+  const id = String(resourceId);
+  const subject = String(identity || '').trim();
+  if (!subject || subject.toLowerCase() === 'anonymous' || id.length < 1 || id.length > 128 || /[~/\\]/.test(id)) throw new Error('A stable authenticated identity and a safe resource ID are required.');
+  const mac = createHmac('sha256', getMasterSecret()).update(`arix-capability-v1:${subject}:${id}`).digest('hex').slice(0, 32);
+  return `${id}~${mac}`;
+}
+
+export function verifyResourceId(sealedId, identity) {
+  if (typeof sealedId !== 'string' || typeof identity !== 'string' || !identity.trim()) return null;
+  const match = sealedId.match(/^(.{1,128})~([a-f0-9]{32})$/i);
+  if (!match || /[~/\\]/.test(match[1])) return null;
+  try {
+    const expected = sealResourceId(match[1], identity).split('~').at(-1);
+    const actual = Buffer.from(match[2].toLowerCase(), 'hex');
+    const wanted = Buffer.from(expected, 'hex');
+    return actual.length === wanted.length && timingSafeEqual(actual, wanted) ? match[1] : null;
+  } catch { return null; }
+}
+
+export function sealResourceIdsInPayload(payload, identity, depth = 0) {
+  if (depth > 24 || payload === null || typeof payload !== 'object') return payload;
+  if (Array.isArray(payload)) return payload.map((value) => sealResourceIdsInPayload(value, identity, depth + 1));
+  const output = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (RESOURCE_ID_KEYS.has(key.toLowerCase()) && (typeof value === 'string' || typeof value === 'number') && String(value).length <= 128 && !String(value).includes('~')) {
+      try { output[key] = sealResourceId(value, identity); } catch { output[key] = value; }
+    } else output[key] = sealResourceIdsInPayload(value, identity, depth + 1);
+  }
+  return output;
+}
+
+/** Returns only an ownership mismatch; it never guesses ownership from arbitrary fields. */
+export function findOwnershipMismatch(payload, identity, additionalFields = []) {
+  const subject = String(identity || '').trim();
+  if (!subject || subject.toLowerCase() === 'anonymous' || !payload || typeof payload !== 'object') return null;
+  const fields = new Set([...OWNER_ID_KEYS, ...(Array.isArray(additionalFields) ? additionalFields.map((field) => String(field).toLowerCase()) : [])]);
+  const emailIdentity = subject.includes('@');
+  if (emailIdentity) fields.add('email');
+  const candidates = [payload, ...(Array.isArray(payload.data) ? payload.data.slice(0, 100) : []), ...(Array.isArray(payload.records) ? payload.records.slice(0, 100) : [])];
+  for (const record of candidates) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+    for (const [key, value] of Object.entries(record)) {
+      if (!fields.has(key.toLowerCase()) || value === null || value === undefined || typeof value === 'object') continue;
+      const left = String(value).trim();
+      const matches = key.toLowerCase() === 'email' ? left.toLowerCase() === subject.toLowerCase() : left === subject;
+      if (!matches) return { field: key, expectedIdentity: subject.slice(0, 80) };
+    }
+  }
+  return null;
+}
+
+export function rewriteCapabilityPath(url, identity, { requireSealed = true, idPattern = null } = {}) {
+  const parsed = new URL(String(url), 'https://arixshield.invalid');
+  let invalid = false;
+  const segments = parsed.pathname.split('/');
+  for (let index = 0; index < segments.length; index++) {
+    let decoded;
+    try { decoded = decodeURIComponent(segments[index]); } catch { invalid = true; break; }
+    if (!decoded.includes('~')) {
+      let looksLikeResourceId = /^\d{1,20}$/.test(decoded) || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded);
+      if (idPattern instanceof RegExp) { idPattern.lastIndex = 0; looksLikeResourceId ||= idPattern.test(decoded); }
+      if (requireSealed && looksLikeResourceId) invalid = true;
+      continue;
+    }
+    const clean = verifyResourceId(decoded, identity);
+    if (clean === null) { invalid = true; break; }
+    segments[index] = encodeURIComponent(clean);
+  }
+  parsed.pathname = segments.join('/');
+  const rewritten = `${parsed.pathname}${parsed.search}`;
+  return { url: rewritten, invalid };
+}
+
 export async function derivePassword(password, salt = randomToken(16), iterations = 240000) {
   const material = await cryptoApi.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
   const bits = await cryptoApi.subtle.deriveBits({ name: 'PBKDF2', salt: base64urlDecode(salt), iterations, hash: 'SHA-256' }, material, 256);
@@ -92,7 +171,14 @@ export async function verifyDpopProof({ proof, method, url, projectId, redisGetS
     const signature = base64urlDecode(parts[2]);
     const verified = await cryptoApi.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, signature, signingInput);
     if (!verified) return { valid: false, reason: 'DPOP_SIGNATURE_INVALID' };
-    const replayKey = `arix:dpop:${projectId}:${await sha256Hex(payload.jti)}`;
+    const jtiHash = await sha256Hex(payload.jti);
+    const localReplayKey = `${projectId}:${jtiHash}`;
+    const nowMs = Date.now();
+    for (const [key, expiry] of dpopReplayRing) if (expiry <= nowMs) dpopReplayRing.delete(key);
+    if (dpopReplayRing.has(localReplayKey)) return { valid: false, reason: 'DPOP_REPLAY' };
+    dpopReplayRing.set(localReplayKey, nowMs + 15000);
+    if (dpopReplayRing.size > 4096) dpopReplayRing.delete(dpopReplayRing.keys().next().value);
+    const replayKey = `arix:dpop:${projectId}:${jtiHash}`;
     const inserted = await redisGetSet(replayKey, '1', 120, true);
     if (inserted !== 'OK') return { valid: false, reason: 'DPOP_REPLAY' };
     return { valid: true, thumbprint };

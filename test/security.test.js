@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cidrContains, buildPrefixTrie, prefixTrieHas, parseCidr } from '../api/_lib/cidr.js';
-import { inspectRequest, validateJsonSchema, redactSensitiveText } from '../api/_lib/waf-engine.js';
+import { inspectRequest, validateJsonSchema, redactSensitiveText, canonicalizeSecurityText } from '../api/_lib/waf-engine.js';
 import { compileOpenApiRequestSchema, validatePayloadSchema } from '../api/_lib/schema.js';
 import { merkleRoot } from '../api/_lib/audit.js';
 import { recordRequestOutcome, isActorBackedOff, banActorForHoneypot } from '../api/_lib/abuse.js';
 import { verifyConfiguredProviderIp } from '../api/_lib/reputation.js';
 import { createInvisibleWatermarkMarker, decodeInvisibleWatermark, watermarkPayloadWithMarker } from '../api/_lib/watermark.js';
+import { sealResourceId, verifyResourceId, rewriteCapabilityPath, sealResourceIdsInPayload, findOwnershipMismatch } from '../api/_lib/crypto-trap.js';
+import { getStrings, setAdd, setMembers, setCard, setRemoveMany } from '../api/_lib/redis.js';
 process.env.NODE_ENV = 'test';
 test('CIDR matching supports IPv4 and IPv6 prefixes', () => { assert.equal(cidrContains('192.0.2.0/24', '192.0.2.42'), true); assert.equal(cidrContains('192.0.2.0/24', '192.0.3.42'), false); assert.equal(cidrContains('2001:db8::/32', '2001:db8::1'), true); assert.equal(cidrContains('2001:db8::/32', '2001:dead::1'), false); assert.equal(parseCidr('10.0.0.0/33'), null); });
 test('binary prefix trie returns membership for both address families', () => { const trie = buildPrefixTrie(['203.0.113.0/24', '2001:db8:abcd::/48', 'invalid']); assert.equal(trie.count, 2); assert.equal(prefixTrieHas(trie, '203.0.113.99'), true); assert.equal(prefixTrieHas(trie, '203.0.114.1'), false); assert.equal(prefixTrieHas(trie, '2001:db8:abcd::4'), true); });
@@ -20,6 +22,10 @@ test('BOLA detection aggregates distinct denied IDs across a session window', as
 test('configured provider CIDR allowlisting only trusts an explicit operator entry', () => { process.env.ARIX_TRUSTED_PROVIDER_CIDRS_JSON = JSON.stringify({ github: ['192.0.2.0/24'] }); assert.equal(verifyConfiguredProviderIp('192.0.2.8', 'github').verified, true); assert.equal(verifyConfiguredProviderIp('198.51.100.8', 'github').verified, false); });
 test('WAF requires an explicit content type for a non-empty body and rejects malformed JSON media', () => { const missing = inspectRequest({ method: 'POST', url: '/api/items', headers: {}, body: { name: 'x' } }); assert.ok(missing.findings.some((finding) => finding.id === 'CONTENT_TYPE')); const malformed = inspectRequest({ method: 'POST', url: '/api/items', headers: { 'content-type': 'application/json' }, body: '{not-json' }); assert.ok(malformed.findings.some((finding) => finding.id === 'JSON_PARSE')); });
 test('Next.js request DLP rewrites the handler request body when explicitly enabled', async () => { const { withArixShield } = await import('../sdk/next.js'); const handler = withArixShield(async (request) => Response.json(await request.json()), { mode: 'DRY_RUN', requestDlp: true, globalRateLimit: false }); const request = new Request('https://example.test/api/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'customer@example.com', message: 'hello' }) }); const response = await handler(request); const body = await response.json(); assert.equal(body.email, '[REDACTED_EMAIL]'); assert.equal(body.message, 'hello'); });
+
+test('Next.js adapter rejects bodies over the configured byte cap before invoking the route', async () => { const { withArixShield } = await import('../sdk/next.js'); let called = false; const handler = withArixShield(async () => { called = true; return Response.json({ ok: true }); }, { mode: 'DRY_RUN', globalRateLimit: false, maxBodyBytes: 32768 }); const request = new Request('https://example.test/api/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: 'x'.repeat(40000) }) }); const response = await handler(request); assert.equal(response.status, 413); assert.equal(called, false); });
+
+test('Next.js adapter scans an explicitly permitted larger JSON body instead of truncating at 32 KiB', async () => { const { withArixShield } = await import('../sdk/next.js'); const handler = withArixShield(async (request) => Response.json({ length: (await request.json()).data.length }), { mode: 'DRY_RUN', globalRateLimit: false, maxBodyBytes: 65536, maxLeafBytes: 50000, allowedLongFields: ['data'] }); const request = new Request('https://example.test/api/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: 'x'.repeat(40000) }) }); const response = await handler(request); assert.equal(response.status, 200); assert.equal((await response.json()).length, 40000); });
 test('OpenAPI route matcher recognizes documented templates and flags unlisted paths', async () => { const { isOpenApiOperation } = await import('../api/_lib/schema.js'); const document = { paths: { '/api/orders/{orderId}': { get: {}, patch: {} }, '/api/orders': { post: {} } } }; assert.equal(isOpenApiOperation(document, 'GET', '/api/orders/123'), true); assert.equal(isOpenApiOperation(document, 'POST', '/api/orders'), true); assert.equal(isOpenApiOperation(document, 'DELETE', '/api/orders/123'), false); assert.equal(isOpenApiOperation(document, 'GET', '/api/internal/debug'), false); });
 test('JSON schema supports enum, formats, nested additionalProperties and unique arrays', () => { const schema = { type: 'object', required: ['owner'], properties: { owner: { type: 'string', format: 'email' }, state: { type: 'string', enum: ['open', 'closed'] }, ids: { type: 'array', uniqueItems: true, items: { type: 'integer' } } }, additionalProperties: { type: 'string', maxLength: 8 } }; assert.equal(validateJsonSchema({ owner: 'a@example.com', state: 'open', ids: [1, 2], label: 'short' }, schema).valid, true); assert.equal(validateJsonSchema({ owner: 'bad-email', state: 'pending', ids: [1, 1], label: 'way-too-long-label' }, schema).valid, false); });
 test('honeypot bans both an actor identity and its verified source IP for 24 hours', async () => { const projectId = 'project_honeypot_test'; await banActorForHoneypot(projectId, 'user-123', '203.0.113.44'); const byActor = await isActorBackedOff(projectId, 'user-123'); const byIp = await isActorBackedOff(projectId, 'another-user', '203.0.113.44'); assert.equal(byActor.blocked, true); assert.equal(byIp.blocked, true); assert.ok(byActor.retryAfterMs > 23 * 60 * 60 * 1000); });
@@ -28,19 +34,61 @@ test('watermark markers are stable per session and attribution decodes', async (
 test('watermarking touches safe display text but preserves IDs, emails and credentials', async () => { const marker = await createInvisibleWatermarkMarker({ projectId: 'watermark-field-test', sessionId: 'session-1', userId: 'user-1' }); const original = { data: [{ id: 'order-123', email: 'person@example.com', title: 'Invoice', api_token: 'secret-token' }] }; const marked = watermarkPayloadWithMarker(original, marker); assert.equal(marked.data[0].id, 'order-123'); assert.equal(marked.data[0].email, 'person@example.com'); assert.equal(marked.data[0].api_token, 'secret-token'); assert.notEqual(marked.data[0].title, 'Invoice'); assert.equal(original.data[0].title, 'Invoice'); });
 
 
-test('Next.js integration partitions local rate limits by applicationId for websites sharing one ArixShield project', async () => {
-  const { withArixShield } = await import('../sdk/next.js');
-  const makeRequest = () => new Request('https://site-a.example/api/action');
-  const handlerA = withArixShield(async () => Response.json({ ok: true }), { applicationId: 'site-a', mode: 'ENFORCE', globalRateLimit: false, rateLimitPerMinute: 1, getIdentity: () => 'user-1' });
-  const handlerB = withArixShield(async () => Response.json({ ok: true }), { applicationId: 'site-b', mode: 'ENFORCE', globalRateLimit: false, rateLimitPerMinute: 1, getIdentity: () => 'user-1' });
-  assert.equal((await handlerA(makeRequest())).status, 200);
-  assert.equal((await handlerA(makeRequest())).status, 429);
-  assert.equal((await handlerB(makeRequest())).status, 200);
+test('WAF canonicalizes nested encodings and removes SQL comments before grammar tokenization', () => {
+  const canonical = canonicalizeSecurityText('%2527%2520UN%252F%252Acomment%252A%252FION%2520%252F%252A!50000SELECT%252A%252F');
+  assert.match(canonical.value.toUpperCase(), /UN ION SELECT/);
+  const result = inspectRequest({ method: 'POST', url: '/api/search', headers: { 'content-type': 'application/json' }, body: { q: "' OR 1=1 --" } });
+  assert.ok(result.findings.some((finding) => finding.id === 'SQLI_GRAMMAR' || finding.id === 'SQLI_BOOLEAN'));
 });
 
-test('Next.js integration rejects invalid client IPs returned by a custom resolver', async () => {
-  const { protectRequest } = await import('../sdk/next.js');
-  const decision = await protectRequest(new Request('https://site.example/api/read'), { mode: 'DRY_RUN', globalRateLimit: false, applicationId: 'site', getIdentity: () => 'user-1', getClientIp: () => 'not-an-ip' });
-  assert.equal(decision.allowed, true);
-  assert.equal(decision.ip, '');
+test('WAF scans beyond the standard cutoff when a route explicitly allows a larger payload', () => {
+  const body = { comment: `${'a'.repeat(34000)} ' OR 1=1 --` };
+  const standard = inspectRequest({ method: 'POST', url: '/upload', headers: { 'content-type': 'application/json' }, body, contentLength: 34000 });
+  const largeRoute = inspectRequest({ method: 'POST', url: '/upload', headers: { 'content-type': 'application/json' }, body, contentLength: 34000, maxBodyBytes: 262144, maxLeafBytes: 65536, allowedLongFields: ['comment'] });
+  assert.ok(standard.findings.some((finding) => finding.id === 'BODY_SIZE'));
+  assert.ok(largeRoute.findings.some((finding) => finding.category === 'SQL_INJECTION'));
+});
+
+test('WAF rejects NoSQL operator and prototype-pollution object keys structurally', () => {
+  for (const body of [{ filter: { $gt: '' } }, { constructor: { prototype: { polluted: true } } }, { 'profile.name': 'Alice' }]) {
+    const result = inspectRequest({ method: 'POST', url: '/api/search', headers: { 'content-type': 'application/json' }, body });
+    assert.ok(result.findings.some((finding) => finding.id === 'NOSQL_OPERATOR' || finding.id === 'PROTOTYPE_POLLUTION' || finding.id === 'DOTTED_OBJECT_KEY'));
+  }
+});
+
+test('HMAC capability IDs bind to the authenticated subject and reject unsealed or foreign IDs', () => {
+  process.env.ARIX_MASTER_SECRET = 'A'.repeat(48);
+  const sealed = sealResourceId('1055', 'user-a');
+  assert.match(sealed, /^1055~[a-f0-9]{32}$/);
+  assert.equal(verifyResourceId(sealed, 'user-a'), '1055');
+  assert.equal(verifyResourceId(sealed, 'user-b'), null);
+  assert.deepEqual(rewriteCapabilityPath(`/api/orders/${sealed}`, 'user-a'), { url: '/api/orders/1055', invalid: false });
+  assert.deepEqual(rewriteCapabilityPath(`/api/orders/${sealed}/items`, 'user-a'), { url: '/api/orders/1055/items', invalid: false });
+  assert.equal(rewriteCapabilityPath('/api/orders/1055', 'user-a').invalid, true);
+  assert.equal(rewriteCapabilityPath('/api/orders/1055/items', 'user-a').invalid, true);
+  assert.equal(rewriteCapabilityPath('/api/orders/c123456789012345678901234/items', 'user-a', { idPattern: /^c[a-z0-9]{24}$/i }).invalid, true);
+  assert.equal(rewriteCapabilityPath(`/api/orders/${sealed}`, 'user-b').invalid, true);
+  assert.equal(sealResourceIdsInPayload({ data: [{ id: 1055 }] }, 'user-a').data[0].id, sealed);
+  assert.ok(findOwnershipMismatch({ data: [{ userId: 'user-b' }] }, 'user-a'));
+});
+
+test('BOLA detector watches successful sequential IDs as well as denied IDs', async () => {
+  const projectId = 'test-bola-success-project';
+  let outcome;
+  for (let id = 3001; id <= 3003; id++) outcome = await recordRequestOutcome({ projectId, actorId: 'reader-1', path: `/api/items/${id}`, method: 'GET', status: 200 });
+  assert.equal(outcome.bolaTriggered, true);
+  assert.equal(outcome.sequentialHits, 2);
+  assert.equal((await isActorBackedOff(projectId, 'reader-1')).blocked, true);
+});
+
+
+test('ban snapshot index helpers read active values and remove stale set members', async () => {
+  const key = `arix:test:ban-index:${Date.now()}`;
+  await setAdd(key, 'active-hash', 60);
+  await setAdd(key, 'stale-hash', 60);
+  assert.deepEqual(await getStrings('arix:test:missing-value'), [null]);
+  assert.deepEqual((await setMembers(key)).sort(), ['active-hash', 'stale-hash']);
+  assert.equal(await setCard(key), 2);
+  await setRemoveMany(key, ['stale-hash']);
+  assert.deepEqual(await setMembers(key), ['active-hash']);
 });

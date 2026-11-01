@@ -1,10 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { getString, setString, trackWindowEvent } from './redis.js';
+import { getString, setString, setAdd, trackWindowEvent, trackResourceVelocity } from './redis.js';
 import { sha256Hex } from './crypto-trap.js';
 import { recordProjectEvent } from './redis.js';
 
 const ID_SEGMENT = /^(?:\d{1,20}|[0-9a-f]{8}-[0-9a-f-]{27,})$/i;
+const localIpBlocks = globalThis.__ARIX_LOCAL_IP_BLOCKS__ ??= new Map();
+
+export function isIpLocallyBlocked(projectId, ip) {
+  const key = `${projectId}:${String(ip || '')}`; const until = Number(localIpBlocks.get(key) || 0);
+  if (until <= Date.now()) { if (until) localIpBlocks.delete(key); return false; }
+  return true;
+}
+
+function cacheLocalIpBlock(projectId, ip, until) {
+  if (!isIP(String(ip || ''))) return; const key = `${projectId}:${ip}`; localIpBlocks.set(key, until);
+  if (localIpBlocks.size > 10000) for (const [id, expiry] of localIpBlocks) if (expiry <= Date.now()) localIpBlocks.delete(id);
+}
 
 function normalizeRoute(path) {
   return String(path || '/').split('?')[0].split('/').map((part) => ID_SEGMENT.test(part) ? ':id' : part).join('/').slice(0, 220) || '/';
@@ -46,16 +58,26 @@ export async function isActorBackedOff(projectId, actorId, ip = '') {
   return { blocked: true, actorHash, retryAfterMs: until - Date.now() };
 }
 
+export function isReservedKnuthTrapId(value) {
+  if (process.env.ARIX_RESERVED_TRAP_ID_SPACE !== 'true' || !/^\d{1,20}$/.test(String(value))) return false;
+  try { return (BigInt(value) * 2654435761n) % 97n === 0n; } catch { return false; }
+}
+
 export async function banActorForHoneypot(projectId, actorId, ip = '', durationMs = 24 * 60 * 60 * 1000) {
   const boundedDuration = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(durationMs) || 24 * 60 * 60 * 1000));
   const until = Date.now() + boundedDuration;
   const identity = String(actorId || '').trim();
   const hasStableActor = identity.length > 0 && identity.toLowerCase() !== 'anonymous';
   const actorHash = hasStableActor ? await sha256Hex(`${projectId}:${identity.slice(0, 180)}`) : null;
-  if (actorHash) await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), Math.ceil(boundedDuration / 1000));
+  if (actorHash) {
+    await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), Math.ceil(boundedDuration / 1000));
+    await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, Math.ceil(boundedDuration / 1000));
+  }
   if (isIP(String(ip || ''))) {
     const ipHash = await sha256Hex(`${projectId}:${String(ip)}`);
     await setString(`arix:abuse:ban:${projectId}:${ipHash}`, String(until), Math.ceil(boundedDuration / 1000));
+    cacheLocalIpBlock(projectId, String(ip), until);
+    await setAdd(`arix:abuse:ban-ips:${projectId}`, ipHash, Math.ceil(boundedDuration / 1000));
   }
   return { actorHash, until };
 }
@@ -77,15 +99,31 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
   if (unauthorizedCount >= 8 && requestCount >= 10 && unauthorizedCount / requestCount >= 0.4) {
     backoffMs = Math.min(5 * 60 * 1000, 2000 * (2 ** Math.min(7, unauthorizedCount - 8)));
     await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(now + backoffMs), Math.ceil(backoffMs / 1000));
+    await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, Math.ceil(backoffMs / 1000));
   }
 
   let bolaCount = 0;
   let bolaTriggered = false;
-  const objectId = (numericStatus === 403 || numericStatus === 404) ? extractResourceId(path) : null;
+  const objectId = [200, 403, 404].includes(numericStatus) ? extractResourceId(path) : null;
+  let sequentialHits = 0;
+  let reservedTrap = false;
   if (objectId) {
-    bolaCount = await trackWindowEvent(`arix:abuse:bola:${projectId}:${actorHash}`, objectId, 60000);
-    bolaTriggered = bolaCount >= Math.max(8, Number(process.env.ARIX_BOLA_DISTINCT_ID_THRESHOLD) || 12);
-    if (bolaTriggered) await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(now + 10 * 60 * 1000), 600);
+    const velocity = await trackResourceVelocity(`arix:abuse:resource:${projectId}:${actorHash}`, objectId, 60000);
+    bolaCount = velocity.distinct;
+    sequentialHits = velocity.sequential;
+    reservedTrap = isReservedKnuthTrapId(objectId);
+    const threshold = Math.max(8, Number(process.env.ARIX_BOLA_DISTINCT_ID_THRESHOLD) || 12);
+    const successEnumeration = numericStatus === 200 && (bolaCount > threshold || sequentialHits >= 2);
+    const deniedEnumeration = [403, 404].includes(numericStatus) && bolaCount >= threshold;
+    bolaTriggered = successEnumeration || deniedEnumeration || (numericStatus === 200 && reservedTrap);
+    if (bolaTriggered) {
+      if (reservedTrap) await banActorForHoneypot(projectId, effectiveActor, ip, 24 * 60 * 60 * 1000);
+      else {
+        const until = now + 10 * 60 * 1000;
+        await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), 600);
+        await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, 600);
+      }
+    }
   }
 
   const catalogEntry = `${String(method).toUpperCase().slice(0, 12)} ${normalizedRoute}`;
@@ -116,13 +154,15 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
 
   if (backoffMs || bolaTriggered || geoVelocity?.detected) {
     const event = {
-      type: bolaTriggered ? 'BOLA_ENUMERATION' : backoffMs ? 'CREDENTIAL_STUFFING_BACKOFF' : 'GEO_VELOCITY_ANOMALY',
+      type: reservedTrap ? 'BOLA_RESERVED_TRAP_ID' : bolaTriggered ? 'BOLA_ENUMERATION' : backoffMs ? 'CREDENTIAL_STUFFING_BACKOFF' : 'GEO_VELOCITY_ANOMALY',
       blocked: bolaTriggered || backoffMs > 0,
       actorHash,
       route: normalizedRoute,
       method: String(method).toUpperCase().slice(0, 12),
       status: numericStatus,
       bolaDistinctIds: bolaCount,
+      sequentialHits,
+      reservedTrap,
       unauthorizedCount,
       requestCount,
       backoffMs,
@@ -132,7 +172,7 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
     await recordProjectEvent(projectId, event, { threat: true, countRequest: false });
   }
 
-  return { actorHash, requestCount, unauthorizedCount, unauthorizedRatio: requestCount ? unauthorizedCount / requestCount : 0, backoffMs, bolaDistinctIds: bolaCount, bolaTriggered, geoVelocity };
+  return { actorHash, requestCount, unauthorizedCount, unauthorizedRatio: requestCount ? unauthorizedCount / requestCount : 0, backoffMs, bolaDistinctIds: bolaCount, sequentialHits, reservedTrap, bolaTriggered, geoVelocity };
 }
 
 export function sanitizeForensicEvent(event) {

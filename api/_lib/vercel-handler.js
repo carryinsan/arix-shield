@@ -29,7 +29,7 @@ function makeResponseShim() {
   };
 }
 
-async function boundedTextBody(request) {
+async function boundedTextBody(request, maxBytes = MAX_ADAPTER_BODY_BYTES) {
   if (!request.body) return { text: '', size: 0, tooLarge: false };
   const reader = request.body.getReader();
   const chunks = [];
@@ -39,7 +39,7 @@ async function boundedTextBody(request) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_ADAPTER_BODY_BYTES) {
+      if (size > maxBytes) {
         try { await reader.cancel(); } catch { /* Request body is already rejected. */ }
         return { text: '', size, tooLarge: true };
       }
@@ -86,8 +86,9 @@ function isFetchRequest(value) {
  * the Web Request/Response contract. This keeps API behavior consistent when
  * projects are moved between Vercel Node function adapters.
  */
-export function createCompatibleHandler(handler) {
+export function createCompatibleHandler(handler, { maxBodyBytes = MAX_ADAPTER_BODY_BYTES } = {}) {
   if (typeof handler !== 'function') throw new TypeError('ArixShield handler must be a function.');
+  const bodyLimit = Math.max(1024, Math.min(MAX_ADAPTER_BODY_BYTES, Math.floor(Number(maxBodyBytes) || MAX_ADAPTER_BODY_BYTES)));
 
   return async function arixVercelHandler(request, response) {
     const requestId = makeRequestId();
@@ -108,8 +109,8 @@ export function createCompatibleHandler(handler) {
         const headers = Object.fromEntries(request.headers.entries());
         if (!headers.host) headers.host = url.host;
         if (!headers['x-forwarded-proto']) headers['x-forwarded-proto'] = url.protocol.slice(0, -1);
-        const body = await boundedTextBody(request);
-        if (body.tooLarge) headers['content-length'] = String(MAX_ADAPTER_BODY_BYTES + 1);
+        const body = await boundedTextBody(request, bodyLimit);
+        if (body.tooLarge) headers['content-length'] = String(bodyLimit + 1);
         else if (body.size > 0) {
           headers['content-length'] = String(body.size);
           nodeRequest = { method: request.method, url: `${url.pathname}${url.search}`, headers, body: body.text };

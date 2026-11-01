@@ -1,51 +1,240 @@
-const MAX_BODY_BYTES = 32768;
+const DEFAULT_MAX_BODY_BYTES = 32768;
+const ABSOLUTE_MAX_BODY_BYTES = 262144;
+const DEFAULT_MAX_LEAF_BYTES = 4096;
 const MAX_NESTING_DEPTH = 24;
 const MAX_NODES = 6000;
+const STREAM_CHUNK_BYTES = 16 * 1024;
+const STREAM_OVERLAP_BYTES = 512;
 
-const RULES = [
-  { id: 'SQLI_UNION', category: 'SQL_INJECTION', severity: 'high', pattern: /\bunion\s+(?:all\s+)?select\b|\bselect\b[\s\S]{0,80}\bfrom\b[\s\S]{0,80}\bwhere\b/i },
-  { id: 'SQLI_BOOLEAN', category: 'SQL_INJECTION', severity: 'high', pattern: /(?:'|")\s*(?:or|and)\s+\d+\s*=\s*\d+|\bor\s+['"]?1['"]?\s*=\s*['"]?1/i },
-  { id: 'SQLI_COMMENT', category: 'SQL_INJECTION', severity: 'medium', pattern: /(?:--\s|#\s|\/\*[\s\S]*?\*\/)/ },
+const NON_SQL_RULES = [
   { id: 'XSS_SCRIPT', category: 'XSS', severity: 'high', pattern: /<\s*script\b|javascript\s*:|\bon\w+\s*=\s*(?:['"]?\s*)?(?:alert|prompt|confirm)\s*\(/i },
   { id: 'XSS_HTML', category: 'XSS', severity: 'medium', pattern: /<\s*(?:iframe|object|embed|svg|math)\b[^>]*(?:onload|onerror|href|src)\s*=/i },
   { id: 'SSRF_METADATA', category: 'SSRF', severity: 'critical', pattern: /(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)/i },
   { id: 'SSRF_LOCAL', category: 'SSRF', severity: 'high', pattern: /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?/i },
   { id: 'PATH_TRAVERSAL', category: 'PATH_TRAVERSAL', severity: 'high', pattern: /(?:\.\.\/|\.\.\\|%2e%2e(?:%2f|%5c))/i },
-  { id: 'NOSQL_OPERATOR', category: 'NOSQL_INJECTION', severity: 'high', pattern: /["']?\$(?:gt|gte|lt|lte|ne|nin|where|regex|function)["']?\s*:/i },
   { id: 'COMMAND_INJECTION', category: 'COMMAND_INJECTION', severity: 'high', pattern: /(?:;\s*(?:cat|curl|wget|bash|sh|python|nc)\b|\$\([^)]*(?:curl|wget|bash|sh)|`[^`]*(?:curl|wget|bash|sh))/i },
   { id: 'PROMPT_INJECTION', category: 'PROMPT_INJECTION', severity: 'medium', pattern: /ignore\s+(?:all\s+)?previous\s+instructions|reveal\s+(?:the\s+)?system\s+prompt|developer\s+message\s*:/i }
 ];
 
-function safeStringify(value) { try { return typeof value === 'string' ? value : JSON.stringify(value); } catch { return '[unserializable]'; } }
-function walkDepth(value, depth = 0, state = { nodes: 0, tooDeep: false, tooMany: false }) {
-  state.nodes++; if (depth > MAX_NESTING_DEPTH) state.tooDeep = true; if (state.nodes > MAX_NODES) state.tooMany = true;
-  if (state.tooDeep || state.tooMany || value === null || typeof value !== 'object') return state;
-  const children = Array.isArray(value) ? value : Object.values(value);
-  for (const child of children) { walkDepth(child, depth + 1, state); if (state.tooDeep || state.tooMany) break; }
-  return state;
+const SQL_KEYWORDS = new Set([
+  'SELECT', 'UNION', 'ALL', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE',
+  'INTO', 'VALUES', 'JOIN', 'HAVING', 'ORDER', 'GROUP', 'BY', 'EXEC', 'EXECUTE', 'DECLARE', 'CAST',
+  'CONVERT', 'WAITFOR', 'CURL', 'WGET', 'BASH', 'SH', 'POWERSHELL', 'XP_CMDSHELL'
+]);
+const SQL_OPERATORS = new Set(['OR', 'AND', 'NOT', '=', '!=', '<>', '<', '>', '<=', '>=', '||', '&&']);
+const DANGEROUS_FUNCTIONS = new Set(['SLEEP', 'BENCHMARK', 'PG_SLEEP', 'DBMS_LOCK', 'CHAR', 'CHR', 'ASCII', 'EVAL', 'SYSTEM', 'Popen'.toUpperCase(), 'LOAD_FILE', 'INTO_OUTFILE']);
+const BANNED_FINGERPRINTS = new Set(['SONONC', 'SOSOS', 'KKK', 'OFN', 'OKF']);
+const SYMBOLS = new Set(["'", '"', ';', '(', ')', '{', '}', '$', '\\', '`', '<', '>', '=', '|', '&']);
+
+function safeStringify(value) {
+  try { return typeof value === 'string' ? value : JSON.stringify(value); }
+  catch { return '[unserializable]'; }
 }
 
-export function inspectRequest({ method = 'GET', url = '/', headers = {}, body = null, contentLength = 0 } = {}) {
-  const findings = []; const add = (id, category, severity, detail) => findings.push({ id, category, severity, detail: String(detail).slice(0, 180) });
+function decodeHtmlEntities(input) {
+  const named = { amp: '&', apos: "'", quot: '"', lt: '<', gt: '>', colon: ':', sol: '/', bsol: '\\', Tab: '\t', NewLine: '\n' };
+  return input.replace(/&(#(?:x[0-9a-f]{1,6}|[0-9]{1,7})|[a-zA-Z][a-zA-Z0-9]+);?/g, (whole, entity) => {
+    if (entity[0] === '#') {
+      const hex = entity[1]?.toLowerCase() === 'x';
+      const code = Number.parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
+      if (!Number.isInteger(code) || code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
+      try { return String.fromCodePoint(code); } catch { return whole; }
+    }
+    return Object.hasOwn(named, entity) ? named[entity] : whole;
+  });
+}
+
+function decodeLiteralEscapes(input) {
+  return input
+    .replace(/\\u\{([0-9a-f]{1,6})\}/gi, (whole, hex) => {
+      const code = Number.parseInt(hex, 16);
+      if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return whole;
+      try { return String.fromCodePoint(code); } catch { return whole; }
+    })
+    .replace(/\\u([0-9a-f]{4})/gi, (whole, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (whole, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+}
+
+function normalizeOnePass(input) {
+  let output = decodeLiteralEscapes(input);
+  try { if (/%[0-9a-f]{2}/i.test(output)) output = decodeURIComponent(output.replace(/\+/g, '%2B')); } catch { /* Malformed percent escapes remain visible to inspection. */ }
+  output = decodeHtmlEntities(output);
+  // Preserve the content of MySQL executable comments; remove ordinary comments.
+  output = output.replace(/\/\*!\s*\d*(.*?)\*\//gs, ' $1 ');
+  output = output.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  // Flatten quoted-string concatenation without evaluating the input.
+  for (let i = 0; i < 3; i++) {
+    const next = output.replace(/(['"])([^'"\r\n]{1,128})\1\s*(?:\+|\|\|)\s*(['"])([^'"\r\n]{1,128})\3/g, (_m, _q1, left, _q2, right) => `'${left}${right}'`);
+    if (next === output) break;
+    output = next;
+  }
+  return output.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Decode at most three layers. Still-changing input is suspicious, not silently truncated. */
+export function canonicalizeSecurityText(value) {
+  let current = String(value);
+  for (let pass = 0; pass < 3; pass++) {
+    const next = normalizeOnePass(current);
+    if (next === current) return { value: current, passes: pass, excessiveEncoding: false };
+    current = next;
+  }
+  return { value: current, passes: 3, excessiveEncoding: normalizeOnePass(current) !== current };
+}
+
+function tokenizeGrammar(input) {
+  const tokens = [];
+  const matcher = /--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/|'(?:''|\\.|[^'])*'|"(?:""|\\.|[^"])*"|0x[0-9a-f]+|\b\d+(?:\.\d+)?\b|[a-z_][a-z0-9_$]*|!=|<>|<=|>=|\|\||&&|[=<>]|[^\s]/gi;
+  let match;
+  while ((match = matcher.exec(input)) !== null) {
+    const raw = match[0];
+    if (/^(?:--|#|\/\*)/.test(raw)) { tokens.push({ type: 'C', raw }); continue; }
+    if (/^['"]/.test(raw)) { tokens.push({ type: 'S', raw }); continue; }
+    if (/^(?:0x[0-9a-f]+|\d)/i.test(raw)) { tokens.push({ type: 'N', raw }); continue; }
+    const upper = raw.toUpperCase();
+    if (SQL_OPERATORS.has(upper)) { tokens.push({ type: 'O', raw: upper }); continue; }
+    if (DANGEROUS_FUNCTIONS.has(upper)) { tokens.push({ type: 'F', raw: upper }); continue; }
+    if (SQL_KEYWORDS.has(upper)) { tokens.push({ type: 'K', raw: upper }); continue; }
+    // Identifiers followed by '(' are function-call tokens; only high-risk calls matter.
+    if (/^[a-z_][a-z0-9_$]*$/i.test(raw) && input.slice(matcher.lastIndex).match(/^\s*\(/)) {
+      tokens.push({ type: DANGEROUS_FUNCTIONS.has(upper) ? 'F' : 'I', raw: upper });
+    } else tokens.push({ type: 'I', raw: upper });
+  }
+  return tokens;
+}
+
+function grammarFindings(value) {
+  const tokens = tokenizeGrammar(value);
+  const fingerprint = tokens.map((token) => token.type).join('');
+  const findings = [];
+  if ([...BANNED_FINGERPRINTS].some((pattern) => fingerprint.includes(pattern))) {
+    findings.push({ id: 'SQLI_GRAMMAR', category: 'SQL_INJECTION', severity: 'high', detail: `Suspicious SQL/shell token grammar (${fingerprint.slice(0, 32)}).` });
+  }
+  const words = tokens.map((token) => token.raw);
+  if (words.some((word, index) => word === 'UNION' && ['SELECT'].includes(words[index + 1]) || word === 'UNION' && words[index + 1] === 'ALL' && words[index + 2] === 'SELECT' || word === 'UN' && words[index + 1] === 'ION' && words[index + 2] === 'SELECT')) {
+    findings.push({ id: 'SQLI_UNION', category: 'SQL_INJECTION', severity: 'high', detail: 'UNION-based SQL grammar detected.' });
+  }
+  if (tokens.some((token, index) => token.type === 'O' && ['OR', 'AND'].includes(token.raw) && tokens[index + 1]?.type === 'S' && tokens[index + 2]?.type === 'O' && tokens[index + 3]?.type === 'S')) {
+    findings.push({ id: 'SQLI_BOOLEAN', category: 'SQL_INJECTION', severity: 'high', detail: 'Quoted boolean SQL expression detected.' });
+  }
+  if (tokens.some((token, index) => token.type === 'O' && ['OR', 'AND'].includes(token.raw) && tokens[index + 1]?.type === 'N' && tokens[index + 2]?.type === 'O' && tokens[index + 3]?.type === 'N')) {
+    findings.push({ id: 'SQLI_BOOLEAN', category: 'SQL_INJECTION', severity: 'high', detail: 'Numeric boolean SQL expression detected.' });
+  }
+  if (tokens.some((token, index) => token.type === 'O' && ['OR', 'AND'].includes(token.raw) && tokens[index + 1]?.type === 'F')) {
+    findings.push({ id: 'SQLI_TIME_FUNCTION', category: 'SQL_INJECTION', severity: 'high', detail: 'Conditional time-delay SQL function detected.' });
+  }
+  if (tokens.some((token) => token.type === 'C')) findings.push({ id: 'SQLI_COMMENT', category: 'SQL_INJECTION', severity: 'medium', detail: 'SQL or shell comment token detected.' });
+  return findings;
+}
+
+function symbolDensityExceeded(value) {
+  const windowSize = 50;
+  if (value.length < windowSize) return false;
+  let symbols = 0;
+  for (let index = 0; index < windowSize; index++) if (SYMBOLS.has(value[index])) symbols++;
+  if (symbols > windowSize * 0.2) return true;
+  for (let index = windowSize; index < value.length; index++) {
+    if (SYMBOLS.has(value[index - windowSize])) symbols--;
+    if (SYMBOLS.has(value[index])) symbols++;
+    if (symbols > windowSize * 0.2) return true;
+  }
+  return false;
+}
+
+function inspectStructure(value, options, state, path = '$', depth = 0, add) {
+  state.nodes++;
+  if (depth > MAX_NESTING_DEPTH) { state.tooDeep = true; return; }
+  if (state.nodes > MAX_NODES) { state.tooMany = true; return; }
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'string') {
+      const bytes = new TextEncoder().encode(value).length;
+      const allowedLong = Array.isArray(options.allowedLongFields) && options.allowedLongFields.some((name) => path === name || path.endsWith(`.${name}`));
+      if (bytes > options.maxLeafBytes && !allowedLong) add('BODY_LEAF_SIZE', 'PROTOCOL', 'high', `String leaf at ${path.slice(0, 80)} exceeds ${options.maxLeafBytes} bytes.`);
+      const canonical = canonicalizeSecurityText(value);
+      if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form at ${path.slice(0, 80)}.`);
+      const text = canonical.value;
+      for (const rule of NON_SQL_RULES) if (rule.pattern.test(text)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic at ${path.slice(0, 80)}.`);
+      for (const finding of scanTextInChunks(text)) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 60)}.`);
+      if (symbolDensityExceeded(text)) add('SYMBOL_DENSITY', 'PROTOCOL', 'medium', `High structural-symbol density in a 50-character window at ${path.slice(0, 80)}.`);
+      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) add('CONTROL_CHARACTERS', 'PROTOCOL', 'medium', `Control characters detected at ${path.slice(0, 80)}.`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length && !state.tooDeep && !state.tooMany; index++) inspectStructure(value[index], options, state, `${path}[${index}]`, depth + 1, add);
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    const lower = key.toLowerCase();
+    if (key.startsWith('$')) add('NOSQL_OPERATOR', 'NOSQL_INJECTION', 'high', `NoSQL operator key detected at ${path.slice(0, 60)}.${key.slice(0, 60)}.`);
+    if (key.includes('.')) add('DOTTED_OBJECT_KEY', 'NOSQL_INJECTION', 'high', `Dotted object key detected at ${path.slice(0, 60)}.${key.slice(0, 60)}.`);
+    if (['__proto__', 'constructor', 'prototype'].includes(lower)) add('PROTOTYPE_POLLUTION', 'PROTOTYPE_POLLUTION', 'critical', `Prototype-pollution key detected at ${path.slice(0, 60)}.${key.slice(0, 60)}.`);
+    inspectStructure(value[key], options, state, `${path}.${key}`, depth + 1, add);
+    if (state.tooDeep || state.tooMany) break;
+  }
+}
+
+/** Scan a byte/string stream in bounded chunks with overlap so boundary-spanning payloads are not lost. */
+export function scanTextInChunks(input, scan = (chunk) => grammarFindings(canonicalizeSecurityText(chunk).value), options = {}) {
+  const text = String(input ?? '');
+  const chunkSize = Math.max(1024, Math.min(64 * 1024, Number(options.chunkBytes) || STREAM_CHUNK_BYTES));
+  const overlap = Math.max(64, Math.min(4096, Number(options.overlapBytes) || STREAM_OVERLAP_BYTES));
+  const findings = [];
+  let tail = '';
+  for (let offset = 0; offset < text.length; offset += chunkSize) {
+    const chunk = tail + text.slice(offset, offset + chunkSize);
+    findings.push(...scan(chunk));
+    tail = chunk.slice(-overlap);
+  }
+  return findings;
+}
+
+export function inspectRequest({ method = 'GET', url = '/', headers = {}, body = null, contentLength = 0, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, maxLeafBytes = DEFAULT_MAX_LEAF_BYTES, allowedLongFields = [] } = {}) {
+  const findings = [];
+  const seen = new Set();
+  const add = (id, category, severity, detail) => {
+    const safeDetail = String(detail).slice(0, 180);
+    const key = `${id}:${safeDetail}`;
+    if (!seen.has(key)) { seen.add(key); findings.push({ id, category, severity, detail: safeDetail }); }
+  };
   const methodUpper = String(method).toUpperCase();
   const headerEntries = headers instanceof Headers ? [...headers.entries()] : Object.entries(headers ?? {});
-  const normalizedHeaders = Object.fromEntries(headerEntries.map(([k, v]) => [String(k).toLowerCase(), String(v)]));
-  const bodyText = safeStringify(body); const bytes = new TextEncoder().encode(bodyText === 'null' ? '' : bodyText).length; const declaredBytes = Number(contentLength) || 0;
-  if (declaredBytes > MAX_BODY_BYTES || bytes > MAX_BODY_BYTES) add('BODY_SIZE', 'PROTOCOL', 'high', 'Request body exceeds the configured 32 KiB inspection limit.');
+  const normalizedHeaders = Object.fromEntries(headerEntries.map(([key, value]) => [String(key).toLowerCase(), String(value)]));
+  const bodyText = safeStringify(body);
+  const bytes = new TextEncoder().encode(bodyText === 'null' ? '' : bodyText).length;
+  const declaredBytes = Number(contentLength) || 0;
+  const configuredMax = Math.max(1024, Math.min(ABSOLUTE_MAX_BODY_BYTES, Number(maxBodyBytes) || DEFAULT_MAX_BODY_BYTES));
+  if (declaredBytes > configuredMax || bytes > configuredMax) add('BODY_SIZE', 'PROTOCOL', 'high', `Request body exceeds the configured ${configuredMax}-byte inspection limit.`);
   if (normalizedHeaders['x-http-method-override'] || normalizedHeaders['x-method-override']) add('METHOD_OVERRIDE', 'PROTOCOL', 'medium', 'HTTP method override headers are not accepted by default.');
-  if (/\0|%00/i.test(String(url)) || /\0/.test(bodyText)) add('NULL_BYTE', 'PROTOCOL', 'high', 'Null byte detected in request data.');
+  if (/\0|%00/i.test(String(url))) add('NULL_BYTE', 'PROTOCOL', 'high', 'Null byte detected in request URL.');
   const contentType = normalizedHeaders['content-type'] ?? '';
   const hasPayload = declaredBytes > 0 || (body != null && bodyText !== 'null' && bytes > 2);
   if (hasPayload && !['GET', 'HEAD', 'OPTIONS'].includes(methodUpper)) {
-    if (!contentType || !/(?:application\/json|application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)/i.test(contentType)) add('CONTENT_TYPE', 'PROTOCOL', 'medium', 'Missing or unexpected content type for a body-bearing request.');
+    if (!contentType || !/(?:application\/json|application\/x-www-form-urlencoded|multipart\/form-data|text\/plain|application\/octet-stream)/i.test(contentType)) add('CONTENT_TYPE', 'PROTOCOL', 'medium', 'Missing or unexpected content type for a body-bearing request.');
     else if (/application\/json/i.test(contentType) && typeof body === 'string') add('JSON_PARSE', 'PROTOCOL', 'high', 'JSON content type was received but the body was not valid parsed JSON.');
   }
   try { new URL(String(url), 'https://arixshield.invalid'); } catch { add('URL_PARSE', 'PROTOCOL', 'high', 'Malformed request URL.'); }
-  const inspectText = [String(url), ...headerEntries.filter(([k]) => !['cookie', 'authorization', 'x-arix-secret'].includes(String(k).toLowerCase())).map(([k, v]) => `${k}:${String(v).slice(0, 1000)}`), bodyText.slice(0, MAX_BODY_BYTES)].join('\n');
-  for (const rule of RULES) if (rule.pattern.test(inspectText)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic.`);
-  if (body && typeof body === 'object') { const depth = walkDepth(body); if (depth.tooDeep) add('JSON_DEPTH', 'PROTOCOL', 'high', `JSON nesting exceeds ${MAX_NESTING_DEPTH} levels.`); if (depth.tooMany) add('JSON_NODES', 'PROTOCOL', 'high', `JSON object exceeds ${MAX_NODES} nodes.`); }
-  const severityRank = { critical: 4, high: 3, medium: 2, low: 1 }; findings.sort((a, b) => (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0));
-  return { allowed: findings.length === 0, findings, riskScore: Math.min(100, findings.reduce((score, item) => score + (severityRank[item.severity] ?? 1) * 17, 0)), inspectedBytes: bytes };
+  const excludedHeaders = new Set(['cookie', 'authorization', 'x-arix-secret', 'x-arix-server-key', 'x-arix-key']);
+  const headerText = headerEntries.filter(([key]) => !excludedHeaders.has(String(key).toLowerCase())).map(([key, value]) => `${key}:${String(value).slice(0, 1000)}`).join('\n');
+  const urlText = canonicalizeSecurityText(String(url));
+  for (const rule of NON_SQL_RULES) {
+    if (rule.pattern.test(urlText.value) || rule.pattern.test(headerText)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic in request metadata.`);
+  }
+  for (const finding of grammarFindings(urlText.value + '\n' + headerText)) add(finding.id, finding.category, finding.severity, finding.detail);
+  if (body && typeof body === 'object') {
+    const state = { nodes: 0, tooDeep: false, tooMany: false };
+    inspectStructure(body, { maxLeafBytes: Math.max(128, Math.min(65536, Number(maxLeafBytes) || DEFAULT_MAX_LEAF_BYTES)), allowedLongFields }, state, '$', 0, add);
+    if (state.tooDeep) add('JSON_DEPTH', 'PROTOCOL', 'high', `JSON nesting exceeds ${MAX_NESTING_DEPTH} levels.`);
+    if (state.tooMany) add('JSON_NODES', 'PROTOCOL', 'high', `JSON object exceeds ${MAX_NODES} nodes.`);
+  } else if (typeof body === 'string' && body !== '') {
+    const canonical = canonicalizeSecurityText(body);
+    if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', 'Repeated encoding did not reach a canonical form.');
+    for (const rule of NON_SQL_RULES) if (rule.pattern.test(canonical.value)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic.`);
+    for (const finding of scanTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, finding.detail);
+  }
+  const severityRank = { critical: 4, high: 3, medium: 2, low: 1 };
+  findings.sort((a, b) => (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0));
+  return { allowed: findings.length === 0, findings, riskScore: Math.min(100, findings.reduce((score, item) => score + (severityRank[item.severity] ?? 1) * 17, 0)), inspectedBytes: bytes, maxBodyBytes: configuredMax };
 }
 
 export function validateJsonSchema(value, schema, path = '$', depth = 0) {
@@ -93,6 +282,7 @@ export function validateJsonSchema(value, schema, path = '$', depth = 0) {
   }
   return { valid: errors.length === 0, errors: errors.slice(0, 100) };
 }
+
 
 const SECRET_PATTERNS = [
   { type: 'AWS_ACCESS_KEY', regex: /\bAKIA[0-9A-Z]{16}\b/g },

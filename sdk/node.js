@@ -1,9 +1,11 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import { inspectRequest, redactSensitiveText } from '../api/_lib/waf-engine.js';
 import { validatePayloadSchema, isOpenApiOperation } from '../api/_lib/schema.js';
 import { watermarkPayloadWithMarker } from '../api/_lib/watermark.js';
+import { findOwnershipMismatch, rewriteCapabilityPath, sealResourceIdsInPayload } from '../api/_lib/crypto-trap.js';
 
-const processBuckets = new Map(); const policyCache = new Map(); const reputationCache = new Map();
+const processBuckets = new Map(); const quotaLeases = new Map(); const policyCache = new Map(); const securitySnapshotCache = new Map(); const reputationCache = new Map();
 const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
 
 async function remotePolicy(endpoint, serverKey) {
@@ -12,11 +14,19 @@ async function remotePolicy(endpoint, serverKey) {
   if (cached && Date.now() - cached.at < 30000) return cached.policy;
   const response = await fetch(`${endpoint.replace(/\/$/, '')}/api/shield`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Arix-Server-Key': serverKey }, body: JSON.stringify({ action: 'get-policy' }), signal: AbortSignal.timeout(2500) });
   if (!response.ok) throw new Error(`ArixShield policy fetch failed (${response.status}).`);
-  const data = await response.json(); policyCache.set(cacheKey, { at: Date.now(), policy: data.policy ?? {} }); return data.policy ?? {};
+  const data = await response.json(); policyCache.set(cacheKey, { at: Date.now(), policy: data.policy ?? {} }); securitySnapshotCache.set(cacheKey, { at: Date.now(), projectId: data.projectId, ...(data.snapshot || {}) }); return data.policy ?? {};
 }
 async function serverAction(endpoint, serverKey, payload, timeout = 3500) {
   const response = await fetch(`${String(endpoint).replace(/\/$/, '')}/api/shield`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Arix-Server-Key': serverKey }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeout) });
   if (!response.ok) throw new Error(`ArixShield ${payload.action} failed (${response.status}).`); return response.json();
+}
+function hashHex(value) { return createHash('sha256').update(String(value)).digest('hex'); }
+function snapshotBlocks(endpoint, serverKey, identity, ip) {
+  const cacheKey = `${endpoint}:${serverKey.slice(-10)}`; const snapshot = securitySnapshotCache.get(cacheKey);
+  if (!snapshot || Date.now() - snapshot.at >= 30000 || !snapshot.complete || !snapshot.projectId) return null;
+  const actorHash = identity && identity !== 'anonymous' ? hashHex(`${snapshot.projectId}:${String(identity).slice(0, 180)}`) : null;
+  const ipHash = isIP(String(ip || '')) ? hashHex(`${snapshot.projectId}:${ip}`) : null;
+  return Boolean((actorHash && snapshot.actorHashes?.includes(actorHash)) || (ipHash && snapshot.ipHashes?.includes(ipHash)));
 }
 function localTokenBucket(key, capacity, windowMs, weight = 1) {
   const now = Date.now(); const refillPerMs = capacity / windowMs; const item = processBuckets.get(key) ?? { tokens: capacity, updated: now };
@@ -24,9 +34,31 @@ function localTokenBucket(key, capacity, windowMs, weight = 1) {
   if (processBuckets.size > 10000) for (const [bucketKey, bucket] of processBuckets) if (now - bucket.updated > windowMs * 3) processBuckets.delete(bucketKey);
   return { allowed, remaining: Math.floor(item.tokens), retryAfterMs: allowed ? 0 : Math.ceil((weight - item.tokens) / refillPerMs) };
 }
-async function distributedTokenBucket({ endpoint, serverKey, scope, algorithm = 'TOKEN_BUCKET', limit, windowMs = 60000, weight = 1 }) {
-  const data = await serverAction(endpoint, serverKey, { action: 'check-limit', scope, algorithm, limit, windowMs, weight });
-  if (!data?.decision || typeof data.decision.allowed !== 'boolean') throw new Error('ArixShield returned an invalid distributed quota decision.'); return data.decision;
+async function distributedTokenBucket({ endpoint, serverKey, scope, algorithm = 'TOKEN_BUCKET', limit, windowMs = 60000, weight = 1, leaseSize = 15 }) {
+  const leaseKey = `${endpoint}:${serverKey.slice(-10)}:${algorithm}:${windowMs}:${scope}`;
+  const now = Date.now();
+  let lease = quotaLeases.get(leaseKey);
+  if (lease && lease.expiresAt > now && lease.remaining >= weight && lease.limit === limit) {
+    lease.remaining -= weight;
+    return { allowed: true, remaining: lease.remaining, retryAfterMs: 0, leased: true };
+  }
+  quotaLeases.delete(leaseKey);
+  const grant = Math.min(limit, Math.max(weight, Math.min(15, Math.floor(Number(leaseSize) || 15))));
+  const requestLease = async (amount) => {
+    const data = await serverAction(endpoint, serverKey, { action: 'check-limit', scope, algorithm, limit, windowMs, weight: amount });
+    if (!data?.decision || typeof data.decision.allowed !== 'boolean') throw new Error('ArixShield returned an invalid distributed quota decision.');
+    return data.decision;
+  };
+  let charged = grant;
+  let decision = await requestLease(grant);
+  if (!decision.allowed && grant > weight) { charged = weight; decision = await requestLease(weight); }
+  if (!decision.allowed) return decision;
+  const remaining = charged - weight;
+  if (remaining > 0) {
+    quotaLeases.set(leaseKey, { remaining, expiresAt: now + Math.min(15000, windowMs), limit });
+    if (quotaLeases.size > 10000) for (const [key, item] of quotaLeases) if (item.expiresAt <= now) quotaLeases.delete(key);
+  }
+  return { ...decision, remaining: remaining || decision.remaining, leased: grant > weight };
 }
 function sendDecision(res, status, payload) {
   if (typeof res.status === 'function' && typeof res.json === 'function') return res.status(status).json(payload);
@@ -64,10 +96,29 @@ export function createArixShield(options = {}) {
   const rememberBlock = (key, milliseconds) => { localBlockCache.set(key, Date.now() + Math.max(1000, Math.min(30000, milliseconds || 3000))); if (localBlockCache.size > 10000) for (const [id, expires] of localBlockCache) if (expires <= Date.now()) localBlockCache.delete(id); };
 
   return async function arixShieldMiddleware(req, res, next) {
-    const started = Date.now(); const url = req.originalUrl || req.url || '/'; const method = String(req.method || 'GET').toUpperCase(); const pathname = String(url).split('?')[0]; const body = req.body ?? null;
-    const inspection = inspectRequest({ method, url, headers: req.headers, body, contentLength: req.headers?.['content-length'] }); const clientIp = resolveClientIp(req, options);
+    const started = Date.now(); let url = req.originalUrl || req.url || '/'; const method = String(req.method || 'GET').toUpperCase(); let pathname = String(url).split('?')[0];
+    const clientIp = resolveClientIp(req, options);
     const identityValue = typeof options.getIdentity === 'function' ? await options.getIdentity(req, { ip: clientIp, method, path: pathname }) : (req.user?.id ?? req.auth?.userId ?? clientIp ?? '');
     const identity = String(identityValue || '').slice(0, 180) || 'anonymous';
+    let ownershipIdentity = '';
+    if (options.capabilitySealing === true || options.responseOwnershipGuard === true) {
+      let ownerValue = typeof options.getOwnershipIdentity === 'function' ? options.getOwnershipIdentity(req) : (req.user?.id ?? req.auth?.userId ?? '');
+      if (ownerValue && typeof ownerValue.then === 'function') return sendDecision(res, 500, { error: 'getOwnershipIdentity must be synchronous in the Node SDK.' });
+      ownershipIdentity = String(ownerValue ?? '').trim();
+      if (!ownershipIdentity || ownershipIdentity.toLowerCase() === 'anonymous' || ownershipIdentity.length > 180 || ownershipIdentity === clientIp) return sendDecision(res, 500, { error: 'A stable authenticated getOwnershipIdentity is required for this protection.' });
+    }
+    if (options.capabilitySealing === true) {
+      const rewritten = rewriteCapabilityPath(url, ownershipIdentity, { idPattern: options.capabilityIdPattern });
+      if (rewritten.invalid) return sendDecision(res, 403, { error: 'Invalid or user-mismatched resource capability.' });
+      if (rewritten.url !== url) { url = rewritten.url; req.url = rewritten.url; req.originalUrl = rewritten.url; pathname = rewritten.url.split('?')[0]; }
+    }
+    const body = req.body ?? null;
+    const maxBodyBytes = Math.max(1024, Math.min(262144, Number(options.maxBodyBytes) || 32768));
+    const declaredBodyBytes = Number(req.headers?.['content-length'] || 0);
+    let measuredBodyBytes = 0;
+    try { measuredBodyBytes = body == null ? 0 : Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body)); } catch { measuredBodyBytes = maxBodyBytes + 1; }
+    if (declaredBodyBytes > maxBodyBytes || measuredBodyBytes > maxBodyBytes) return sendDecision(res, 413, { error: 'Request body too large.', maxBodyBytes });
+    const inspection = inspectRequest({ method, url, headers: req.headers, body, contentLength: req.headers?.['content-length'], maxBodyBytes, maxLeafBytes: options.maxLeafBytes ?? 4096, allowedLongFields: options.allowedLongFields ?? [] });
     if (isHoneypotPath(pathname, options.honeypotPaths)) {
       try { const trap = await serverAction(endpoint, serverKey, { action: 'honeypot', path: pathname, method, actorId: identity, ip: clientIp }); return sendDecision(res, 200, trap); }
       catch (error) { options.onTelemetryError?.(error); return sendDecision(res, 503, { error: 'ArixShield honeypot service is unavailable.' }); }
@@ -82,8 +133,11 @@ export function createArixShield(options = {}) {
     const geoVelocityEnabled = options.geoVelocityProtection === true || (options.geoVelocityProtection !== false && policy.geoVelocityEnabled === true);
     const forensicEnabled = options.forensicReplay === true || (options.forensicReplay !== false && policy.forensicReplayEnabled === true);
     if (endpoint && (abuseEnabled || (Array.isArray(options.honeypotPaths) && options.honeypotPaths.length > 0))) {
-      try { const abuse = await serverAction(endpoint, serverKey, { action: 'check-abuse', actorId: identity, ip: clientIp }); if (abuse.blocked) { rememberBlock(cacheKey, abuse.retryAfterMs); return sendDecision(res, 429, { error: 'ArixShield credential-abuse backoff is active.', retryAfterMs: abuse.retryAfterMs }); } }
+      const snapshotDenied = snapshotBlocks(endpoint, serverKey, identity, clientIp);
+      if (snapshotDenied === true) { rememberBlock(cacheKey, 30000); return sendDecision(res, 429, { error: 'ArixShield credential-abuse backoff is active.', snapshot: true }); }
+      if (snapshotDenied === null) { try { const abuse = await serverAction(endpoint, serverKey, { action: 'check-abuse', actorId: identity, ip: clientIp }); if (abuse.blocked) { rememberBlock(cacheKey, abuse.retryAfterMs); return sendDecision(res, 429, { error: 'ArixShield credential-abuse backoff is active.', retryAfterMs: abuse.retryAfterMs }); } }
       catch (error) { options.onTelemetryError?.(error); if (options.failClosedAbuse === true) return sendDecision(res, 503, { error: 'ArixShield abuse service is unavailable.' }); }
+      }
     }
     if (endpoint && reputationEnabled && clientIp) {
       try { const result = await cachedReputation(endpoint, serverKey, clientIp, String(req.headers?.['user-agent'] || '').slice(0, 240), options.trustedProvider || ''); const verifiedCrawler = result.crawler?.verified === true || result.configuredProvider?.verified === true;
@@ -109,7 +163,28 @@ export function createArixShield(options = {}) {
     if (policy.blockDatacenterAsn && humanOnly && DATA_CENTER_ASNS.has(asn)) findings.unshift({ id: 'DATACENTER_ASN', category: 'DATACENTER', severity: 'high', detail: 'Datacenter ASN policy matched a human-only endpoint.' });
     const effectiveMode = policy.mode === 'DRY_RUN' || mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE'; const enforceableFindings = findings.filter((finding) => finding.category !== 'SHADOW_API' && finding.category !== 'DLP'); const blocked = enforceableFindings.length > 0 && effectiveMode === 'ENFORCE';
     if (blocked) { const retry = findings.some((finding) => finding.category === 'RATE_LIMIT') ? (quota.retryAfterMs || 3000) : 0; if (retry) rememberBlock(cacheKey, retry); if (endpoint) serverAction(endpoint, serverKey, { action: 'server-event', type: 'SDK_THREAT_BLOCK', blocked: true, path: pathname, method, riskScore: inspection.riskScore, findings: findings.slice(0, 20), userId: identity }).catch((error) => options.onTelemetryError?.(error)); return sendDecision(res, findings.some((finding) => finding.category === 'RATE_LIMIT') ? 429 : 403, { error: 'Request blocked by ArixShield local policy.', riskScore: inspection.riskScore, findings: findings.slice(0, 20) }); }
-    if (options.responseDlp === true && typeof res.json === 'function') { const originalJson = res.json.bind(res); res.json = function arixRedactedJson(payload) { try { const input = JSON.stringify(payload); const redacted = redactSensitiveText(input); if (redacted.detected.length) return originalJson(JSON.parse(redacted.text)); } catch (error) { options.onDlpError?.(error); } return originalJson(payload); }; }
+    if ((options.responseDlp === true || options.responseOwnershipGuard === true || options.capabilitySealing === true) && typeof res.json === 'function') {
+      const originalJson = res.json.bind(res);
+      res.json = function arixSecureJson(payload) {
+        let output = payload;
+        if (options.responseOwnershipGuard === true && ownershipIdentity) {
+          const mismatch = findOwnershipMismatch(output, ownershipIdentity, options.ownershipFields);
+          if (mismatch) {
+            res.statusCode = 403;
+            if (endpoint) serverAction(endpoint, serverKey, { action: 'honeypot', path: pathname, method, actorId: identity, ip: clientIp }).catch((error) => options.onTelemetryError?.(error));
+            return originalJson({ error: 'ArixShield blocked a response with mismatched resource ownership.' });
+          }
+        }
+        if (options.capabilitySealing === true && output && typeof output === 'object') {
+          try { output = sealResourceIdsInPayload(output, ownershipIdentity); } catch (error) { options.onPolicyError?.(error); res.statusCode = 500; return originalJson({ error: 'Resource capability sealing failed.' }); }
+        }
+        if (options.responseDlp === true) {
+          try { const redacted = redactSensitiveText(JSON.stringify(output)); if (redacted.detected.length) output = JSON.parse(redacted.text); }
+          catch (error) { options.onDlpError?.(error); }
+        }
+        return originalJson(output);
+      };
+    }
     req.arixShield = { allowed: true, mode: effectiveMode, riskScore: inspection.riskScore, findings, remaining: quota.remaining, goodBot: req.arixShieldGoodBot ?? null };
     const shouldRecordOutcome = endpoint && (options.reportAllRequests === true || abuseEnabled || shadowCatalogEnabled || geoVelocityEnabled || forensicEnabled || findings.length > 0);
     if (shouldRecordOutcome && typeof res.once === 'function') res.once('finish', () => { const geo = getGeoHints(req); const event = { action: 'record-outcome', actorId: identity, userId: identity, ip: clientIp, path: pathname, method, status: res.statusCode, latencyMs: Date.now() - started, ...geo, safeHeaders: safeHeaders(req.headers), findings: findings.slice(0, 20) }; serverAction(endpoint, serverKey, event, 2500).catch((error) => options.onTelemetryError?.(error)); });

@@ -105,6 +105,13 @@ async function loadTrie() {
   return cache;
 }
 
+
+/** Synchronous worker-cache lookup used for bounded pre-body shedding. It never fetches feeds. */
+export function isIpInLoadedThreatFeed(ip) {
+  const address = String(ip || '').trim();
+  return isIP(address) !== 0 && Boolean(cache.trie?.count) && prefixTrieHas(cache.trie, address);
+}
+
 export async function checkIpReputation(ip) {
   if (!ip || isIP(String(ip).split(',')[0].trim()) === 0) return { checked: false, listed: false, reason: 'INVALID_OR_MISSING_IP' };
   const loaded = await loadTrie();
