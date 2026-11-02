@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'; object-src 'none'">
-<title>GitHub One-Commit Publisher</title>
+<title>GitHub One-Commit Publisher — CORS Fixed</title>
 <style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#111a2d;--panel2:#0d1628;--line:#26344e;--text:#edf3ff;--muted:#9aabc6;--blue:#78a8ff;--cyan:#56d6cd;--red:#ff7979;--amber:#f6c56e;--green:#55d6a1;--shadow:0 18px 48px rgba(0,0,0,.25)}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 500px at 15% -10%,#20335d 0%,transparent 65%),radial-gradient(800px 500px at 100% 5%,#123b43 0%,transparent 60%),var(--bg);color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}
@@ -17,7 +16,7 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
 <body>
 <main>
   <header class="brand"><div class="mark">G</div><div><div class="eyebrow">GitHub repository utility</div><h1>One‑Commit Publisher</h1></div></header>
-  <p class="lede">Replace a repository’s tracked files from one ZIP or folder and publish the whole replacement as <b>one Git commit</b>. Preview first. No local Git installation required.</p>
+  <p class="lede">Replace a repository’s files from one ZIP or folder and publish the complete replacement as <b>one Git commit</b>. ZIP validation runs locally first; GitHub access is tested separately. No local Git installation required.</p>
   <div class="grid">
     <section class="panel">
       <h2>1 · Connect your repository</h2>
@@ -34,14 +33,14 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
       <div class="filezone"><strong>Select a folder</strong><p>Choose the project folder. Its contents are used as the repository root.</p><input id="folder" type="file" webkitdirectory directory multiple></div>
       <div class="hint" id="fileLabel">No files selected yet.</div>
       <div class="warning"><b>Destructive replacement:</b> files currently tracked on the target branch but missing from your upload will be deleted. GitHub settings, secrets, issues, releases, deployments, and branch protection are not changed.</div>
-      <div class="actions"><button class="btn" id="previewBtn" type="button">Analyze &amp; preview</button><button class="btn secondary" id="resetBtn" type="button">Reset page</button></div>
+      <div class="actions"><button class="btn" id="previewBtn" type="button">Validate files &amp; preview</button><button class="btn secondary" id="resetBtn" type="button">Reset page</button></div>
       <p class="status" id="status" role="status" aria-live="polite">Select your files and enter a repository/token to begin.</p>
       <div class="progress"><div id="progressBar"></div></div>
       <div class="log" id="log" aria-live="polite"></div>
     </section>
     <aside class="panel">
       <div class="section-label"><h2>3 · Review the replacement</h2><span class="pill" id="statePill">Not ready</span></div>
-      <p class="notice" id="previewIntro">The page will check repository access and the selected branch before enabling the commit.</p>
+      <p class="notice" id="previewIntro">The page will validate the selected archive locally, then check repository access and the selected branch.</p>
       <div class="stats">
         <div class="stat"><b id="newCount">—</b><span>Files in upload</span></div>
         <div class="stat"><b id="oldCount">—</b><span>Existing tracked files</span></div>
@@ -56,7 +55,7 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
         <div class="actions"><button class="btn danger" id="commitBtn" type="button" disabled>Publish one commit</button></div>
       </div>
       <div id="successArea" class="safe hidden"></div>
-      <div class="foot">Uses GitHub’s Git Database API. Upload blobs are created first; the branch is changed only after the new tree and single commit are ready. A concurrent push or branch-protection rule can stop the final update safely.</div>
+      <div class="foot">Uses GitHub’s Git Database API. Every uploaded file’s content (including binary files) becomes a Git blob; a clean tree is created without the old base tree; the new tree is checked path-by-path and by blob SHA; then exactly one commit is made and the branch is updated without force. A concurrent push or branch-protection rule stops the update safely.</div>
       <div class="footerlinks"><a href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noopener">Create GitHub token ↗</a><a href="https://docs.github.com/en/rest/git/trees" target="_blank" rel="noopener">Git tree API ↗</a><a href="https://docs.github.com/en/rest/git/refs" target="_blank" rel="noopener">Git refs API ↗</a></div>
     </aside>
   </div>
@@ -73,7 +72,6 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
     pathCount:$('pathCount'), pathList:$('pathList'), commitArea:$('commitArea'), confirmText:$('confirmText'), secretReviewWrap:$('secretReviewWrap'), secretReview:$('secretReview'), commitBtn:$('commitBtn'), successArea:$('successArea')
   };
   const API='https://api.github.com';
-  const API_VERSION='2026-03-10';
   const MAX_FILE=20*1024*1024;
   const MAX_TOTAL=80*1024*1024;
   const MAX_FILES=90000;
@@ -115,51 +113,68 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
     return {files:out,total};
   }
   async function parseZip(file) {
-    const buffer=await file.arrayBuffer();
+    if(file.size>MAX_TOTAL+20*1024*1024) throw new Error('The compressed ZIP is larger than the 100 MB upload limit. Recreate a smaller ZIP or use the folder picker.');
+    let buffer;
+    try { buffer=await file.arrayBuffer(); }
+    catch(e) { throw new Error('Could not read the selected ZIP from your computer: '+(e.message||String(e))); }
     const bytes=new Uint8Array(buffer), view=new DataView(buffer);
+    if(bytes.length<22) throw new Error('The selected file is too small to be a valid ZIP archive.');
     const min=Math.max(0,bytes.length-65557); let eocd=-1;
-    for(let i=bytes.length-22;i>=min;i--) { if(view.getUint32(i,true)===0x06054b50){eocd=i;break;} }
-    if(eocd<0) throw new Error('This does not look like a valid ZIP archive (end record not found).');
-    if(view.getUint16(eocd+4,true)!==0 || view.getUint16(eocd+6,true)!==0) throw new Error('Multi-disk ZIP archives are not supported.');
+    // Find a valid EOCD record; a ZIP comment can itself contain the EOCD signature.
+    for(let i=bytes.length-22;i>=min;i--) {
+      if(view.getUint32(i,true)===0x06054b50) {
+        const commentLength=view.getUint16(i+20,true);
+        if(i+22+commentLength===bytes.length){eocd=i;break;}
+      }
+    }
+    if(eocd<0) throw new Error('This is not a complete standard ZIP archive (valid end-of-directory record not found). Recreate it as a normal .zip file.');
+    if(view.getUint16(eocd+4,true)!==0 || view.getUint16(eocd+6,true)!==0) throw new Error('Multi-disk ZIP archives are not supported. Recreate this as a standard single-disk ZIP.');
     const count=view.getUint16(eocd+10,true), centralSize=view.getUint32(eocd+12,true), centralOffset=view.getUint32(eocd+16,true);
-    if(count===0xffff || centralSize===0xffffffff || centralOffset===0xffffffff) throw new Error('ZIP64 archives are not supported by this single-page build.');
-    if(centralOffset+centralSize>bytes.length) throw new Error('ZIP central directory is damaged or incomplete.');
+    if(count===0xffff || centralSize===0xffffffff || centralOffset===0xffffffff) throw new Error('This ZIP uses ZIP64 format, which this one-page publisher does not support. Recreate it as a standard ZIP (not ZIP64).');
+    if(centralOffset+centralSize>eocd || centralOffset+centralSize>bytes.length) throw new Error('ZIP central directory is damaged, incomplete, or outside the archive.');
     if(count>MAX_FILES) throw new Error('ZIP has more than '+MAX_FILES+' entries.');
     const decoder=(flag)=>new TextDecoder((flag&0x800)?'utf-8':'windows-1252',{fatal:false});
     const output=[]; let offset=centralOffset; let total=0;
     for(let index=0;index<count;index++) {
-      if(offset+46>bytes.length || view.getUint32(offset,true)!==0x02014b50) throw new Error('Invalid ZIP central-directory entry.');
+      if(offset+46>centralOffset+centralSize || view.getUint32(offset,true)!==0x02014b50) throw new Error('Invalid ZIP central-directory entry at item '+(index+1)+'.');
       const madeBy=view.getUint16(offset+4,true), flags=view.getUint16(offset+8,true), method=view.getUint16(offset+10,true);
       const crc=view.getUint32(offset+16,true), compressedSize=view.getUint32(offset+20,true), uncompressedSize=view.getUint32(offset+24,true);
       const nameLen=view.getUint16(offset+28,true), extraLen=view.getUint16(offset+30,true), commentLen=view.getUint16(offset+32,true);
       const external=view.getUint32(offset+38,true), localOffset=view.getUint32(offset+42,true);
-      if(compressedSize===0xffffffff || uncompressedSize===0xffffffff || localOffset===0xffffffff) throw new Error('ZIP64 entry detected; please use a standard ZIP archive.');
-      if(flags&1) throw new Error('Encrypted ZIP entries are not supported.');
-      const nameBytes=bytes.subarray(offset+46,offset+46+nameLen);
-      const rawName=decoder(flags).decode(nameBytes);
-      offset+=46+nameLen+extraLen+commentLen;
+      const nextOffset=offset+46+nameLen+extraLen+commentLen;
+      if(nextOffset>centralOffset+centralSize || nextOffset>bytes.length) throw new Error('ZIP central directory contains a truncated filename or extra field.');
+      if(compressedSize===0xffffffff || uncompressedSize===0xffffffff || localOffset===0xffffffff) throw new Error('ZIP64 entry detected; recreate it as a standard ZIP.');
+      if(flags&0x41) throw new Error('Encrypted ZIP entries are not supported. Remove encryption/password protection and create a standard ZIP.');
+      const rawName=decoder(flags).decode(bytes.subarray(offset+46,offset+46+nameLen));
+      offset=nextOffset;
       const host=madeBy>>>8, unixMode=(external>>>16)&0xffff, fileType=unixMode&0xf000;
       if(rawName.endsWith('/') || fileType===0x4000) continue;
       if((host===3 || host===19) && fileType===0xa000) throw new Error('Symbolic links are not accepted in replacement archives: '+rawName);
       if(uncompressedSize>MAX_FILE) throw new Error('File is over 20 MB: '+rawName);
       total+=uncompressedSize; if(total>MAX_TOTAL) throw new Error('ZIP expands beyond the 80 MB safety limit.');
-      if(localOffset+30>bytes.length || view.getUint32(localOffset,true)!==0x04034b50) throw new Error('Invalid local ZIP header for '+rawName);
+      if(localOffset+30>centralOffset || localOffset+30>bytes.length || view.getUint32(localOffset,true)!==0x04034b50) throw new Error('Invalid local ZIP header for '+rawName+'.');
       const localNameLen=view.getUint16(localOffset+26,true), localExtraLen=view.getUint16(localOffset+28,true);
       const dataStart=localOffset+30+localNameLen+localExtraLen, dataEnd=dataStart+compressedSize;
-      if(dataEnd>bytes.length) throw new Error('Truncated ZIP data for '+rawName);
+      if(dataStart>centralOffset || dataEnd>centralOffset || dataEnd>bytes.length) throw new Error('Truncated or invalid ZIP data for '+rawName+'.');
       const compressed=bytes.subarray(dataStart,dataEnd);
       let content;
       if(method===0) content=compressed.slice();
       else if(method===8) {
-        if(typeof DecompressionStream==='undefined') throw new Error('This browser lacks ZIP deflate support. Use the folder picker or a current Chrome/Edge browser.');
-        try { content=new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); }
-        catch(e) { throw new Error('Could not decompress '+rawName+': '+e.message); }
-      } else throw new Error('Unsupported ZIP compression method '+method+' for '+rawName+'. Use deflate or stored ZIP.');
-      if(content.byteLength!==uncompressedSize) throw new Error('Size check failed for '+rawName+'.');
-      if(crc32(content)!==crc) throw new Error('CRC integrity check failed for '+rawName+'.');
+        if(typeof DecompressionStream==='undefined') throw new Error('This browser does not support ZIP deflate decompression. Use current Chrome or Edge, or select the extracted project folder instead.');
+        try {
+          const stream=new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+          content=new Uint8Array(await new Response(stream).arrayBuffer());
+        } catch(e) {
+          const detail=(e&&e.message&&e.message!=='Failed to fetch')?e.message:'the browser rejected the ZIP deflate stream';
+          throw new Error('Could not decompress ZIP entry "'+rawName+'": '+detail+'. Recreate the ZIP using standard Deflate compression (not Deflate64, Zstandard, or encryption), or use the folder picker.');
+        }
+      } else throw new Error('Unsupported ZIP compression method '+method+' for '+rawName+'. Use standard ZIP Deflate or Stored compression.');
+      if(content.byteLength!==uncompressedSize) throw new Error('ZIP size/integrity check failed for '+rawName+'.');
+      if(crc32(content)!==crc) throw new Error('ZIP CRC integrity check failed for '+rawName+'. The archive may be damaged; recreate it.');
       const path=safePath(rawName);
       if(path) output.push({path,bytes:content,mode:(unixMode&0x49)?'100755':'100644'});
     }
+    if(offset!==centralOffset+centralSize) throw new Error('ZIP central directory length did not match its entries; archive may be malformed.');
     return output;
   }
   let crcTable=null;
@@ -175,9 +190,57 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
     return {owner:parts[0],repo:parts[1]};
   }
   async function api(url,token,options={}) {
-    const response=await fetch(API+url,{...options,headers:{'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':API_VERSION,'Content-Type':'application/json',...(options.headers||{})}});
-    let payload={}; try{payload=await response.json();}catch{}
-    if(!response.ok){const detail=payload.message||response.statusText;let extra='';if(response.status===401)extra=' Check that the token is valid.';if(response.status===403)extra=' Check Contents write permission, token resource access, rate limits, and organization SSO.';if(response.status===404)extra=' Check repository name, token repository access, and branch.';if(response.status===409||response.status===422)extra=' The branch may be protected or the repository state may have changed.';throw new Error('GitHub API '+response.status+': '+detail+'.'+extra);}
+    const method=(options.method||'GET').toUpperCase();
+    const headers={
+      'Accept':'application/vnd.github+json',
+      'Authorization':'Bearer '+token,
+      ...(options.headers||{})
+    };
+    if(options.body!==undefined && options.body!==null) headers['Content-Type']='application/json';
+    // Deliberately omit X-GitHub-Api-Version here: GitHub's documented browser CORS
+    // preflight allow-list does not include that custom header. GitHub defaults to
+    // REST API version 2022-11-28, which remains supported through 2028-03-10.
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),45000);
+    let response;
+    try {
+      response=await fetch(API+url,{
+        ...options,
+        method,
+        headers,
+        mode:'cors',
+        credentials:'omit',
+        cache:'no-store',
+        signal:controller.signal
+      });
+    } catch(e) {
+      if(e && e.name==='AbortError') throw new Error('GitHub API request timed out after 45 seconds ('+method+' '+url+'). Check your connection and try again. The ZIP is processed locally; this is a GitHub network request failure.');
+      if(e instanceof TypeError || (e && /failed to fetch|networkerror|load failed/i.test(e.message||''))) {
+        throw new Error('The ZIP was read locally, but the browser could not reach https://api.github.com ('+method+' '+url+'). This is usually caused by DNS/internet trouble, a VPN/firewall, a privacy extension, or a network proxy. No GitHub branch was changed. Turn off the blocking extension/VPN temporarily or try another network, then run Analyze & preview again.');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    let raw;
+    try { raw=await response.text(); }
+    catch(e) { throw new Error('GitHub returned a response but the connection ended while reading it ('+method+' '+url+'). Check the branch on GitHub before retrying.'); }
+    let payload={};
+    if(raw){try{payload=JSON.parse(raw);}catch{payload={message:raw.slice(0,500)};}}
+    if(!response.ok){
+      const detail=payload.message||response.statusText||'Unknown GitHub API error';
+      let extra='';
+      if(response.status===401)extra=' Check that the token is valid and has not expired.';
+      if(response.status===403){
+        const remaining=response.headers.get('x-ratelimit-remaining');
+        extra=remaining==='0'?' GitHub API rate limit is exhausted; wait until the reset time and retry.':' Check Contents: Read and write, repository access, organization SSO, and any rate-limit response headers.';
+      }
+      if(response.status===404)extra=' Check the owner/repository, branch name, and whether the token can access this private repository.';
+      if(response.status===409||response.status===422)extra=' GitHub rejected the operation. The branch may be protected, the tree may exceed an API limit, or repository state may have changed.';
+      if(response.status===429)extra=' GitHub is rate-limiting the request. Wait and retry.';
+      if(response.status>=500)extra=' GitHub returned a server error; retry after a short wait.';
+      throw new Error('GitHub API '+response.status+': '+detail+'.'+extra);
+    }
     return payload;
   }
   async function getSelectedFiles() {
@@ -199,8 +262,10 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
     try {
       const token=el.token.value.trim(); if(!token)throw new Error('Enter your fine-grained GitHub token.');
       const {owner,repo}=parseRepo(el.repo.value);const branch=el.branch.value.trim();if(!branch||branch.startsWith('/')||branch.endsWith('/')||branch.includes('..'))throw new Error('Enter a valid branch name.');
-      setStatus('Reading selected files…');log('Reading upload and validating paths.');
+      setStatus('Reading and validating the selected files on this device…');log('Phase 1/2: reading and validating the upload locally. No GitHub request has been made yet.');
       const {files,total}=normaliseFiles(await getSelectedFiles());
+      log('LOCAL FILE CHECK PASSED: '+files.length+' files extracted and validated ('+formatBytes(total)+').');
+      setStatus('ZIP is valid. Connecting to GitHub to inspect the target branch…');
       const hasWorkflow=files.some(f=>f.path.startsWith('.github/workflows/'));
       const secrets=files.filter(f=>/(^|\/)\.env(?:$|\.)|(^|\/)[^/]+\.(?:pem|key|p12|pfx)$/i.test(f.path) && !/(^|\/)\.env\.(?:example|sample|template)$/i.test(f.path));
       el.fileLabel.textContent=files.length+' files · '+formatBytes(total)+' · '+(hasWorkflow?'includes GitHub Actions workflows':'no workflow files detected');
@@ -223,7 +288,7 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
       preview={token,owner,repo,branch,headSha,baseTree:commit.tree.sha,files,total,hasWorkflow,secrets:secrets.map(x=>x.path),oldCount:oldEntries.length,truncated};
       el.secretReviewWrap.classList.toggle('hidden',secrets.length===0);el.secretReview.checked=false;
       el.commitArea.classList.remove('hidden');setPill('Preview ready');setStatus('Preview complete. Check the counts and file paths before publishing.','good');
-      log('Repository access confirmed: '+repoInfo.full_name+' / '+branch+'.');log('Upload validated: '+files.length+' files, '+formatBytes(total)+'.');log('Current branch head: '+headSha+'.');log('Preview: '+added+' new paths, '+overlap+' matching paths replaced, '+(truncated?'unknown':' '+removed)+' old paths removed.');
+      log('Phase 2/2: GitHub API access confirmed for '+repoInfo.full_name+' / '+branch+'.');log('Upload validated: '+files.length+' files, '+formatBytes(total)+'.');log('Current branch head: '+headSha+'.');log('Preview: '+added+' new paths, '+overlap+' matching paths replaced, '+(truncated?'unknown':' '+removed)+' old paths removed.');
       if(hasWorkflow)log('Workflow files detected. GitHub may also require Workflows: write permission.');
       if(secrets.length)log('SECURITY REVIEW REQUIRED: upload includes possible secret/key files. Remove them unless intentionally public.');
       setProgress(100);
@@ -237,30 +302,87 @@ main{width:min(1050px,calc(100% - 32px));margin:42px auto 70px}.brand{display:fl
     if(busy||!preview||el.confirmText.value!=='REPLACE'||(preview.secrets.length>0&&!el.secretReview.checked))return;
     busy=true;el.commitBtn.disabled=true;el.previewBtn.disabled=true;setProgress(0);setStatus('Uploading Git objects. The branch has not been changed yet…');
     const p=preview;const startedHead=p.headSha;const encodedRepo='/repos/'+encodeURIComponent(p.owner)+'/'+encodeURIComponent(p.repo);
+    let createdCommit=null;let refUpdateAttempted=false;
+    const refPath=encodedRepo+'/git/ref/heads/'+p.branch.split('/').map(encodeURIComponent).join('/');
+    function showPublished(commit,ref){
+      setProgress(100);setStatus('Success — one verified commit published to '+ref.ref+'.','good');setPill('Published');
+      el.successArea.classList.remove('hidden');el.successArea.replaceChildren();
+      const title=document.createElement('b');title.textContent='Published successfully · one commit';
+      const br=document.createElement('br');const link=document.createElement('a');link.href=commit.html_url;link.target='_blank';link.rel='noopener';
+      link.textContent=commit.sha.slice(0,12)+' · Open commit on GitHub ↗';link.style.color='#9bc6ff';
+      el.successArea.append(title,br,link);
+      log('BRANCH VERIFIED: '+ref.ref+' points to the new commit.');
+      log('Exactly one new commit was published. All old tracked paths absent from the upload are deleted in that same commit.');
+      el.token.value='';preview=null;el.commitArea.classList.add('hidden');el.confirmText.value='';
+    }
     try {
       log('Starting replacement upload. No branch update has occurred yet.');
       const treeEntries=new Array(p.files.length);let cursor=0,done=0;const errors=[];
-      async function worker(){while(true){const index=cursor++;if(index>=p.files.length)return;const file=p.files[index];try{const bytes=await bytesFor(file);const body={content:toBase64(bytes),encoding:'base64'};const blob=await api(encodedRepo+'/git/blobs',p.token,{method:'POST',body:JSON.stringify(body)});treeEntries[index]={path:file.path,mode:file.mode,type:'blob',sha:blob.sha};done++;setProgress((done/p.files.length)*78);setStatus('Uploading file objects: '+done+' / '+p.files.length);if(done===1||done===p.files.length||done%10===0)log('Uploaded '+done+' / '+p.files.length+' file objects.');}catch(e){errors.push(file.path+': '+e.message);return;}}}
+      async function worker(){
+        while(true){
+          const index=cursor++;if(index>=p.files.length)return;
+          const file=p.files[index];
+          try {
+            const bytes=await bytesFor(file);
+            const body={content:toBase64(bytes),encoding:'base64'};
+            const blob=await api(encodedRepo+'/git/blobs',p.token,{method:'POST',body:JSON.stringify(body)});
+            if(!blob.sha)throw new Error('GitHub did not return a blob SHA.');
+            treeEntries[index]={path:file.path,mode:file.mode,type:'blob',sha:blob.sha};
+            done++;setProgress((done/p.files.length)*76);setStatus('Uploading file objects: '+done+' / '+p.files.length);
+            if(done===1||done===p.files.length||done%10===0)log('Uploaded '+done+' / '+p.files.length+' file objects.');
+          } catch(e) { errors.push(file.path+': '+e.message);return; }
+        }
+      }
       await Promise.all(Array.from({length:Math.min(4,p.files.length)},()=>worker()));
-      if(errors.length)throw new Error('One or more file uploads failed; branch was not changed. '+errors.slice(0,4).join(' | '));
+      if(errors.length)throw new Error('One or more file uploads failed; the branch was not changed. '+errors.slice(0,4).join(' | '));
+      if(treeEntries.some(x=>!x))throw new Error('Internal upload check failed: at least one file has no uploaded blob. The branch was not changed.');
       log('All file objects uploaded. Creating a clean root tree (no base tree, so missing old paths are removed).');
       const newTree=await api(encodedRepo+'/git/trees',p.token,{method:'POST',body:JSON.stringify({tree:treeEntries})});
-      setProgress(84);
-      const latest=await api(encodedRepo+'/git/ref/heads/'+p.branch.split('/').map(encodeURIComponent).join('/'),p.token);
+      if(!newTree.sha)throw new Error('GitHub did not return the replacement tree SHA. No commit was created.');
+      setProgress(82);
+      log('New Git tree created. Verifying every path and blob before making a commit.');
+      const verifiedTree=await api(encodedRepo+'/git/trees/'+newTree.sha+'?recursive=1',p.token);
+      if(verifiedTree.truncated)throw new Error('GitHub marked the replacement tree as truncated during verification. No commit was created. Reduce the upload size/file count and retry.');
+      const expected=new Map(treeEntries.map(x=>[x.path,x.sha]));
+      const actual=(verifiedTree.tree||[]).filter(x=>x.type==='blob');
+      if(actual.length!==expected.size)throw new Error('Replacement tree verification failed: expected '+expected.size+' files but GitHub returned '+actual.length+'. No commit was created.');
+      for(const item of actual){if(!expected.has(item.path)||expected.get(item.path)!==item.sha)throw new Error('Replacement tree verification failed at '+item.path+'. No commit was created.');}
+      log('TREE VERIFIED: GitHub contains exactly '+actual.length+' uploaded file paths and matching content hashes; no old tree was carried forward.');
+      setProgress(87);
+      const latest=await api(refPath,p.token);
       if(latest.object.sha!==startedHead)throw new Error('Branch changed while you were preparing the upload. Nothing was committed to the branch. Re-run Analyze & preview and review the new head.');
-      log('Branch head unchanged. Creating the single replacement commit.');
-      const commit=await api(encodedRepo+'/git/commits',p.token,{method:'POST',body:JSON.stringify({message:el.message.value.trim()||'Replace repository files',tree:newTree.sha,parents:[startedHead]})});
-      setProgress(93);
-      log('Commit created: '+commit.sha+'. Updating branch without force.');
-      const updated=await api(encodedRepo+'/git/refs/heads/'+p.branch.split('/').map(encodeURIComponent).join('/'),p.token,{method:'PATCH',body:JSON.stringify({sha:commit.sha,force:false})});
-      setProgress(100);setStatus('Success — one commit published to '+updated.ref+'.','good');setPill('Published');
-      el.successArea.classList.remove('hidden');el.successArea.replaceChildren();const title=document.createElement('b');title.textContent='Published successfully · one commit';const br=document.createElement('br');const link=document.createElement('a');link.href=commit.html_url;link.target='_blank';link.rel='noopener';link.textContent=commit.sha.slice(0,12)+' · Open commit on GitHub ↗';link.style.color='#9bc6ff';el.successArea.append(title,br,link);
-      log('Branch updated successfully. Commit: '+commit.sha);log('All previous tracked files not present in the new tree were removed by this same commit.');
-      el.token.value='';preview=null;el.commitArea.classList.add('hidden');el.confirmText.value='';
-    } catch(e) {setStatus(e.message,'bad');log('PUBLISH STOPPED: '+e.message);setPill('Stopped');setProgress(0);}
-    finally {busy=false;el.previewBtn.disabled=false;syncCommitButton();}
+      log('Branch head unchanged. Creating exactly one replacement commit.');
+      createdCommit=await api(encodedRepo+'/git/commits',p.token,{method:'POST',body:JSON.stringify({message:el.message.value.trim()||'Replace repository files',tree:newTree.sha,parents:[startedHead]})});
+      if(!createdCommit.sha||!createdCommit.tree||createdCommit.tree.sha!==newTree.sha||!Array.isArray(createdCommit.parents)||createdCommit.parents.length!==1||createdCommit.parents[0].sha!==startedHead) {
+        throw new Error('GitHub returned a commit whose tree or single parent did not match the verified replacement. The branch was not changed.');
+      }
+      setProgress(93);log('Exactly one commit object created: '+createdCommit.sha+'. Updating branch without force.');
+      refUpdateAttempted=true;
+      await api(encodedRepo+'/git/refs/heads/'+p.branch.split('/').map(encodeURIComponent).join('/'),p.token,{method:'PATCH',body:JSON.stringify({sha:createdCommit.sha,force:false})});
+      const finalRef=await api(refPath,p.token);
+      if(finalRef.object.sha!==createdCommit.sha)throw new Error('GitHub did not leave the branch at the new commit SHA. Check the branch history before retrying.');
+      showPublished(createdCommit,finalRef);
+    } catch(e) {
+      if(refUpdateAttempted&&createdCommit){
+        try {
+          const observed=await api(refPath,p.token);
+          if(observed.object.sha===createdCommit.sha){
+            log('The update response was interrupted, but a follow-up read confirms that GitHub moved the branch to the new commit.');
+            showPublished(createdCommit,observed);
+          } else {
+            setStatus(e.message+' The branch was checked and does not point to the new commit; no successful publish was confirmed.','bad');
+            log('PUBLISH NOT CONFIRMED: current branch SHA '+observed.object.sha+'; attempted commit '+createdCommit.sha+'.');setPill('Not published');setProgress(0);
+          }
+        } catch(verifyError) {
+          setStatus('The branch-update request was sent, but GitHub could not be reached for final verification. Do not retry blindly. Open the branch on GitHub and check for commit '+createdCommit.sha.slice(0,12)+' before trying again.','warn');
+          log('FINAL VERIFICATION UNAVAILABLE. Attempted commit: '+createdCommit.sha+'. Check GitHub before retrying.');setPill('Check GitHub');setProgress(0);
+        }
+      } else {
+        setStatus(e.message,'bad');log('PUBLISH STOPPED: '+e.message);setPill('Stopped');setProgress(0);
+      }
+    } finally {busy=false;el.previewBtn.disabled=false;syncCommitButton();}
   }
-  function reset(){if(busy)return;selectedFiles=[];preview=null;el.token.value='';el.zip.value='';el.folder.value='';el.confirmText.value='';el.secretReview.checked=false;el.secretReviewWrap.classList.add('hidden');el.fileLabel.textContent='No files selected yet.';el.log.textContent='';el.pathList.textContent='No files loaded.';el.pathCount.textContent='';for(const x of [el.newCount,el.oldCount,el.replaceCount,el.deleteCount])x.textContent='—';el.previewIntro.textContent='The page will check repository access and the selected branch before enabling the commit.';el.commitArea.classList.add('hidden');el.successArea.classList.add('hidden');el.commitBtn.disabled=true;setPill('Not ready');setStatus('Select your files and enter a repository/token to begin.');setProgress(0);}
+  function reset(){if(busy)return;selectedFiles=[];preview=null;el.token.value='';el.zip.value='';el.folder.value='';el.confirmText.value='';el.secretReview.checked=false;el.secretReviewWrap.classList.add('hidden');el.fileLabel.textContent='No files selected yet.';el.log.textContent='';el.pathList.textContent='No files loaded.';el.pathCount.textContent='';for(const x of [el.newCount,el.oldCount,el.replaceCount,el.deleteCount])x.textContent='—';el.previewIntro.textContent='The page will validate the selected archive locally, then check repository access and the selected branch.';el.commitArea.classList.add('hidden');el.successArea.classList.add('hidden');el.commitBtn.disabled=true;setPill('Not ready');setStatus('Select your files and enter a repository/token to begin.');setProgress(0);}
   el.zip.addEventListener('change',()=>{if(el.zip.files.length)el.folder.value='';invalidate();const f=el.zip.files[0];el.fileLabel.textContent=f?'ZIP selected: '+f.name+' · '+formatBytes(f.size):'No files selected yet.';});
   el.folder.addEventListener('change',()=>{if(el.folder.files.length)el.zip.value='';invalidate();const f=el.folder.files;el.fileLabel.textContent=f.length?f.length+' folder files selected · '+formatBytes(Array.from(f).reduce((s,x)=>s+x.size,0)):'No files selected yet.';});
   for(const x of [el.repo,el.branch,el.message,el.token])x.addEventListener('input',invalidate);
