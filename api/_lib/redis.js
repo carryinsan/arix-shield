@@ -1,4 +1,5 @@
-import { randomUUID, createHash, createHmac } from 'node:crypto';
+import { randomUUID, createHash, createHmac, randomBytes } from 'node:crypto';
+import { createTenantDek, derivePurposeKey, encryptTenantData, decryptTenantData, wrapTenantDek, unwrapTenantDek } from './kms.js';
 import { runWithCircuit } from './circuit-breaker.js';
 
 const localStore = globalThis.__ARIXSHIELD_LOCAL_REDIS__ ??= new Map();
@@ -6,7 +7,29 @@ const localAuditChains = globalThis.__ARIX_AUDIT_LOCAL_CHAINS__ ??= new Map();
 const localAuditQueues = globalThis.__ARIX_AUDIT_LOCAL_QUEUES__ ??= new Map();
 let warned = false;
 
-function redisConfigured() { return Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN); }
+export function normalizeRedisRestUrl(raw) {
+  if (typeof raw !== 'string' || raw.length > 2048 || raw !== raw.trim() || /[\u0000-\u0020\u007f]/.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash || (url.port && url.port !== '443') || !['', '/'].includes(url.pathname)) return null;
+    return url.origin;
+  } catch { return null; }
+}
+function redisEndpoint() {
+  const base = normalizeRedisRestUrl(process.env.UPSTASH_REDIS_REST_URL);
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!base || typeof token !== 'string' || !token || token.length > 8192 || /[\r\n\u0000]/.test(token)) return null;
+  return { base, token };
+}
+function redisConfigured() {
+  if (redisEndpoint()) return true;
+  // A partially present or malformed remote configuration is an operator error,
+  // never a reason to silently downgrade to process-local security state.
+  if (process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_REST_TOKEN) {
+    throw new Error('Invalid Upstash Redis configuration: use a credential-free HTTPS REST root URL and a valid token.');
+  }
+  return false;
+}
 function localModeAllowed() { return process.env.NODE_ENV !== 'production'; }
 function warnFallback() {
   if (!warned) { warned = true; console.warn('[ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.'); }
@@ -25,12 +48,15 @@ function setLocal(key, type, value, ttlSeconds = null) {
 async function command(parts) {
   if (!Array.isArray(parts) || !parts.length) throw new TypeError('Redis command must be a non-empty array.');
   if (!redisConfigured()) {
+    if (process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_REST_TOKEN) throw new Error('Invalid Upstash Redis configuration: use a credential-free HTTPS REST root URL and a valid token.');
     if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in production.');
     warnFallback(); return localCommand(parts);
   }
-  const base = process.env.UPSTASH_REDIS_REST_URL.replace(/\/+$/, '');
+  const endpoint = redisEndpoint();
+  if (!endpoint) throw new Error('Invalid Upstash Redis configuration: use a credential-free HTTPS REST root URL and a valid token.');
+  const { base, token } = endpoint;
   return runWithCircuit(`redis:${base}`, async (signal) => {
-    const response = await fetch(base, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(parts), signal });
+    const response = await fetch(base, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(parts), signal });
     if (!response.ok) throw new Error(`Upstash Redis REST request failed (${response.status}).`);
     const payload = await response.json();
     if (Object.hasOwn(payload, 'error')) throw new Error(`Upstash Redis error: ${String(payload.error).slice(0, 240)}`);
@@ -44,9 +70,11 @@ async function pipeline(commands) {
     if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.');
     warnFallback(); const results = []; for (const parts of commands) results.push(await localCommand(parts)); return results;
   }
-  const base = process.env.UPSTASH_REDIS_REST_URL.replace(/\/+$/, '');
+  const endpoint = redisEndpoint();
+  if (!endpoint) throw new Error('Invalid Upstash Redis configuration: use a credential-free HTTPS REST root URL and a valid token.');
+  const { base, token } = endpoint;
   return runWithCircuit(`redis:${base}`, async (signal) => {
-    const response = await fetch(`${base}/pipeline`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(commands), signal });
+    const response = await fetch(`${base}/pipeline`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(commands), signal });
     if (!response.ok) throw new Error(`Upstash pipeline failed (${response.status}).`);
     const rows = await response.json();
     if (!Array.isArray(rows)) throw new Error('Unexpected Upstash pipeline response.');
@@ -183,10 +211,125 @@ export async function rateLimit({ key, algorithm = 'SLIDING_WINDOW', limit = 60,
   return { allowed: Number(result[0]) === 1, remaining: Math.max(0, Number(result[1]) || 0), retryAfterMs: Math.max(0, Number(result[2]) || 0) };
 }
 
-export async function getJson(key) { const value = await command(['GET', key]); if (value == null) return null; try { return JSON.parse(value); } catch { return null; } }
+const CUSTOMER_RECORD_SCHEMA = 'arix.customer-record.v1';
+const CUSTOMER_RECORD_KEK_VERSION = process.env.ARIX_CUSTOMER_RECORD_KEK_VERSION || 'master-v1';
+const CUSTOMER_RECORD_COMPARE_SET_LUA = `
+local current = redis.call('GET', KEYS[1])
+if current ~= ARGV[1] then return 0 end
+local ttl = redis.call('PTTL', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[2])
+if ttl > 0 then redis.call('PEXPIRE', KEYS[1], ttl) end
+return 1
+`;
+
+function customerRecordType(key) {
+  if (typeof key !== 'string' || key.length > 512) return null;
+  if (key.startsWith('arix:user:')) return { type: 'user', recordId: key.slice('arix:user:'.length) };
+  if (key.startsWith('arix:project:')) return { type: 'project', recordId: key.slice('arix:project:'.length) };
+  return null;
+}
+
+function customerRecordMasterSecret() {
+  const configured = process.env.ARIX_MASTER_SECRET;
+  if (configured && Buffer.byteLength(configured) >= 32) return Buffer.from(configured, 'utf8');
+  if (process.env.NODE_ENV === 'production') throw new Error('ARIX_MASTER_SECRET must contain at least 32 bytes for customer-record encryption.');
+  globalThis.__ARIX_CUSTOMER_RECORD_MASTER__ ??= randomBytes(48);
+  return Buffer.from(globalThis.__ARIX_CUSTOMER_RECORD_MASTER__);
+}
+
+function customerKek(tenantId, version = CUSTOMER_RECORD_KEK_VERSION) {
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(String(version))) throw new TypeError('Invalid customer record KEK version.');
+  const configured = process.env.ARIX_CUSTOMER_RECORD_KEKS_JSON;
+  if (configured) {
+    let map;
+    try { map = JSON.parse(configured); } catch { throw new Error('ARIX_CUSTOMER_RECORD_KEKS_JSON is invalid.'); }
+    const encoded = map?.[version];
+    if (typeof encoded !== 'string') throw new Error(`Customer record KEK ${version} is not configured.`);
+    if (!/^[A-Za-z0-9+/]{43}=$/.test(encoded)) throw new Error(`Customer record KEK ${version} must be canonical base64 for exactly 32 bytes.`);
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.length !== 32 || bytes.toString('base64') !== encoded) throw new Error(`Customer record KEK ${version} must decode to exactly 32 bytes.`);
+    return bytes;
+  }
+  const master = customerRecordMasterSecret();
+  try { return derivePurposeKey(master, `customer-record:${version}`, String(tenantId)); }
+  finally { master.fill(0); }
+}
+
+function encryptCustomerRecord(key, value) {
+  const identity = customerRecordType(key);
+  if (!identity || !value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Customer record must be a user/project object.');
+  const tenantId = identity.type === 'user' ? String(value.id || '') : String(value.ownerId || '');
+  if (!tenantId || tenantId.length > 180 || identity.recordId !== (identity.type === 'user' ? String(value.id || '') : String(value.id || ''))) throw new Error('CUSTOMER_RECORD_SCOPE_INVALID');
+  const version = CUSTOMER_RECORD_KEK_VERSION;
+  const kek = customerKek(tenantId, version);
+  const dek = createTenantDek();
+  try {
+    const keks = { [version]: kek };
+    const wrappedDek = wrapTenantDek(dek, { tenantId, kekVersion: version, keks });
+    const purpose = `customer-record:${identity.type}:${identity.recordId}`;
+    const encrypted = encryptTenantData(JSON.stringify(value), { tenantId, dek, purpose });
+    return { schema: CUSTOMER_RECORD_SCHEMA, recordType: identity.type, recordId: identity.recordId, tenantId, wrappedDek, encrypted };
+  } finally { kek.fill(0); dek.fill(0); }
+}
+
+function decryptCustomerRecord(key, envelope) {
+  const identity = customerRecordType(key);
+  if (!identity || envelope?.schema !== CUSTOMER_RECORD_SCHEMA || envelope.recordType !== identity.type || envelope.recordId !== identity.recordId || typeof envelope.tenantId !== 'string' || !envelope.tenantId) throw new Error('CUSTOMER_RECORD_ENVELOPE_INVALID');
+  const version = String(envelope.wrappedDek?.kekVersion || '');
+  const kek = customerKek(envelope.tenantId, version);
+  let dek;
+  let plaintext;
+  try {
+    dek = unwrapTenantDek(envelope.wrappedDek, { tenantId: envelope.tenantId, keks: { [version]: kek } });
+    plaintext = decryptTenantData(envelope.encrypted, { tenantId: envelope.tenantId, dek, purpose: `customer-record:${identity.type}:${identity.recordId}` });
+    const value = JSON.parse(plaintext.toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('CUSTOMER_RECORD_PLAINTEXT_INVALID');
+    return value;
+  } finally { kek.fill(0); dek?.fill(0); plaintext?.fill(0); }
+}
+
+async function compareAndSetLegacyCustomerRecord(key, previous, next) {
+  if (!redisConfigured()) {
+    if (process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_REST_TOKEN) throw new Error('Invalid Redis configuration during customer record migration.');
+    const current = getLocal(key);
+    if (!current || current.type !== 'string' || current.value !== previous) return false;
+    setLocal(key, 'string', next, current.expiresAt ? Math.max(1, Math.ceil((current.expiresAt - Date.now()) / 1000)) : null);
+    return true;
+  }
+  return Number(await command(['EVAL', CUSTOMER_RECORD_COMPARE_SET_LUA, '1', key, previous, next])) === 1;
+}
+
+export async function getJson(key) {
+  const raw = await command(['GET', key]);
+  if (raw == null) return null;
+  let value;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (!customerRecordType(key)) return value;
+  if (value?.schema === CUSTOMER_RECORD_SCHEMA) return decryptCustomerRecord(key, value);
+  // Existing v1.4.1 plaintext account/project documents are transparently and
+  // atomically upgraded on first read; concurrent writers cannot be overwritten.
+  const encrypted = encryptCustomerRecord(key, value);
+  const migrated = await compareAndSetLegacyCustomerRecord(key, raw, JSON.stringify(encrypted));
+  if (migrated) return value;
+  // A concurrent writer may have replaced the plaintext between GET and CAS.
+  // Return the latest committed value rather than stale data read before the race.
+  const latest = await command(['GET', key]);
+  if (latest == null) return null;
+  let latestValue;
+  try { latestValue = JSON.parse(latest); } catch { throw new Error('CUSTOMER_RECORD_JSON_INVALID'); }
+  if (latestValue?.schema === CUSTOMER_RECORD_SCHEMA) return decryptCustomerRecord(key, latestValue);
+  if (process.env.NODE_ENV === 'production' || process.env.ARIX_CUSTOMER_RECORD_ENCRYPTION_REQUIRED === 'true') throw new Error('CUSTOMER_RECORD_ENCRYPTION_REQUIRED');
+  return latestValue;
+}
 /** Atomically fetches and deletes a JSON value (one-time challenges/nonces). */
 export async function getJsonOnce(key) { const value = await command(['GETDEL', key]); if (value == null) return null; try { return JSON.parse(value); } catch { return null; } }
-export async function setJson(key, value, ttlSeconds = null, nx = false) { const args = ['SET', key, JSON.stringify(value)]; if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds))); if (nx) args.push('NX'); return command(args); }
+export async function setJson(key, value, ttlSeconds = null, nx = false) {
+  const stored = customerRecordType(key) ? encryptCustomerRecord(key, value) : value;
+  const args = ['SET', key, JSON.stringify(stored)];
+  if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds)));
+  if (nx) args.push('NX');
+  return command(args);
+}
 export async function setString(key, value, ttlSeconds = null, nx = false) { const args = ['SET', key, String(value)]; if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds))); if (nx) args.push('NX'); return command(args); }
 export async function getString(key) { return command(['GET', key]); }
 export async function deleteKeys(...keys) { return keys.length ? command(['DEL', ...keys]) : 0; }
@@ -255,7 +398,7 @@ export async function hashSet(key, values) { const args = ['HSET', key]; for (co
 export async function hashGetMany(key, ...fields) { return command(['HMGET', key, ...fields]); }
 export async function isUsingUpstash() { return redisConfigured(); }
 export async function pingRedis() { return command(['PING']); }
-export function getRedisConfigurationStatus() { const hasUrl = Boolean(process.env.UPSTASH_REDIS_REST_URL); const hasToken = Boolean(process.env.UPSTASH_REDIS_REST_TOKEN); return { configured: hasUrl && hasToken, hasUrl, hasToken, mode: hasUrl && hasToken ? 'upstash' : (localModeAllowed() ? 'ephemeral-local' : 'unconfigured') }; }
+export function getRedisConfigurationStatus() { const hasUrl = Boolean(process.env.UPSTASH_REDIS_REST_URL); const hasToken = Boolean(process.env.UPSTASH_REDIS_REST_TOKEN); const validUrl = Boolean(normalizeRedisRestUrl(process.env.UPSTASH_REDIS_REST_URL)); const configured = validUrl && hasToken && Boolean(redisEndpoint()); return { configured, hasUrl, hasToken, validUrl, mode: configured ? 'upstash' : (hasUrl || hasToken ? 'invalid-configuration' : (localModeAllowed() ? 'ephemeral-local' : 'unconfigured')) }; }
 
 const AUDIT_GENESIS = '0'.repeat(64);
 const AUDIT_CHAIN_CAS_LUA = `

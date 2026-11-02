@@ -20,7 +20,7 @@ Copy `.env.example` into Vercel Project Settings → Environment Variables. Neve
 
 ## 1A. Password security and step-up verification
 
-New passwords use PBKDF2-HMAC-SHA-256 with 600,000 iterations. Existing lower-iteration hashes remain verifiable and are upgraded after a successful full login. Registration and password changes reject common patterns, ArixShield/project/email context words, and passwords found in the Have I Been Pwned Pwned Passwords corpus. The breach lookup uses its k-anonymity range protocol: only a five-hex-character SHA-1 prefix is sent, never the password. If the service is unavailable, registration/password change fails closed with `503` rather than silently skipping the breach check.
+New password records use Node.js `crypto.scrypt` (N=32768, r=8, p=3; 32-byte output; bounded 64 MiB maxmem). Historical PBKDF2-HMAC-SHA-256 records remain verifiable and are upgraded to scrypt after a successful full login. Password policy always checks the bundled curated common/contextual-password denylist. The optional Have I Been Pwned k-anonymity range lookup sends only a five-hex-character SHA-1 prefix (never the password), has a 400 ms timeout, and is disabled with `ARIX_HIBP_LOOKUP=false`. If it is unavailable or disabled, the curated offline checks remain active and the password must also meet a 52-bit Shannon-distribution heuristic. That heuristic is not a dictionary-attack model. The bundled list is not a 250,000-entry breach corpus and cannot identify every previously leaked password.
 
 Users can change passwords from the dashboard using the current password; TOTP is also required when enabled. Password changes revoke other sessions and issue a fresh session to the current browser. Origin allowlist changes and transitions from `ENFORCE` to `DRY_RUN` require fresh password proof and TOTP when enabled.
 
@@ -57,7 +57,7 @@ app.use(createArixShield({
   schema: checkoutSchema,
   openapiDocument,
   shadowApiCatalog: true,
-  getIdentity: (req, { ip }) => `${req.user?.id || 'anonymous'}:${req.user?.tenantId || 'default'}:${ip}`,
+  getIdentity: (req) => `${req.user?.id || 'anonymous'}:${req.user?.tenantId || 'default'}`,
   requestDlp: true,
   responseDlp: true,
   responseOwnershipGuard: true,
@@ -86,7 +86,7 @@ export const GET = withArixShield(handler, {
   abuseProtection: true,
   openapiDocument,
   shadowApiCatalog: true,
-  getIdentity: async (request, { ip }) => `${(await getAuthenticatedUser(request)).id}:${ip}`,
+  getIdentity: async (request) => (await getAuthenticatedUser(request)).id,
   getOwnershipIdentity: async (request) => (await getAuthenticatedUser(request)).id,
   responseOwnershipGuard: true,
   requestDlp: true,
@@ -114,7 +114,7 @@ The optional Knuth reserved-ID trap is disabled by default. Set `ARIX_RESERVED_T
 
 The SDK evaluates configured route authorization before calling the protected handler. Supply verified context through `getAuthorizationContext` (`userId`, `tenantId`, roles and permissions). Use `authorization.routes` for method/path rules, roles, permissions, `tenantIsolated`, and an application-specific `preCheck`. Enable `mutationTripwire: true` to deny unconfigured mutating routes and require tenant isolation plus a pre-check on configured mutations. Do not use a generic pre-check that always returns true.
 
-The optional `allowedWriteFields` role map strips fields that a caller cannot write. `restrictedReadFields` strips fields that the caller cannot read from JSON responses. The request context exposes `scopeQuery` to compose tenant and owner predicates for Prisma-style and Mongo-style structured queries. This helper does not intercept direct ORM/driver calls or raw SQL: every repository read and mutation must still enforce ownership, including background jobs and admin paths.
+The optional `allowedWriteFields` role map strips fields that a caller cannot write. `restrictedReadFields` strips fields that the caller cannot read from JSON responses. The request context exposes `scopeQuery` to compose tenant and owner predicates for Prisma-style and Mongo-style structured queries. The Node SDK also exports `runWithArixContext`, `getArixContext`, and `protectPrismaClient`: the Prisma wrapper scopes supported model operations to the verified AsyncLocalStorage tenant/user context, blocks raw SQL and unsupported/nested operations, and fails closed when context is absent. Replace the application client reference with the returned protected client at startup; an unwrapped client reference, other ORM/driver, database console, background job without explicit context, or raw SQL outside the wrapper remains outside this enforcement boundary. Database-native RLS remains the stronger independent control.
 
 See [SECURITY-UPGRADES.md](SECURITY-UPGRADES.md) for complete Node and Next.js configuration examples, raw-body DPoP integration, workflow configuration, safe outbound fetch and account security behavior.
 
@@ -148,13 +148,14 @@ An optional project `alertWebhookUrl` can receive critical incident events over 
 
 ## 7B. Production integrity manifest
 
-The build checker hashes repository `.js`, `.mjs`, and `.html` files into `docs/INTEGRITY-MANIFEST.json`. The source archive does not contain a production signature or master secret. The committed Vercel build command runs `npm run build`, which regenerates and verifies the manifest using the configured `ARIX_MASTER_SECRET`; production builds fail before deployment if the secret is missing or shorter than 32 bytes. For a local release build, provide the same secret through the environment and run:
+The build checker hashes repository `.js`, `.mjs`, and `.html` files into the canonical `docs/INTEGRITY-MANIFEST.json` and writes an identical runtime copy to `api/_integrity-manifest.json`. The static check fails if those two copies differ. The source archive does not contain a production signature or master secret. The committed Vercel build command runs `npm run build`, which regenerates and verifies the manifest using the configured `ARIX_MASTER_SECRET`; production builds fail before deployment if the secret is missing or shorter than 32 bytes. The production build preflight also requires an independent `CRON_SECRET` (at least 32 bytes), a credential-free HTTPS Upstash REST root URL plus its existing server-side token, and a valid RSA private JWK of at least 3072 bits identified by `ARIX_CLEARANCE_KID`. It signs the manifest, re-runs static gates and executes all deterministic tests. It does not connect to Upstash or validate live deployment resources. For a local release build, provide the existing production values through the environment and run:
 
 ```sh
-ARIX_MASTER_SECRET="$ARIX_MASTER_SECRET" npm run build
+# Export the existing production values in trusted CI, then run:
+NODE_ENV=production npm run build
 ```
 
-The production runtime checks manifest coverage and hashes for `api/_lib/*.js`, manifest signature, required master-secret length, RSA-3072 clearance private JWK strength, and HTTPS headers. Regenerate older 2048-bit clearance keys with `npm run generate:clearance-keys` and update both public/private key environment values before deploying this release. Do not commit the master secret or generated private JWK. The static scanner is a dependency-free lexical gate, not a full AST SAST engine; supplement it with independent SAST/SCA/DAST and penetration testing.
+The production runtime checks manifest coverage and hashes for every `api/**/*.js` and `api/**/*.mjs` route/shared module, rejects API symlinks and missing/extra API source entries, verifies the manifest signature, required master-secret length, RSA-3072 clearance private JWK strength, and HTTPS headers. The canonical manifest lives at `docs/INTEGRITY-MANIFEST.json`; `npm run integrity:update` maintains an identical API-bundled mirror at `api/_integrity-manifest.json`. Vercel API functions include `api/**/*`, so the runtime manifest and all API source files travel together. Regenerate older 2048-bit clearance keys with `npm run generate:clearance-keys` and update both public/private key environment values before deploying this release. Do not commit the master secret or generated private JWK. The static scanner is a dependency-free lexical gate, not a full AST SAST engine; supplement it with independent SAST/SCA/DAST and penetration testing.
 
 ## 8. OpenAPI and Zod schema integration
 
@@ -198,3 +199,22 @@ npm test
 ```
 
 Passing local checks is not a deployment test, external-provider integration test, third-party penetration test, or proof of zero vulnerabilities. Run the checks after every change and validate on a staging deployment with real Upstash credentials and representative application routes before production enforcement.
+
+
+### Optional Node AsyncLocalStorage + Prisma scope adapter
+
+New Node SDK exports `runWithArixContext`, `getArixContext`, and `protectPrismaClient`. The middleware establishes an AsyncLocalStorage context only from `getAuthorizationContext` / `getAuthContext` values returned by application authentication middleware (plus a trusted, static tenant configuration) before calling the downstream handler. The `getIdentity` fallback is deliberately not accepted as proof of a database user identity; if no trusted context user is present, Prisma operations fail closed. To use the optional Prisma adapter, wrap the only Prisma client reference at server startup and keep the raw client private:
+
+```js
+import { PrismaClient } from '@prisma/client';
+import { protectPrismaClient } from 'arixshield/node';
+
+const prisma = protectPrismaClient(new PrismaClient(), {
+  tenantField: 'tenantId',
+  ownerField: 'ownerId'
+});
+```
+
+Adjust the field names (or configure `modelPolicies`) to match the actual Prisma schema. The adapter automatically scopes its supported read, update, delete, create, createMany and upsert operations to the current tenant and user. It rejects raw SQL, nested relation writes, Prisma extensions and unknown client/delegate operations. Unsupported operation errors are deliberate: use a separately reviewed repository method only after proving tenant isolation. This adapter does not intercept an unwrapped client, a different ORM/driver, background jobs or code that runs outside the SDK middleware. Do not derive the ALS context from request-body fields; the user and tenant must already have been authenticated and authorized. Add database-native RLS where supported.
+
+Stable identity values returned by `getIdentity` should not contain IP addresses. The SDK strips a matching trailing client-IP suffix for continuity across network handoffs; it does not make a browser-supplied identity authenticated.

@@ -1,4 +1,6 @@
+import { HIBP_LOOKUP_TIMEOUT_MS } from './security-constants.js';
 import { createHash } from 'node:crypto';
+import { defaultBreachFilter, normalizeBreachCandidate } from './breach-filter.js';
 
 const COMMON_PASSWORDS = new Set([
   'password', 'password1', 'password12', 'password123', 'password1234', 'password12345',
@@ -39,12 +41,40 @@ function contextTerms({ email = '', projectName = '' } = {}) {
   return [...new Set(values)];
 }
 
+export function estimateShannonEntropyBits(password) {
+  const symbols = [...String(password || '').normalize('NFKC')];
+  if (!symbols.length) return 0;
+  const counts = new Map();
+  for (const symbol of symbols) counts.set(symbol, (counts.get(symbol) || 0) + 1);
+  let entropyPerSymbol = 0;
+  for (const count of counts.values()) {
+    const probability = count / symbols.length;
+    entropyPerSymbol -= probability * Math.log2(probability);
+  }
+  // This is a Shannon-distribution heuristic, not a password-cracking model:
+  // common/contextual denylisting remains mandatory and online breach lookup is preferred.
+  return entropyPerSymbol * symbols.length;
+}
+
 function isCommonPassword(password) {
-  const value = comparable(password);
-  if (COMMON_PASSWORDS.has(value)) return true;
-  // Block the most common word + predictable numeric/punctuation suffix pattern.
-  for (const base of ['password', 'passw0rd', 'qwerty', 'welcome', 'letmein', 'admin', 'administrator', 'changeme', 'iloveyou', 'sunshine', 'princess', 'football', 'dragon', 'monkey', 'shadow', 'master', 'login', 'testing']) {
-    if (value.startsWith(base) && value.length - base.length >= 2 && /^\d{2,}$/.test(value.slice(base.length))) return true;
+  const raw = String(password || '').normalize('NFKC').toLowerCase();
+  if (defaultBreachFilter.has(password) || COMMON_PASSWORDS.has(comparable(password))) return true;
+
+  // Generate a small bounded set of exact roots by removing only terminal
+  // digits and then terminal decoration. Internal symbols are never stripped
+  // before their leetspeak normalization, and no fuzzy substring matching is used.
+  const candidates = new Set();
+  let stem = raw;
+  for (let digits = 0; digits <= 8; digits++) {
+    const undecorated = stem.replace(/[!#$%^&*_.@-]+$/g, '');
+    const normalized = normalizeBreachCandidate(undecorated);
+    if (normalized) candidates.add(normalized);
+    if (!/\d$/.test(stem)) break;
+    stem = stem.slice(0, -1);
+  }
+  const knownBases = new Set(['password', 'qwerty', 'welcome', 'letmein', 'admin', 'administrator', 'changeme', 'iloveyou', 'sunshine', 'princess', 'football', 'dragon', 'monkey', 'shadow', 'master', 'login', 'testing']);
+  for (const candidate of candidates) {
+    if (defaultBreachFilter.has(candidate) || COMMON_PASSWORDS.has(candidate) || knownBases.has(candidate)) return true;
   }
   return false;
 }
@@ -52,7 +82,8 @@ function isCommonPassword(password) {
 /**
  * Uses the Pwned Passwords k-anonymity range API: only the first five hex
  * characters of the SHA-1 digest leave this process; the password never does.
- * Fail closed when the breach corpus cannot be checked.
+ * A timeout/outage is fail-soft: the bundled offline common/contextual checks
+ * remain authoritative, but they are not a complete breach corpus.
  */
 export async function isBreachedPassword(password) {
   const hash = createHash('sha1').update(String(password), 'utf8').digest('hex').toUpperCase();
@@ -63,17 +94,15 @@ export async function isBreachedPassword(password) {
     response = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
       method: 'GET',
       headers: { 'Add-Padding': 'true', 'User-Agent': 'ArixShield-Password-Policy/1.0' },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(HIBP_LOOKUP_TIMEOUT_MS)
     });
   } catch {
-    throw Object.assign(new Error('Breached-password verification is temporarily unavailable.'), { statusCode: 503 });
+    throw new Error('BREACH_LOOKUP_UNAVAILABLE');
   }
-  if (!response.ok) throw Object.assign(new Error('Breached-password verification is temporarily unavailable.'), { statusCode: 503 });
+  if (!response.ok) throw new Error('BREACH_LOOKUP_UNAVAILABLE');
   let body;
-  try { body = await response.text(); } catch {
-    throw Object.assign(new Error('Breached-password verification is temporarily unavailable.'), { statusCode: 503 });
-  }
-  if (body.length > 1_500_000) throw Object.assign(new Error('Breached-password response exceeded the safety limit.'), { statusCode: 503 });
+  try { body = await response.text(); } catch { throw new Error('BREACH_LOOKUP_UNAVAILABLE'); }
+  if (body.length > 1_500_000) throw new Error('BREACH_LOOKUP_UNAVAILABLE');
   for (const line of body.split(/\r?\n/)) {
     const match = /^([A-F0-9]{35}):([0-9]+)$/i.exec(line.trim());
     if (match && match[1].toUpperCase() === suffix && Number(match[2]) > 0) return true;
@@ -82,13 +111,24 @@ export async function isBreachedPassword(password) {
 }
 
 export async function validatePasswordPolicy(password, context = {}, breachedLookup = isBreachedPassword) {
-  if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+  if (typeof password !== 'string' || [...password].length < 12 || [...password].length > 128 || Buffer.byteLength(password, 'utf8') > 128) {
     return { valid: false, code: 'PASSWORD_LENGTH', message: 'Password must be 12–128 characters.' };
   }
   const candidate = comparable(password);
   const blockedContext = contextTerms(context).some((term) => candidate.includes(term));
   if (blockedContext) return { valid: false, code: 'PASSWORD_CONTEXT', message: 'Password must not contain ArixShield, your email name, or your project name.' };
   if (isCommonPassword(password)) return { valid: false, code: 'PASSWORD_COMMON', message: 'Choose a less common password that is not based on a predictable password pattern.' };
-  if (await breachedLookup(password)) return { valid: false, code: 'PASSWORD_BREACHED', message: 'This password appears in known breach data. Choose a different password.' };
+  // Live k-anonymity lookup is optional and bounded. If it is disabled or unavailable,
+  // retain the local denylist and require a conservative Shannon-distribution floor.
+  let lookupAvailable = false;
+  let breached = false;
+  if (process.env.ARIX_HIBP_LOOKUP !== 'false') {
+    try { breached = await breachedLookup(password); lookupAvailable = true; }
+    catch { lookupAvailable = false; }
+  }
+  if (breached) return { valid: false, code: 'PASSWORD_BREACHED', message: 'This password appears in known breach data. Choose a different password.' };
+  if (!lookupAvailable && estimateShannonEntropyBits(password) < 52) {
+    return { valid: false, code: 'PASSWORD_STRENGTH_UNVERIFIED', message: 'The breach-check service is unavailable. Choose a password with at least 52 estimated Shannon-distribution bits and avoid predictable patterns.' };
+  }
   return { valid: true };
 }

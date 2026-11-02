@@ -2,17 +2,19 @@ import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey } from './_lib/http.js';
 import { rateLimit, getJson, getJsonOnce, getString, setJson, setString, deleteKeys, incrementWithExpiry, setMaxStringWithExpiry } from './_lib/redis.js';
 import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential, createSignedToken, verifySignedToken } from './_lib/crypto-trap.js';
-import { createSession, getSession, listUserSessions, revokeUserSession } from './_lib/session.js';
+import { LEGACY_PBKDF2_ITERATIONS } from './_lib/security-constants.js';
+import { createSession, getSession, listUserSessions, revokeUserSession, revokeAllUserSessions, rotateSession } from './_lib/session.js';
 import { formatIpPrefix } from './_lib/cidr.js';
 import { generateTotpSecret, decryptTotpSecret, matchTotpCounter, totpProvisioningUri } from './_lib/mfa.js';
 import { validatePasswordPolicy } from './_lib/password-policy.js';
 import { verifyStepUpCredentials } from './_lib/step-up.js';
+import { evaluateLoginRisk } from './_lib/identity-risk.js';
 import { verifyWebAuthnRegistration, verifyWebAuthnAssertion, decodeWebAuthnBase64url } from './_lib/webauthn.js';
+import { generateMfaRecoveryCodes, consumeMfaRecoveryCode } from './_lib/recovery-codes.js';
 
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
 const SESSION_TTL = 86400;
-const PASSWORD_HASH_ITERATIONS = 600000;
-const DUMMY_PASSWORD = Object.freeze({ salt: 'MDEyMzQ1Njc4OWFiY2RlZg', hash: 'm5zv3v3aA0-2p-2D8uZpT_Es4q4QO1Jr5FS3YxTzTYA', iterations: PASSWORD_HASH_ITERATIONS });
+const DUMMY_PASSWORD = Object.freeze({ salt: 'MDEyMzQ1Njc4OWFiY2RlZg', hash: 'm5zv3v3aA0-2p-2D8uZpT_Es4q4QO1Jr5FS3YxTzTYA', iterations: LEGACY_PBKDF2_ITERATIONS });
 
 function isSecure(req) { return process.env.VERCEL === '1' || process.env.NODE_ENV === 'production' || String(req.headers?.['x-forwarded-proto'] ?? '').split(',')[0] === 'https'; }
 function validName(value) { return typeof value === 'string' && value.trim().length >= 2 && value.trim().length <= 80; }
@@ -118,6 +120,65 @@ async function recordAccountLoginFailure(emailHash) {
   }
 }
 
+function ensureMfaRecoveryCodes(user) {
+  if (Array.isArray(user.recoveryCodes) && user.recoveryCodes.length > 0) return [];
+  const generated = generateMfaRecoveryCodes();
+  user.recoveryCodes = generated.hashes;
+  user.recoveryCodesIssuedAt = Date.now();
+  return [...generated.codes];
+}
+
+async function recoverMfaAccount(body, req, res) {
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  const recoveryCode = String(body.recoveryCode || '');
+  if (!EMAIL_RE.test(email) || password.length < 1 || password.length > 128 || recoveryCode.length > 64) {
+    return sendJson(res, 401, { error: 'Account credentials or recovery code are invalid.' });
+  }
+  const emailHash = await sha256Hex(email);
+  const ownerId = await getString(`arix:user-email:${emailHash}`);
+  const user = ownerId ? await getJson(`arix:user:${ownerId}`) : null;
+  const passwordValid = await verifyPassword(password, user?.password || DUMMY_PASSWORD);
+  if (!user || !passwordValid || !Array.isArray(user.recoveryCodes) || user.recoveryCodes.length === 0) {
+    await recordAccountLoginFailure(emailHash);
+    return sendJson(res, 401, { error: 'Account credentials or recovery code are invalid.' });
+  }
+  // Confirm a valid owned project before burning the user's only recovery code.
+  const projectId = await findOwnedProject(ownerId);
+  const project = projectId ? await getJson(`arix:project:${projectId}`) : null;
+  if (!project || project.ownerId !== ownerId) return sendJson(res, 403, { error: 'This account has no active project.' });
+  const consumed = await consumeMfaRecoveryCode(recoveryCode, {
+    hashes: user.recoveryCodes,
+    consumeDigest: async (digest) => {
+      const digestHash = await sha256Hex(digest);
+      return (await setString(`arix:mfa:recovery-used:${ownerId}:${digestHash}`, '1', 315360000, true)) === 'OK';
+    }
+  });
+  if (!consumed.valid) {
+    await recordAccountLoginFailure(emailHash);
+    return sendJson(res, 401, { error: 'Account credentials or recovery code are invalid.' });
+  }
+
+  const credentialIds = (Array.isArray(user.passkeys) ? user.passkeys : []).map((item) => item?.credentialId).filter((value) => typeof value === 'string' && value.length <= 2048);
+  delete user.totpSecret;
+  delete user.totpEnabledAt;
+  delete user.totpEnrolledAt;
+  delete user.recoveryCodes;
+  delete user.recoveryCodesIssuedAt;
+  user.totpEnabled = false;
+  user.passkeys = [];
+  user.mfaRecoveredAt = new Date().toISOString();
+  await setJson(`arix:user:${ownerId}`, user);
+  if (credentialIds.length) {
+    const keys = await Promise.all(credentialIds.map(async (id) => `arix:webauthn:credential:${await sha256Hex(id)}`));
+    await deleteKeys(...keys);
+  }
+  await revokeAllUserSessions(ownerId);
+  const fresh = await createSession(ownerId, projectId, req);
+  setSessionCookie(res, fresh.token, fresh.ttl, isSecure(req));
+  return sendJson(res, 200, { ok: true, recovered: true, mfaReset: true, requireMfaReenrollment: true, message: 'MFA factors were reset, existing sessions were revoked, and this browser received a new session. Re-enroll a passkey or authenticator now.' });
+}
+
 async function loginAccount(body, req, res) {
   const email = String(body.email ?? '').trim().toLowerCase();
   const password = String(body.password ?? '');
@@ -143,10 +204,11 @@ async function loginAccount(body, req, res) {
   const user = ownerId ? await getJson(`arix:user:${ownerId}`) : null;
   const passwordRecord = user?.password ?? DUMMY_PASSWORD;
   const valid = await verifyPassword(password, passwordRecord);
-  if (!user || !valid) {
+  if (!user?.password || !valid) {
      await recordAccountLoginFailure(emailHash);
     return sendJson(res, 401, { error: 'Email or password is incorrect.' });
   }
+  let secondFactorVerified = false;
   if (user.totpEnabled === true) {
     let secret;
     try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'MFA configuration is unavailable. Contact the project administrator.' }); }
@@ -154,10 +216,23 @@ async function loginAccount(body, req, res) {
        await recordAccountLoginFailure(emailHash);
       return sendJson(res, 401, { error: 'Email or password is incorrect, or the authenticator code is invalid.' });
     }
+    secondFactorVerified = true;
   }
-  // Upgrade historical password hashes after full authentication. Verification
-  // remains compatible with stored per-record iteration counts during migration.
-  if (Number(passwordRecord.iterations) < PASSWORD_HASH_ITERATIONS) {
+  const recentFailures = Math.max(0, Math.min(5, Number(await getString(`arix:auth:acct-failure-count:${emailHash}`)) || 0));
+  const loginRisk = evaluateLoginRisk({ failedLoginCount: recentFailures });
+  if (loginRisk.decision !== 'allow' && !secondFactorVerified) {
+    const hasPasskey = Array.isArray(user.passkeys) && user.passkeys.length > 0;
+    return sendJson(res, 428, {
+      error: hasPasskey ? 'Additional passkey verification is required for this sign-in.' : 'Additional multi-factor verification is required for this sign-in. Contact the account administrator to enroll a second factor.',
+      stepUpRequired: true,
+      challengeType: hasPasskey ? 'passkey' : 'mfa-enrollment',
+      riskScore: loginRisk.riskScore,
+      reasons: loginRisk.reasons
+    }, { 'Cache-Control': 'no-store' });
+  }
+  // A validated TOTP/passkey is treated as the second-factor step-up proof.
+  // Upgrade every historical PBKDF2 record only after the risk decision passes.
+  if (passwordRecord.algorithm !== 'scrypt') {
     user.password = await derivePassword(password);
     await setJson(`arix:user:${ownerId}`, user);
   }
@@ -189,11 +264,10 @@ async function changePassword(body, req, res, session) {
   user.passwordChangedAt = new Date().toISOString();
   await setJson(`arix:user:${session.ownerId}`, user);
 
-  // Issue the replacement first, then revoke every prior session so a failure
-  // during cleanup cannot lock the account out of its newly changed password.
-  const freshSession = await createSession(session.ownerId, session.projectId, req);
-  const sessions = await listUserSessions(session.ownerId);
-  await Promise.all(sessions.filter((item) => item.tokenHash !== freshSession.tokenHash).map((item) => revokeUserSession(session.ownerId, item.tokenHash)));
+  // Rotate the current session and revoke all other sessions. Reuse of the
+  // spent cookie triggers a family-wide replay kill switch in getSession().
+  const freshSession = await rotateSession(session.ownerId, session.projectId, session.tokenHash, req);
+  if (!freshSession) return sendJson(res, 503, { error: 'Session rotation could not be completed. Sign in again and retry.' });
   setSessionCookie(res, freshSession.token, freshSession.ttl, isSecure(req));
   return sendJson(res, 200, { ok: true, changed: true, message: 'Password changed. Other sessions were revoked and this browser received a fresh session.' });
 }
@@ -302,11 +376,12 @@ async function registerPasskey(body, req, res) {
   const existing = await getJson(`arix:webauthn:credential:${credentialHash}`);
   if (existing) return sendJson(res, 409, { error: 'This passkey is already registered.' });
   user.passkeys = [...credentials, credential];
+  const recoveryCodes = ensureMfaRecoveryCodes(user);
   await Promise.all([
     setJson(`arix:user:${session.ownerId}`, user),
     setJson(`arix:webauthn:credential:${credentialHash}`, { ownerId: session.ownerId, projectId: session.projectId, credentialId: credential.credentialId, createdAt: Date.now() })
   ]);
-  return sendJson(res, 201, { ok: true, credentialId: credential.credentialId, registeredAt: credential.registeredAt });
+  return sendJson(res, 201, { ok: true, credentialId: credential.credentialId, registeredAt: credential.registeredAt, ...(recoveryCodes.length ? { recoveryCodes, recoveryCodesNotice: 'Save these eight recovery codes now. They are shown only once.' } : {}) });
 }
 
 async function loginWithPasskey(body, req, res) {
@@ -358,12 +433,12 @@ async function handler(req, res) {
   try {
     const body = await readJson(req, 12000);
     const action = String(body.action || 'unknown').slice(0, 48);
-    const publicCredentialActions = new Set(['signup', 'login', 'passkey-login-options', 'passkey-login']);
+    const publicCredentialActions = new Set(['signup', 'login', 'passkey-login-options', 'passkey-login', 'recover-mfa']);
     const session = publicCredentialActions.has(action) ? null : await getSession(req);
     let limitKey;
     let limitCount;
     let limitWindowMs;
-    if (action === 'login' || action === 'signup') {
+    if (action === 'login' || action === 'signup' || action === 'recover-mfa') {
       // A password/signup rate bucket follows the account being attempted, not a
       // shared carrier/office IP. Account failure lockout remains independently enforced.
       const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
@@ -386,6 +461,7 @@ async function handler(req, res) {
     if (!limit.allowed) return sendJson(res, 429, { error: 'Too many account requests for this account or endpoint. Try again shortly.' }, { 'Retry-After': String(Math.ceil(limit.retryAfterMs / 1000)) });
     if (body.action === 'signup') return await provisionAccount(body, req, res);
     if (body.action === 'login') return await loginAccount(body, req, res);
+    if (body.action === 'recover-mfa') return await recoverMfaAccount(body, req, res);
     if (body.action === 'change-password') return await changePassword(body, req, res, session);
     if (body.action === 'passkey-register-options') {
       const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to register a passkey.' });
@@ -414,7 +490,9 @@ async function handler(req, res) {
       }
       const id = String(body.credentialId || ''); const index = (Array.isArray(user.passkeys) ? user.passkeys : []).findIndex((item) => item.credentialId === id);
       if (index < 0) return sendJson(res, 404, { error: 'Passkey not found.' });
-      const [removed] = user.passkeys.splice(index, 1); await Promise.all([setJson(`arix:user:${session.ownerId}`, user), deleteKeys(`arix:webauthn:credential:${await sha256Hex(removed.credentialId)}`)]);
+      const [removed] = user.passkeys.splice(index, 1);
+      if (user.passkeys.length === 0 && user.totpEnabled !== true) { delete user.recoveryCodes; delete user.recoveryCodesIssuedAt; }
+      await Promise.all([setJson(`arix:user:${session.ownerId}`, user), deleteKeys(`arix:webauthn:credential:${await sha256Hex(removed.credentialId)}`)]);
       return sendJson(res, 200, { ok: true, removed: true });
     }
     if (body.action === 'totp-enroll') {
@@ -431,19 +509,25 @@ async function handler(req, res) {
       if (Date.now() - Number(user.totpEnrolledAt || 0) > 10 * 60 * 1000) { delete user.totpSecret; delete user.totpEnrolledAt; await setJson(`arix:user:${session.ownerId}`, user); return sendJson(res, 410, { error: 'Authenticator enrollment expired. Start again.' }); }
       let secret; try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'Authenticator secret could not be opened.' }); }
       if (!await verifyAndConsumeTotp(session.ownerId, secret, body.totpCode)) return sendJson(res, 400, { error: 'Authenticator code is invalid or has already been used.' });
-      user.totpEnabled = true; user.totpEnabledAt = Date.now(); delete user.totpEnrolledAt; await setJson(`arix:user:${session.ownerId}`, user);
-      const records = await listUserSessions(session.ownerId); await Promise.all(records.map((item) => revokeUserSession(session.ownerId, item.tokenHash)));
-      const fresh = await createSession(session.ownerId, session.projectId, req); setSessionCookie(res, fresh.token, fresh.ttl, isSecure(req));
-      return sendJson(res, 200, { ok: true, enabled: true, message: 'Authenticator MFA is enabled.' });
+      user.totpEnabled = true; user.totpEnabledAt = Date.now(); delete user.totpEnrolledAt;
+      const recoveryCodes = ensureMfaRecoveryCodes(user);
+      await setJson(`arix:user:${session.ownerId}`, user);
+      const fresh = await rotateSession(session.ownerId, session.projectId, session.tokenHash, req);
+      if (!fresh) return sendJson(res, 503, { error: 'MFA was enabled, but session rotation failed. Sign in again with your authenticator.' });
+      setSessionCookie(res, fresh.token, fresh.ttl, isSecure(req));
+      return sendJson(res, 200, { ok: true, enabled: true, ...(recoveryCodes.length ? { recoveryCodes, recoveryCodesNotice: 'Save these eight recovery codes now. They are shown only once.' } : {}), message: 'Authenticator MFA is enabled.' });
     }
     if (body.action === 'totp-disable') {
       const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to change MFA settings.' });
       const user = await getJson(`arix:user:${session.ownerId}`); if (!user) return sendJson(res, 401, { error: 'Account not found.' });
       if (!await verifyPassword(String(body.password || ''), user.password)) return sendJson(res, 401, { error: 'Re-authentication failed.' });
       if (user.totpEnabled === true) { let secret; try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'MFA configuration is unavailable.' }); } if (!await verifyAndConsumeTotp(session.ownerId, secret, body.totpCode)) return sendJson(res, 401, { error: 'Authenticator code is invalid or has already been used.' }); }
-      delete user.totpSecret; delete user.totpEnrolledAt; delete user.totpEnabledAt; user.totpEnabled = false; await setJson(`arix:user:${session.ownerId}`, user);
-      const records = await listUserSessions(session.ownerId); await Promise.all(records.map((item) => revokeUserSession(session.ownerId, item.tokenHash)));
-      const fresh = await createSession(session.ownerId, session.projectId, req); setSessionCookie(res, fresh.token, fresh.ttl, isSecure(req));
+      delete user.totpSecret; delete user.totpEnrolledAt; delete user.totpEnabledAt; user.totpEnabled = false;
+      if (!Array.isArray(user.passkeys) || user.passkeys.length === 0) { delete user.recoveryCodes; delete user.recoveryCodesIssuedAt; }
+      await setJson(`arix:user:${session.ownerId}`, user);
+      const fresh = await rotateSession(session.ownerId, session.projectId, session.tokenHash, req);
+      if (!fresh) return sendJson(res, 503, { error: 'MFA was disabled, but session rotation failed. Sign in again.' });
+      setSessionCookie(res, fresh.token, fresh.ttl, isSecure(req));
       return sendJson(res, 200, { ok: true, enabled: false });
     }
     if (body.action === 'list-sessions') {
@@ -472,3 +556,6 @@ async function handler(req, res) {
 }
 
 export default createCompatibleHandler(handler);
+
+// Keep raw request bytes available for origin-proof verification in the shared adapter.
+export const config = { api: { bodyParser: false } };

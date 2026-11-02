@@ -1,0 +1,73 @@
+{
+  "generatedAt": "2026-11-02T13:56:16.847Z",
+  "node": "v22.16.0",
+  "durationRequestedMs": 15000,
+  "elapsedSeconds": 15.000309278000001,
+  "concurrency": 16,
+  "totalRequests": 456321,
+  "allowed": 365056,
+  "rejected": 91265,
+  "invariantErrors": 0,
+  "requestsPerSecond": 30420.772768282648,
+  "peakHeapMiB": 16.04010009765625,
+  "peakRssMiB": 65.61328125,
+  "perSecond": [
+    {
+      "atSeconds": 1,
+      "requests": 22090
+    },
+    {
+      "atSeconds": 2,
+      "requests": 28984
+    },
+    {
+      "atSeconds": 3,
+      "requests": 28359
+    },
+    {
+      "atSeconds": 4,
+      "requests": 27448
+    },
+    {
+      "atSeconds": 5,
+      "requests": 34353
+    },
+    {
+      "atSeconds": 6,
+      "requests": 29169
+    },
+    {
+      "atSeconds": 7,
+      "requests": 31506
+    },
+    {
+      "atSeconds": 8,
+      "requests": 30057
+    },
+    {
+      "atSeconds": 9,
+      "requests": 31667
+    },
+    {
+      "atSeconds": 10,
+      "requests": 32386
+    },
+    {
+      "atSeconds": 11,
+      "requests": 31506
+    },
+    {
+      "atSeconds": 12,
+      "requests": 36465
+    },
+    {
+      "atSeconds": 13,
+      "requests": 30252
+    },
+    {
+      "atSeconds": 14,
+      "requests": 28375
+    }
+  ],
+  "scope": "Local in-process loop; no real network, browser farm, external Redis, or database involved."
+}

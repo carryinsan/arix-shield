@@ -1,4 +1,5 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
+import { calculateAutomationRiskScore } from './_lib/bot-intel.js';
 import { sendJson, readJson, methodNotAllowed, getNetworkHints, normalizeOrigin } from './_lib/http.js';
 import { rateLimit, rateLimitMulti, acquireConcurrency, releaseConcurrency, increment, getJson, getString, setString, setMembers, setCard, getStrings, setRemoveMany, recordProjectEvent, recordApiTelemetryEvent } from './_lib/redis.js';
 import { sha256Hex, hashCredential, verifyDpopProof, trapMirage, createSignedToken, verifySignedToken, randomToken, sha256, getClearancePublicJwk, decryptClearanceJwe } from './_lib/crypto-trap.js';
@@ -167,7 +168,7 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     latencyMs: Math.max(0, Math.min(60000, Number(body.latencyMs) || 0)),
     status: 'OBSERVED',
     dpopVerified: true,
-    riskScore: suspicious ? Math.min(70, 45 + signalCount * 5 + (tlsMismatch ? 5 : 0)) : 0,
+    riskScore: calculateAutomationRiskScore({ strongAutomationSignal, signalCount, tlsMismatch }),
     botSignals: { webdriver: botSignals.webdriver === true, headless: botSignals.headless === true, automationFlag: botSignals.automationFlag === true, screenMismatch: botSignals.screenMismatch === true, eventTimingAnomaly: botSignals.eventTimingAnomaly === true, prototypeTampered: botSignals.prototypeTampered === true, kinematicAnomaly: botSignals.kinematicAnomaly === true, keyboardHumanSignal, keyboardSamples: Math.max(0, Math.min(1000, Number(botSignals.keyboardSamples) || 0)), focusTransitions: Math.max(0, Math.min(1000, Number(botSignals.focusTransitions) || 0)), nonBrowserClient, canvasAvailable: botSignals.canvasAvailable === true, webglAvailable: botSignals.webglAvailable === true, softwareRendererObserved: /swiftshader|llvmpipe|mesa offscreen|software rasterizer/i.test(String(botSignals.webglRenderer || '')), tlsFingerprintPresent: Boolean(ja4), canvasHashPresent: typeof botSignals.canvasPixelHash === 'string' && /^[a-f0-9]{64}$/i.test(botSignals.canvasPixelHash) }
   };
   await recordProjectEvent(project.id, event);
@@ -517,3 +518,6 @@ async function handler(req, res) {
 }
 
 export default createCompatibleHandler(handler, { maxBodyBytes: 36000 });
+
+// Keep raw request bytes available for origin-proof verification in the shared adapter.
+export const config = { api: { bodyParser: false } };

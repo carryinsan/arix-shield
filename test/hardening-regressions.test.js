@@ -52,6 +52,14 @@ test('WAF rejects CRLF header injection and standalone Transfer-Encoding on HTTP
   assert.ok(h2.findings.some((finding) => finding.id === 'HTTP2_CONNECTION_SPECIFIC_HEADER'));
 });
 
+test('password policy checks exact common roots after predictable numeric and punctuation suffixes', async () => {
+  let called = false;
+  const result = await validatePasswordPolicy('P@ssw0rd2026!', {}, async () => { called = true; return false; });
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'PASSWORD_COMMON');
+  assert.equal(called, false);
+});
+
 test('password policy rejects common and context-derived passwords without calling breach lookup', async () => {
   let lookups = 0;
   const lookup = async () => { lookups++; return false; };
@@ -85,4 +93,144 @@ test('Pwned Passwords range lookup discloses only a SHA-1 prefix and matches suf
     assert.equal(options.headers['Add-Padding'], 'true');
     assert.equal(requestedUrl.includes(password), false);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test('offline password policy survives optional HIBP outage without converting to 503', async () => {
+  const result = await validatePasswordPolicy('a-unique-long-passphrase-for-testing-2026', {}, async () => { throw new Error('network down'); });
+  assert.equal(result.valid, true);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  try { await assert.rejects(() => isBreachedPassword('an-otherwise-unique-password-phrase'), /BREACH_LOOKUP_UNAVAILABLE/); }
+  finally { globalThis.fetch = originalFetch; }
+  const weakFallback = await validatePasswordPolicy('abababababab', {}, async () => { throw new Error('network down'); });
+  assert.equal(weakFallback.code, 'PASSWORD_STRENGTH_UNVERIFIED');
+});
+
+test('safe-fetch public address policy rejects special-purpose and non-global IPv6 ranges', async () => {
+  const { assertPublicIp } = await import('../sdk/safe-fetch.js');
+  for (const ip of ['2001:2::1', '2001:10::1', '2001:20::1', '2001:db8::1', '3fff::1', 'fd00::1', 'fe80::1']) assert.throws(() => assertPublicIp(ip));
+  assert.equal(assertPublicIp('2001:4860:4860::8888'), '2001:4860:4860::8888');
+  assert.equal(assertPublicIp('1.1.1.1'), '1.1.1.1');
+});
+
+test('identity sanitizer removes a trailing client IP without coupling identity to network handoffs', async () => {
+  const { sanitizeArixIdentity } = await import('../sdk/identity.js');
+  assert.equal(sanitizeArixIdentity('user-1:tenant-1:192.0.2.14', '192.0.2.14'), 'user-1:tenant-1');
+  assert.equal(sanitizeArixIdentity('user-1:tenant-1:2001:db8::1', '2001:db8::1'), 'user-1:tenant-1');
+  assert.equal(sanitizeArixIdentity('stable-identity', '192.0.2.14'), 'stable-identity');
+});
+
+test('Prisma wrapper fails closed without ALS scope and injects tenant+owner predicates with scope', async () => {
+  const { runWithArixContext, protectPrismaClient, getArixContext } = await import('../sdk/context.js');
+  const fake = { order: { findMany(args) { return args; }, create(args) { return args; }, update(args) { return args; } }, $queryRaw() { return 'unsafe'; } };
+  const db = protectPrismaClient(fake);
+  assert.throws(() => db.order.findMany({ where: { status: 'open' } }), { code: 'ARIX_UNSCOPED_DB_ACCESS' });
+  assert.throws(() => db.$queryRaw('SELECT 1'), { code: 'ARIX_RAW_SQL_BLOCKED' });
+  assert.throws(() => db.$extends({}), { code: 'ARIX_UNSUPPORTED_DB_OPERATION' });
+  const result = await runWithArixContext({ tenantId: 'tenant-a', userId: 'user-a' }, async () => {
+    assert.equal(getArixContext().tenantId, 'tenant-a');
+    const readResult = await db.order.findMany({ where: { status: 'open' } });
+    const createResult = await db.order.create({ data: { amount: 12 } });
+    return { readResult, createResult };
+  });
+  assert.deepEqual(result.readResult.where, { status: 'open', tenantId: 'tenant-a', ownerId: 'user-a' });
+  assert.deepEqual(result.createResult.data, { amount: 12, tenantId: 'tenant-a', ownerId: 'user-a' });
+});
+
+test('Prisma wrapper rejects foreign-scope writes and unsupported nested writes', async () => {
+  const { runWithArixContext, protectPrismaClient } = await import('../sdk/context.js');
+  const fake = { order: { update(args) { return args; }, create(args) { return args; } } };
+  const db = protectPrismaClient(fake);
+  await runWithArixContext({ tenantId: 'tenant-a', userId: 'user-a' }, async () => {
+    assert.throws(() => db.order.update({ where: { id: 1, tenantId: 'tenant-b' }, data: { state: 'paid' } }), { code: 'ARIX_SCOPE_MISMATCH' });
+    assert.throws(() => db.order.create({ data: { customer: { create: { name: 'x' } } } }), { code: 'ARIX_NESTED_WRITE_BLOCKED' });
+  });
+});
+
+test('dashboard uses a masked native dialog for security re-authentication', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const html = await readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8');
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(html, /<dialog[^>]+id="step-up-modal"/);
+  assert.match(html, /id="step-up-password" type="password" autocomplete="current-password"/);
+  assert.doesNotMatch(app, /window\.prompt\s*\(/);
+  assert.match(app, /requestStepUp\(/);
+});
+
+
+test('rotated session replay revokes the replacement session family', async () => {
+  delete process.env.UPSTASH_REDIS_REST_URL;
+  delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (process.env.NODE_ENV === 'production') process.env.NODE_ENV = 'test';
+  globalThis.__ARIXSHIELD_LOCAL_REDIS__?.clear?.();
+  const { createSession, getSession, rotateSession } = await import('../api/_lib/session.js');
+  const original = await createSession('family-owner', 'family-project');
+  const replacement = await rotateSession('family-owner', 'family-project', original.tokenHash);
+  assert.ok(replacement?.token);
+  assert.equal(replacement.familyId, original.familyId);
+  const replayed = await getSession({ headers: { cookie: `arix_session=${original.token}` } });
+  assert.equal(replayed, null);
+  const replacementAfterReplay = await getSession({ headers: { cookie: `arix_session=${replacement.token}` } });
+  assert.equal(replacementAfterReplay, null);
+});
+
+
+test('Redis REST configuration rejects insecure or ambiguous endpoint URLs', async () => {
+  const { normalizeRedisRestUrl } = await import('../api/_lib/redis.js');
+  assert.equal(normalizeRedisRestUrl('https://example.upstash.io'), 'https://example.upstash.io');
+  assert.equal(normalizeRedisRestUrl('https://example.upstash.io/'), 'https://example.upstash.io');
+  for (const value of [
+    'http://example.upstash.io',
+    'https://user:pass@example.upstash.io',
+    'https://example.upstash.io/path',
+    'https://example.upstash.io/?token=secret',
+    'https://example.upstash.io/#fragment',
+    'https://example.upstash.io:8443',
+    'https://example.upstash.io\n.evil.test',
+    ' https://example.upstash.io'
+  ]) assert.equal(normalizeRedisRestUrl(value), null, value);
+});
+
+test('safe-fetch validates total timeout and redirect limits before network access', async () => {
+  const { arixSafeFetch } = await import('../sdk/safe-fetch.js');
+  await assert.rejects(arixSafeFetch('https://example.com', { timeoutMs: 0 }), /timeoutMs/);
+  await assert.rejects(arixSafeFetch('https://example.com', { timeoutMs: Number.NaN }), /timeoutMs/);
+  await assert.rejects(arixSafeFetch('https://example.com', { maxRedirects: 6 }), /maxRedirects/);
+  await assert.rejects(arixSafeFetch('https://example.com', { allowedPorts: [] }), /allowedPorts/);
+});
+
+test('runtime integrity verifies the complete API source tree against the manifest', async () => {
+  const { verifyRuntimeIntegrity } = await import('../api/_lib/integrity.js');
+  const result = await verifyRuntimeIntegrity({ refresh: true });
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.deepEqual(result.issues, []);
+});
+
+
+test('partial or malformed Redis credentials never trigger process-local fallback', async () => {
+  const { incrementWithExpiry, getRedisConfigurationStatus } = await import('../api/_lib/redis.js');
+  const urlKey = ['UPSTASH', 'REDIS_REST', 'URL'].join('_');
+  const tokenKey = ['UPSTASH', 'REDIS_REST', 'TOKEN'].join('_');
+  const originalUrl = process.env[urlKey];
+  const originalToken = process.env[tokenKey];
+  const originalMode = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'test';
+    delete process.env[urlKey];
+    process.env[tokenKey] = 'present-but-no-url';
+    assert.equal(getRedisConfigurationStatus().mode, 'invalid-configuration');
+    await assert.rejects(() => incrementWithExpiry('hardening:test:partial', 60), /Invalid Upstash Redis configuration/);
+    process.env[urlKey] = 'http://insecure.example.test';
+    process.env[tokenKey] = 'token';
+    assert.equal(getRedisConfigurationStatus().mode, 'invalid-configuration');
+    await assert.rejects(() => incrementWithExpiry('hardening:test:invalid', 60), /Invalid Upstash Redis configuration/);
+    delete process.env[urlKey];
+    delete process.env[tokenKey];
+    assert.equal(getRedisConfigurationStatus().mode, 'ephemeral-local');
+  } finally {
+    if (originalUrl === undefined) delete process.env[urlKey]; else process.env[urlKey] = originalUrl;
+    if (originalToken === undefined) delete process.env[tokenKey]; else process.env[tokenKey] = originalToken;
+    if (originalMode === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = originalMode;
+  }
 });

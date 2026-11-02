@@ -13,7 +13,10 @@ const NON_SQL_RULES = [
   { id: 'SSRF_LOCAL', category: 'SSRF', severity: 'high', pattern: /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?/i },
   { id: 'PATH_TRAVERSAL', category: 'PATH_TRAVERSAL', severity: 'high', pattern: /(?:\.\.\/|\.\.\\|%2e%2e(?:%2f|%5c))/i },
   { id: 'COMMAND_INJECTION', category: 'COMMAND_INJECTION', severity: 'high', pattern: /(?:;\s*(?:cat|curl|wget|bash|sh|python|nc)\b|\$\([^)]*(?:curl|wget|bash|sh)|`[^`]*(?:curl|wget|bash|sh))/i },
-  { id: 'PROMPT_INJECTION', category: 'PROMPT_INJECTION', severity: 'medium', pattern: /ignore\s+(?:all\s+)?previous\s+instructions|reveal\s+(?:the\s+)?system\s+prompt|developer\s+message\s*:/i }
+  { id: 'PROMPT_INJECTION', category: 'PROMPT_INJECTION', severity: 'medium', pattern: /ignore\s+(?:all\s+)?previous\s+instructions|reveal\s+(?:the\s+)?system\s+prompt|developer\s+message\s*:/i },
+  { id: 'LDAP_INJECTION', category: 'LDAP_INJECTION', severity: 'high', pattern: /(?:\)\s*\(\s*[|&]|\\(?:2a|28|29|5c|00)|\*\)\s*\()/i },
+  { id: 'SSTI_TEMPLATE', category: 'SSTI', severity: 'high', pattern: /(?:\{\{[^}]{0,160}(?:__|config|self|request|cycler|joiner|lipsum|namespace|class|mro)[^}]*\}\}|\$\{[^}]{0,160}(?:process|runtime|environment|env|class|mro)[^}]*\}|<%[\s\S]{0,160}(?:=|include|exec|process)[\s\S]{0,80}%>|__class__\s*\.\s*__mro__|#\{[^}]{0,128}(?:system|runtime|class)[^}]*\})/i },
+  { id: 'UNSAFE_DESERIALIZATION', category: 'UNSAFE_DESERIALIZATION', severity: 'critical', pattern: /(?:rO0AB[A-Za-z0-9+/=]{8,}|\\xac\\xed\\x00\\x05|\u00ac\u00ed\x00\x05|O:\d{1,3}:"[^"]+"|C:\d{1,3}:"[^"]+"|__reduce__|c__builtin__|_\$\$ND_FUNC\$_\$)/i }
 ];
 
 const SQL_KEYWORDS = new Set([

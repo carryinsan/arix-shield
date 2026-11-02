@@ -1,65 +1,83 @@
-# ArixShield hardening build report
+# ArixShield v1.4.2 hardening build report
 
-## Scope
+## Release scope
 
-This build applies the supplied six false-positive/continuity remediations and hardens the existing ten-area security architecture in the complete ArixShield repository. The archive retains the full project, not just changed files. It includes pre-handler authorization hooks and capability sealing, verified browser DPoP, MFA/passkeys and key rotation, WAF/parser controls, multi-dimensional quotas and circuit breakers, adversarial tests, threat correlation, HMAC audit evidence, build/runtime integrity attestation, and chameleon canaries/watermarking. See `docs/HEAVY-USER-AND-CGNAT-HARDENING.md` for exact behavior and explicit omissions.
+This archive is a complete copy of the supplied repository with an additional hardening increment. Package version: **1.4.2**. It adds reusable security primitives and offline compiler tools across several of the submitted domains while preserving a strict distinction between code present in the repository and end-to-end controls that still require application, database, key-custody, edge, container, or operator integration. The exact matrix is `docs/V3-IMPLEMENTATION-STATUS.md`; the incremental change log is `docs/V3.1-HARDENING-NOTES.md`.
 
-No new third-party API key is introduced. These changes reuse the existing `ARIX_MASTER_SECRET`, existing server integration key, and existing Upstash Redis credentials. Optional provider integrations and services already present in the project continue to require their own configuration when enabled.
+Notable additions in this release include a runnable independent application-layer `edge/` reverse proxy with bounded HTTP handling, TLS/mTLS options, absolute upstream deadlines, header/framing sanitization and Ed25519 origin proofs; origin proof verification before API handler dispatch with shared Redis nonce replay protection; transparent AES-256-GCM envelope encryption for user and project Redis records with tenant-bound DEKs and atomic plaintext migration; login/password-step-up risk decisions; and a corrected high-confidence bot-signal threshold. Existing breach-filter, account recovery, file/archive inspectors, policy/RLS compilers, WAF signatures, MCP guard, threat-feed and SimHash, SOC, audit-ratchet and DR helpers remain, with the integration boundaries listed below.
+
+No third-party runtime dependency or new vendor API key was added. The Ed25519 origin keypair is optional key material generated locally by the operator; it is not an API key. These modules are not all automatically activated by the SDK. The repository still does not contain global DDoS scrubbing, universal ORM interception, a native distributed consensus cluster, process-wide egress enforcement, a complete YARA/signature malware scanner or isolated hostile-file sandbox, signed SLSA provenance, a durable active-active outbox, or customer network policy.
+
+## Generated integrity metadata
+
+The canonical manifest is generated at `docs/INTEGRITY-MANIFEST.json`; `npm run integrity:update` writes an identical API-bundled mirror at `api/_integrity-manifest.json`. Both contain hashes only and are unsigned in the distributed archive. `npm run check` verifies source hashes, generated metadata and exact mirror equality. Do not edit generated markers manually.
+
+<!-- ARIX-MANIFEST-FILE-COUNT:108 -->
+<!-- ARIX-MANIFEST-ROOT:94ebd13d305fb3665299fa5d3306e15000363c82e4645bbad06b9482b2e0d359 -->
+<!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
 
-Environment used: Node.js `v22.16.0`, npm `10.9.2`.
+Environment: Node.js 22.16.0. Results are from local deterministic tests and static checks, not a production deployment.
 
 | Verification | Result |
 |---|---:|
-| `npm test` | **64 passed, 0 failed** |
-| Adversarial mutation corpus | **2,500 / 2,500 blocked** in the deterministic test corpus, including JSON bodies streamed across the 16,384-byte boundary |
-| Benign corpus | **2,500 inputs; measured false positives 0 / 2,500 (0.000%)** in this test corpus |
-| Actor / tenant / method / ID-placement matrix | **80 cases passed**, exercising actor class, HTTP method, and ID placement against mocked ownership checks |
-| Concurrent quota / DPoP / outage harness | **100-way local/injected-adapter harness passed** |
-| Cron self-test | **10 / 10 in-memory probes passed** (direct final-tree invocation) |
-| `npm run check` | **43 JS/MJS modules syntax-checked; 33 API/SDK modules imported; scanner and manifest passed** |
-| `npm run audit:verify` | **Not run: requires a real signed JSONL evidence export and the production `ARIX_MASTER_SECRET`** |
-| Supply-chain check | **No third-party package dependency sections configured** |
-| Static scanner | **Passed selected lexical checks and repository text credential patterns** |
-| Integrity manifest | **46 `.js`, `.mjs`, `.html` files hashed and verified; manifest root `13bc8eb9f6aa5d1f…`** |
-| Production runtime attestation | **Not re-run against a production-like deployment in this workspace** |
+| `npm test` | **149 passed, 0 failed** |
+| v1.4.2 focused regressions | **7 focused tests** for bot risk boundaries, edge-to-origin signing/replay rejection, user/project record encryption, and atomic legacy-record migration |
+| Supplied regression adversarial input corpus | **2,500 / 2,500** deterministic grammar/encoding/boundary mutation cases blocked |
+| Supplied regression benign input corpus | **2,500 inputs; no false positives observed in this test corpus** |
+| Existing actor / tenant / method / identifier placement matrix | **80 local mocked cases** |
+| Existing concurrent quota / DPoP / outage harness | **100-way local/injected-adapter harness** |
+| `npm run check` | **105 JS/MJS syntax checks, 55 API/SDK imports; lexical and secret-pattern scanner passed; zero third-party dependencies; 108-source-file manifest and API runtime mirror verified** |
+| 50,000-entry synthetic XOR-filter benchmark | **~324 ms, 0 false negatives across the synthetic build test; not a real breach-corpus validation** |
+| `npm run audit:verify` | Not run; requires a real audit bundle and its signing secret |
+| Fresh 200k deterministic lab | **100,000 adversarial + 100,000 benign; 100,000/100,000 adversarial blocked, 100,000/100,000 benign allowed; 0 misses, 0 false positives** on the generated corpus. Runtime 13.17 s; ~15,182 vectors/s. |
+| Fresh endurance smoke | **253,170 requests in 10 seconds, 8 in-process workers, 0 invariant errors**; ~25,317 requests/s and peak RSS ~57.1 MiB. This is not network/database endurance. |
+| `npm run build` | **Controlled smoke run passed** using throwaway non-deployable master/cron secrets, a generated temporary RSA-3072 key and a dummy HTTPS-shaped Redis endpoint; 149 tests passed. The temporary production signature was removed by regenerating both distributed manifests unsigned. The test subprocess dropped Redis credentials and `VERCEL_ENV` to avoid touching live services. The signed manifest was re-generated unsigned before packaging; no real customer credentials or live Redis were used. |
+| Production runtime attestation | Not run against a production-like deployment |
 
-The deterministic corpus is a regression suite, not proof of a universal 100% attack block rate or a measured real-world false-positive rate. The concurrency harness uses local/injected test adapters and is not a live Upstash distributed load/chaos test. No production deployment, customer database, or external webhook endpoint was available in this workspace.
+These tests are regression evidence, not proof of a universal block rate, a real-world false-positive rate, security against all attackers, or absence of defects. New tests exercise helpers with local/injected adapters; they do not verify integration into every customer route or production storage provider. The concurrency harness uses local/injected test adapters and is not a live distributed Redis chaos test. No production customer origin, database, cloud account, or external webhook was available.
 
-## Important release/deployment step
+## Password corpus and XOR filter limitations
 
-The distributed ZIP contains **no production master secret or private JWK**. Its integrity manifest is intentionally unsigned. Before production deployment, sign the manifest in trusted CI using the existing production `ARIX_MASTER_SECRET`, then run the production check:
+The bundled default XOR filter is generated from **89 curated weak-password examples**. A bounded exact-root check also strips predictable trailing digits and punctuation before checking known roots. It is not the requested verified 50,000/250,000-password breach dataset, and it must not be marketed as one. `scripts/compile-breach-filter.mjs` compiles an operator-supplied, licensed local word list into a deterministic 16-bit three-part XOR filter. At the configured load factor this representation uses approximately 2.6 bytes per unique entry and has an approximate 1/65,536 fingerprint false-positive probability. A negative lookup is not proof that a candidate password has never been breached. No network download occurs during build.
+
+## Production release steps
+
+The distributed archive contains **no production master secret, origin private key, or private JWK**. Both integrity manifest copies are intentionally unsigned. Before production deployment, run the production build in trusted CI with the existing production secrets and key material; it signs both manifests, validates the source tree, and runs the deterministic tests:
 
 ```sh
-ARIX_MASTER_SECRET="$ARIX_MASTER_SECRET" npm run integrity:update
-NODE_ENV=production ARIX_MASTER_SECRET="$ARIX_MASTER_SECRET" npm run check
+# Export the existing production values in trusted CI, then run:
+NODE_ENV=production npm run build
 ```
 
-Configure the same existing master secret, Upstash Redis URL/token, `CRON_SECRET`, and generated `ARIX_CLEARANCE_KID` plus `ARIX_CLEARANCE_PRIVATE_JWK` in the production environment. Keep the private JWK and master secret server-side. Do not commit either. Configure the scheduled cron jobs and verify `/api/health` returns healthy after deployment. The tested production attestation used ephemeral test-only key material and does not sign the distributed ZIP.
+Configure the same existing master secret, shared Redis URL/token, `CRON_SECRET`, and the generated `ARIX_CLEARANCE_KID` / `ARIX_CLEARANCE_PRIVATE_JWK` in the production environment. Keep private values server-side. Generate origin key material only for a deployment that also installs the matching origin gateway/ingress controls. Verify `/api/health` after deployment and exercise the application through its actual ingress. Do not commit deployment secrets into this archive.
 
 ## Engineering boundaries and known limitations
 
-- The zero-dependency static scanner is a **lexical pattern scanner**, not a complete AST parser or a general-purpose SAST engine. It cannot guarantee detection of obfuscated or semantically dangerous constructs. Use independent SAST, SCA, secret scanning, DAST, and penetration testing.
-- The audit chain provides HMAC tamper evidence relative to the existing master secret and Redis atomic Lua operations. It is not independent WORM storage. A compromise of the application process/master secret can forge new events. The browser witness is trust-on-first-use and cannot detect tampering predating its first pin or protect a compromised browser profile.
-- The alert webhook is signed with the master secret and requires no new vendor API key. It sends alerts only when a project has configured an HTTPS destination. Optional automatic containment currently supports the explicit DRY_RUN-to-ENFORCE transition; it does not rotate third-party credentials.
-- Threat scores are heuristics. Datacenter ASN membership is weak context, not proof of attack. Provider CIDRs must be maintained from current verified sources. Stale feed data is confidence-decayed, not treated as fresh.
-- The chameleon canary is inserted only when enabled, the payload contains at least ten records, and a stable top-level ID-like field exists. Exposed-ID registration must succeed before returning the row. Structural watermarking requires sufficient timestamp/key-order capacity and can be removed by normalization, reserialization, conversion, or deliberate tampering.
-- SDK honeypot handling only applies to routes that actually pass through the SDK middleware; it is not a network-wide route interception or infrastructure sandbox.
-- Application authorization cannot be inferred by a generic SDK. Tenant and owner scoping still require correct authenticated context, route policies, pre-checks, and database predicates throughout customer code, background jobs, webhooks, and administrative paths.
-- Production guarantees require a real shared Redis deployment, correct trusted-ingress configuration, protected secrets, reliable cron scheduling, and deployment settings that match the documented assumptions. Local in-memory fallbacks do not provide distributed security guarantees.
+- The supplied brief named Domains 1–17 but referred to 18. No Domain 18 definition was supplied.
+- `edge/gateway.mjs` is a deployable HTTP/1.1 application reverse proxy. `api/_lib/vercel-handler.js` verifies its signed proof before dispatch when origin lock is enabled. This does not provide global DDoS scrubbing or network-layer origin restriction; a valid signed proof is not a substitute for managed ingress DDoS mitigation, firewall allowlisting and live key/certificate operations.
+- The Prisma proxy only guards calls made through the wrapped client and supported operations. No universal SQL AST, Mongo, MySQL or SQLite interception is claimed. The policy compiler and PostgreSQL RLS SQL generator produce artifacts for review; they do not automatically guard production boot or apply migrations.
+- Account recovery is wired through `recover-mfa`; login and password-based step-up also consult recent-failure identity risk. First MFA enrollment returns eight recovery codes once. A passkey follow-up uses the dedicated passkey login flow; it is not transaction-bound to the preceding password challenge. Shared Redis `SET NX` is required for cross-instance atomicity; local preview is process-local.
+- ZIP inspection checks central-directory/local-header agreement, data descriptors and CRC-32 of expanded entries. File inspection remains bounded and heuristic: there is no full PDF xref/object-stream parser, full OOXML/OLE2 parser, complete AV signature feed, YARA engine, or isolated hostile-file process sandbox. Quarantine records still need a durable caller.
+- Prompt delimiters/canaries do not make prompt injection impossible. MCP authorization and one-time approvals must be placed on every tool invocation; no hostile-code sandbox is supplied.
+- Bot, DRR, runtime and SOC helpers include process-local state in their default/test paths. They are not a distributed state cluster or durable incident platform. Integrate a durable transactional store before production use.
+- The audit ratchet requires an atomic persistent store adapter. It is not a WORM system; a compromised long-term Ed25519 signing key can undermine historical signature trust. External anchoring and independently controlled retention remain required.
+- The zero-dependency static scanner includes lexical tripwires for several direct database-client constructor patterns, but it is **not** a complete AST/data-flow taint analyzer or universal DB-client detector. It is not an SCA scanner or SLSA v1.0 provenance attestation. Add independent SAST, SCA, secret scanning, DAST and penetration tests.
+- `arixSafeFetch` now applies a total DNS-to-body deadline, pins public DNS answers, enforces request/response byte limits and rejects cross-origin redirects, but remains opt-in. No process-wide socket/fetch interception or kernel-level egress firewall is enabled.
+- Local in-memory Redis fallback is not distributed security state and is unsuitable for production enforcement. Any partially present or malformed Upstash URL/token configuration now fails closed rather than silently selecting that fallback.
+- A Node.js repository cannot activate customer L3/L4 DDoS scrubbing, host mTLS policy, firewall, container/seccomp policy, database RLS, or regional quorum merely by shipping JavaScript files. The production build preflight validates required configuration shape and signs the manifest; it does not provision or contact these services.
 
 ## OWASP ASVS 5.0.0 status
 
-**This archive is not claimed to be OWASP ASVS 5.0.0 Level 3 compliant, certified, or to have the “highest Level 3 score.”** OWASP identifies 5.0.0 as the stable release and describes Level 3 as the goal for applications seeking the highest security level. Reaching that level requires a risk-based, requirement-by-requirement assessment and evidence for all applicable controls across the actual application and its operating environment. A local code archive, 64 passing tests, and a static scanner cannot establish that claim.
-
-The supplied upgrades implement selected controls and provide useful local evidence. A formal Level 3 result still requires a complete ASVS 5.0.0 mapping, staging tests with real infrastructure, review of every in-scope customer route and data access, independent security testing, and evidence/sign-off by a qualified assessor.
+**This archive is not claimed to be OWASP ASVS 5.0.0 Level 3 compliant, certified, or to have the highest Level 3 score.** Selected controls have been implemented and regression-tested, but the 17-domain architecture is not complete end-to-end. Formal Level 3 verification requires a complete requirement-by-requirement mapping, evidence from the actual application and environment, testing of every relevant route and data flow, and independent assessor review.
 
 ## Required pre-production work
 
-1. Sign the integrity manifest with the actual production master secret in a trusted release pipeline.
-2. Configure real Upstash Redis, protected environment variables, production HTTPS, trusted proxy/IP handling, and scheduled authenticated cron jobs.
-3. Exercise quota, DPoP replay, Redis outage, feed staleness, alert delivery, audit export, and containment against the deployed environment.
-4. Inventory every route and validate authorization, tenant ownership, write/read property restrictions, and database predicates.
-5. Perform independent SAST/SCA/secret, DAST, API penetration, dependency and infrastructure reviews.
-6. Map evidence to every applicable OWASP ASVS 5.0.0 Level 3 requirement and obtain independent approval before making a compliance statement.
+1. Configure and protect production secrets and shared state; sign the integrity manifest in trusted CI.
+2. Inventory all application routes, identities, ORM clients, database models, jobs, webhooks, GraphQL resolvers and outbound connections.
+3. Integrate route contracts and policy coverage into route registration/production boot; add database-native RLS and test every tenant-owned table with real database roles.
+4. Integrate recovery codes/session revocation, origin proof verification, MCP approval consumption, versioned KEK rotation/custody, SOC persistence, and atomic audit storage into the real application lifecycle.
+5. Configure ingress/edge DDoS mitigation, origin isolation/mTLS, firewall, egress and runtime/container controls on infrastructure that supports them.
+6. Test quota, DPoP replay, Redis outage, feed freshness, alert delivery, audit custody, disaster restore and RPO/RTO against the real deployment.
+7. Perform independent SAST/SCA/secret, DAST, API penetration and infrastructure reviews; map evidence to all applicable ASVS 5.0.0 Level 3 requirements before making a compliance claim.

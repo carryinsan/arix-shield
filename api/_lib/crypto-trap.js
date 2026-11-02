@@ -1,7 +1,10 @@
-import { webcrypto, timingSafeEqual, createHmac } from 'node:crypto';
+import { webcrypto, timingSafeEqual, createHmac, scrypt as scryptCallback } from 'node:crypto';
+import { promisify } from 'node:util';
+import { PASSWORD_KDF } from './security-constants.js';
 import { setString } from './redis.js';
 
 const cryptoApi = globalThis.crypto ?? webcrypto;
+const scryptAsync = promisify(scryptCallback);
 const encoder = new TextEncoder();
 const dpopReplayRing = globalThis.__ARIX_DPOP_REPLAY_RING__ ??= new Map();
 
@@ -238,16 +241,45 @@ export function rewriteCapabilityPath(url, identity, { requireSealed = true, idP
   return { url: result.url, invalid: result.invalid };
 }
 
-export async function derivePassword(password, salt = randomToken(16), iterations = 600000) {
-  const material = await cryptoApi.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
+async function deriveLegacyPbkdf2(password, salt, iterations) {
+  const material = await cryptoApi.subtle.importKey('raw', encoder.encode(String(password)), 'PBKDF2', false, ['deriveBits']);
   const bits = await cryptoApi.subtle.deriveBits({ name: 'PBKDF2', salt: base64urlDecode(salt), iterations, hash: 'SHA-256' }, material, 256);
-  return { salt, hash: base64urlEncode(bits), iterations };
+  return new Uint8Array(bits);
 }
 
+/** New password records use Node's memory-hard scrypt KDF. */
+export async function derivePassword(password) {
+  if (typeof password !== 'string') throw new TypeError('Password must be a string.');
+  const salt = randomToken(16);
+  const derived = await scryptAsync(password, Buffer.from(base64urlDecode(salt)), PASSWORD_KDF.keyLength, {
+    N: PASSWORD_KDF.N, r: PASSWORD_KDF.r, p: PASSWORD_KDF.p, maxmem: PASSWORD_KDF.maxmem
+  });
+  return { algorithm: PASSWORD_KDF.algorithm, version: 2, salt, hash: base64urlEncode(derived), N: PASSWORD_KDF.N, r: PASSWORD_KDF.r, p: PASSWORD_KDF.p, keyLength: PASSWORD_KDF.keyLength };
+}
+
+/** Verify both current scrypt records and historical PBKDF2 records during migration. */
 export async function verifyPassword(password, record) {
-  if (!record?.salt || !record?.hash || !Number.isInteger(record?.iterations)) return false;
-  const derived = await derivePassword(password, record.salt, record.iterations);
-  return constantTimeEqual(base64urlDecode(derived.hash), base64urlDecode(record.hash));
+  if (typeof password !== 'string' || !record?.salt || !record?.hash) return false;
+  try {
+    const expected = base64urlDecode(record.hash);
+    if (record.algorithm === 'scrypt') {
+      // Do not let untrusted stored parameters request unbounded CPU or memory.
+      if (record.version !== 2 || record.N !== PASSWORD_KDF.N || record.r !== PASSWORD_KDF.r || record.p !== PASSWORD_KDF.p || record.keyLength !== PASSWORD_KDF.keyLength) return false;
+      const salt = base64urlDecode(record.salt);
+      if (salt.length !== 16 || expected.length !== PASSWORD_KDF.keyLength) return false;
+      const actual = await scryptAsync(password, Buffer.from(salt), PASSWORD_KDF.keyLength, {
+        N: PASSWORD_KDF.N, r: PASSWORD_KDF.r, p: PASSWORD_KDF.p, maxmem: PASSWORD_KDF.maxmem
+      });
+      return constantTimeEqual(actual, Buffer.from(expected));
+    }
+    // Records without an algorithm marker are legacy PBKDF2-HMAC-SHA-256.
+    const iterations = Number(record.iterations);
+    if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 2_000_000 || expected.length !== 32) return false;
+    const salt = base64urlDecode(record.salt);
+    if (salt.length < 16 || salt.length > 64) return false;
+    const actual = await deriveLegacyPbkdf2(password, record.salt, iterations);
+    return constantTimeEqual(actual, Buffer.from(expected));
+  } catch { return false; }
 }
 
 export async function dpopThumbprint(jwk) {

@@ -1,0 +1,442 @@
+{
+  "schema": "arixshield.integrity.v1",
+  "algorithm": "SHA-256",
+  "generatedAt": "deterministic",
+  "fileCount": 108,
+  "rootDigest": "94ebd13d305fb3665299fa5d3306e15000363c82e4645bbad06b9482b2e0d359",
+  "files": [
+    {
+      "path": "api/_lib/abuse.js",
+      "sha256": "eeef49c456cc4f3d514f4f719222537369d0cbd77de88cd41e89dc73d6eb432f"
+    },
+    {
+      "path": "api/_lib/ai-guard.js",
+      "sha256": "4f856b44b0be48d03d6e10e155cd0deb113971a9260ec648fe0ab30b137d6ef8"
+    },
+    {
+      "path": "api/_lib/alerts.js",
+      "sha256": "770299de03a450b5d41873a2586abe23257b5951a39e1a1d26f98dc75554fccf"
+    },
+    {
+      "path": "api/_lib/analytics.js",
+      "sha256": "4ae95516f39eee14c22f66d56b7069eeec0c358bcdafc72846a7b57dd2c5daa5"
+    },
+    {
+      "path": "api/_lib/audit-ratchet.js",
+      "sha256": "806dff3af522cb67628658e5b297619def0d26e7e1d9c799e62e55e98c7d5cfc"
+    },
+    {
+      "path": "api/_lib/audit.js",
+      "sha256": "4ae8b1e275233372c249087e8f3eba4feff2dff7b5fb73b74099b9147371b36c"
+    },
+    {
+      "path": "api/_lib/authorization.js",
+      "sha256": "4a944a7d0b7841ba4c050d8054ba954f80d9e645af14b89385d486e56e80ba3f"
+    },
+    {
+      "path": "api/_lib/bot-intel.js",
+      "sha256": "bdc38ea33bcfdeefa898148ca0f48c4fdaf6b49e0b198297474b80923d78786b"
+    },
+    {
+      "path": "api/_lib/breach-filter.js",
+      "sha256": "9a4c36fb9723afe0f36fbeec156806a4527961bc9ddc2653e6fa0e3cf79d20f3"
+    },
+    {
+      "path": "api/_lib/cidr.js",
+      "sha256": "9de4d019db5550cffa4adfc9b97ed97bb63d78974aba547b23f3311d5e8cb128"
+    },
+    {
+      "path": "api/_lib/circuit-breaker.js",
+      "sha256": "a10e862b0f949927b43db9819c99ec5d04750112119af32dad1fdd997a21845d"
+    },
+    {
+      "path": "api/_lib/config-compiler.js",
+      "sha256": "06fa27e3b52f3cc75b916dc9478a863920fca7a8a8427232239674807873bd18"
+    },
+    {
+      "path": "api/_lib/crypto-trap.js",
+      "sha256": "c2767268ba1007cc478a77e4a74987c7209961925251572e30513be55bd8f38d"
+    },
+    {
+      "path": "api/_lib/dr-backup.js",
+      "sha256": "8bede1a4de4cdb6641b363d9629a097ad0b0837b68fc1a97a90e5314699f8a39"
+    },
+    {
+      "path": "api/_lib/drr-scheduler.js",
+      "sha256": "61e3f2c67f818033c3848cb470d435fc01b88c5c5618cbb952b96680fb55f67e"
+    },
+    {
+      "path": "api/_lib/file-security.js",
+      "sha256": "4b0e447c6aca20d839e65f424de2f4a280e652227add17946707734c18d42d5e"
+    },
+    {
+      "path": "api/_lib/http.js",
+      "sha256": "1083e3ab5d7574eba7a6c49b7a46f1baa12d03de1b7e6ebc8fb737e9f432e20c"
+    },
+    {
+      "path": "api/_lib/identity-risk.js",
+      "sha256": "e4e49847404dd1461cc54c4f4b03b28500f8fa380a16fc64cf7a7e2f282aa85f"
+    },
+    {
+      "path": "api/_lib/integrity.js",
+      "sha256": "5f605bea4ac0a8a5e8a416dff861a36c0b5fc7ebc87cdde9fc1af2866fe7a89a"
+    },
+    {
+      "path": "api/_lib/kms.js",
+      "sha256": "b45caf0b4ac92e8b89a62789cabb40941ea67bf80e5b9d2d22391db751f294f6"
+    },
+    {
+      "path": "api/_lib/mfa.js",
+      "sha256": "475e5c04f6334b6d5c659958c3eda1269a7fe3562b332de77342cb8b4fe2d754"
+    },
+    {
+      "path": "api/_lib/origin-lock.js",
+      "sha256": "bde3b02ae8e689e4e4cf45d0713d2c76020f03290075482878ecc579a4a3c888"
+    },
+    {
+      "path": "api/_lib/password-policy.js",
+      "sha256": "76bf442c0116d7287ed5b4b2d8fdc6423b3e2d10c19dec95428d94b73132eb43"
+    },
+    {
+      "path": "api/_lib/positive-contract.js",
+      "sha256": "5ea6687f6c969e9429e33e643d3e07e8b0ae93b14939966efbe6a3c36ced86ab"
+    },
+    {
+      "path": "api/_lib/recovery-codes.js",
+      "sha256": "534a7c60622c7c086f84f3445935a4547835e7766694d5340441a87ae0248ea6"
+    },
+    {
+      "path": "api/_lib/redis.js",
+      "sha256": "c930746b7f945f9bb699d539a094f8f21ccdbbe34cd8b67c0b73ad0b92bd0050"
+    },
+    {
+      "path": "api/_lib/reputation.js",
+      "sha256": "219e3d03aba3e3f12863db695d58abd44b56ac7b24591b8d206a86f5e353a089"
+    },
+    {
+      "path": "api/_lib/runtime-guard.js",
+      "sha256": "8c236c5eddc5c6cec51cf02b00c2d4fb792d5827c0b421f1800fe3ae3e3e413a"
+    },
+    {
+      "path": "api/_lib/schema.js",
+      "sha256": "5ffb5c32a8ed14b71adc83ccbdf80eb2be633ed034f9e8b1d8dbd4e5a4416c1c"
+    },
+    {
+      "path": "api/_lib/security-constants.js",
+      "sha256": "2add6a91b1adc608fea281776fda2bace753cc118f3c3cefd8fecc942d6a763c"
+    },
+    {
+      "path": "api/_lib/security-self-test.js",
+      "sha256": "a307c603609cef7e02e2a98e30b57332b1afff0e86382ddd872f2db5da86ae4a"
+    },
+    {
+      "path": "api/_lib/session.js",
+      "sha256": "4f918a37ee01c5d550fc419a27b4b76fcdaba486fb93e9cfcc39cbb0263271b8"
+    },
+    {
+      "path": "api/_lib/soc-engine.js",
+      "sha256": "8eebf91bebb2bc4ea6c12eee7e97a0b3b3362f84f4902a03238784a2ed2105b8"
+    },
+    {
+      "path": "api/_lib/step-up.js",
+      "sha256": "183885b72bfefbc84d227043fdec522bfeca69cc5421eeba2f97ea39227d09a2"
+    },
+    {
+      "path": "api/_lib/threat-intel.js",
+      "sha256": "af0fd71511826483fdbfcb4546dd39ed5eba4bd22b783e45a51f70fe4990db03"
+    },
+    {
+      "path": "api/_lib/vercel-handler.js",
+      "sha256": "e8eacbbb3bd2b220a2a2201dbcbf897c1108cb4ce4168df2ade4a7ea25936355"
+    },
+    {
+      "path": "api/_lib/waf-engine.js",
+      "sha256": "c132072afbdc123c51d3f9b61b77e7d5d5c74ee0cad925ede75750aa3fca632b"
+    },
+    {
+      "path": "api/_lib/watermark.js",
+      "sha256": "eee0fe6853e420fcb9cc53cca584a9bb8f5d71d04bead1e3820dd0725f55fb21"
+    },
+    {
+      "path": "api/_lib/webauthn.js",
+      "sha256": "c5f3f5f8f2f9b9e1a179e3c790e6390e7344d8e9ccd12330d1672e6c2442a7a8"
+    },
+    {
+      "path": "api/auth.js",
+      "sha256": "e6b04da42549359c7cee43153207b7f9e0e419e05ad1f5e7ddb293f289a98800"
+    },
+    {
+      "path": "api/cron/analytics-flush.js",
+      "sha256": "ccc67dd9b146daa2417895a72cb8c95bf64b392d5796669672c34f01fc51d2de"
+    },
+    {
+      "path": "api/cron/audit-anchor.js",
+      "sha256": "8c56d79cffee204356a3f1ce44658578938e250be0f6b7d45cb502cd8b0c43dd"
+    },
+    {
+      "path": "api/cron/threat-feeds.js",
+      "sha256": "9a456affe9cd9d4848586dce9c07c71bcbfb680786219d8f4288c0dace9b49ec"
+    },
+    {
+      "path": "api/csp-report.js",
+      "sha256": "07a1490ecc73a8e36e51a06ede04cc14804682dd0c57b3d65e2ba80ab72f9f3d"
+    },
+    {
+      "path": "api/decode-leak.js",
+      "sha256": "c2cb195fff3eeeb6a2f7c4ec9a715ebe628c17dbb5f9ef62e71d1ade63128bf4"
+    },
+    {
+      "path": "api/github-webhook.js",
+      "sha256": "a0a5ccba23e3bdb844ee92b9886fec9e72f3c0d711e3e613cd921b108d1292df"
+    },
+    {
+      "path": "api/health.js",
+      "sha256": "0e9d93c7865c7163d5d1c844b573dfe2f93192d1542c2234163aa842c95c879d"
+    },
+    {
+      "path": "api/shield.js",
+      "sha256": "c5c8bd6b1bf5bfe566ed241fd9c3ce9cf13278416c6473a149d3317bf983f777"
+    },
+    {
+      "path": "api/telemetry.js",
+      "sha256": "4464ced576466badb3d25fc70900d4c8da7e6d0792b6a240f36d4d6977c230b9"
+    },
+    {
+      "path": "edge/gateway.mjs",
+      "sha256": "d7587b607ea569415df6db786ca1b549944664d6df7712ab90fcb25413582e1e"
+    },
+    {
+      "path": "edge/healthcheck.mjs",
+      "sha256": "67fb0871418ba75f1e3617268781763527778d727d533679de87192bf3e62b16"
+    },
+    {
+      "path": "public/app.js",
+      "sha256": "edd19982796fa6fdf75a584aed05a8a05dbafa5eeda6f010a3c2ecd81087ea2f"
+    },
+    {
+      "path": "public/arix-client.js",
+      "sha256": "50117e53d63159f970c2740758add2329137303d94e626ea816a59a3f4418b5f"
+    },
+    {
+      "path": "public/dashboard.html",
+      "sha256": "b70567cf03cf56c2addcaa399bdba6f4cfb6571d9a0e3a4b5db2f98a3fa7347d"
+    },
+    {
+      "path": "public/developer.html",
+      "sha256": "f0829f8bca6bda9814467002f59506fc11b737e7778e286c60cb83efd10196c7"
+    },
+    {
+      "path": "public/index.html",
+      "sha256": "a3486e88e0169eaa2ba81a52dbe66dcf422f22d354d2173ab2f4e8e45d109779"
+    },
+    {
+      "path": "public/origin-settings.js",
+      "sha256": "0e5853c9ae6287b0d23d078344d10ccec5e575f78d2fe10336fc208e5503fd89"
+    },
+    {
+      "path": "scripts/asvs-l3-verifier.mjs",
+      "sha256": "f0fcbf4ab4062b797e7ca0372b15c7e3c831a7d08b4ff5c66703b930d6bd00a9"
+    },
+    {
+      "path": "scripts/build.mjs",
+      "sha256": "1561b449da0a118c989bb52893d072d1096cf8de5f0b507c1ef9654030e3f9e3"
+    },
+    {
+      "path": "scripts/check.mjs",
+      "sha256": "165e9cbca6bf65e75d6c137b6330b35a34415e308d07bf943b530b6c3f5bab83"
+    },
+    {
+      "path": "scripts/compile-breach-filter.mjs",
+      "sha256": "ec9f56e3c2176e069ec3cb9a06fc4da960ff9a3413e22094d433e2eb2791f3af"
+    },
+    {
+      "path": "scripts/compile-policy.mjs",
+      "sha256": "aa2c041efe6177861fd527583aa697c1d2c4657020590b93719997a78fdf5cda"
+    },
+    {
+      "path": "scripts/generate-clearance-keys.mjs",
+      "sha256": "b6118a5286cb69150365c12ccc6a7fb9bc10f283822c5f65e2456f76a5948452"
+    },
+    {
+      "path": "scripts/generate-origin-keys.mjs",
+      "sha256": "b8b33a8a4daf5335d1a74f2552e794fc709f3a6872071e5b5800a47368ec8f1b"
+    },
+    {
+      "path": "scripts/generate-rls-policies.mjs",
+      "sha256": "bb9c19081f9ebbdb15bf1a4025fc35af6468ca048d39901b52b908f126a66df5"
+    },
+    {
+      "path": "scripts/run-100k-lab.mjs",
+      "sha256": "610f42bb3e670eb73729025ba9c05d2ae8e4a6ebc4c77e9fcdbf20f36ce31ff3"
+    },
+    {
+      "path": "scripts/run-browser-farm.mjs",
+      "sha256": "39c4449ba6cd8e256456e25470c8658876a6d8eafa885f234ba9c3bcdd358dd5"
+    },
+    {
+      "path": "scripts/run-endurance.mjs",
+      "sha256": "a9b1c34a024747bebd879666d776d44acec88dc9dd1d30adc70a739af57a705c"
+    },
+    {
+      "path": "scripts/verify-audit-bundle.mjs",
+      "sha256": "a71b73bac643b2047259261847906484ae26d81f2d3bdf4117e5fe30521f90ca"
+    },
+    {
+      "path": "sdk/context.js",
+      "sha256": "fef06a60124432ea2c03b8bbdf64d153e26bf1145fac49366f073e831dff338b"
+    },
+    {
+      "path": "sdk/identity.js",
+      "sha256": "9ba545034c0ad1d8c26744351f3d15fd6bd1d48f78440d72ef3a79e215723da8"
+    },
+    {
+      "path": "sdk/next.js",
+      "sha256": "23e5816007baf6e08f17067015549e2944eb718ed224b780a8054c5c5dbd8c09"
+    },
+    {
+      "path": "sdk/node.js",
+      "sha256": "fc7b3db6cec4736360bde769c7b5b666845438380529f4a68f102ff6f1a57ddf"
+    },
+    {
+      "path": "sdk/safe-fetch.js",
+      "sha256": "a20faf92d836ec0ca14a656452a001f13bde7e9dd0729464ff3706898b7f8b4f"
+    },
+    {
+      "path": "sdk/security-runtime.js",
+      "sha256": "ad62cb3b9bb9a3813fdffe0a595e056307347c4ff990693ebe55ab62023d10f0"
+    },
+    {
+      "path": "security-test-pack/scripts/asvs-l3-verifier.mjs",
+      "sha256": "f0fcbf4ab4062b797e7ca0372b15c7e3c831a7d08b4ff5c66703b930d6bd00a9"
+    },
+    {
+      "path": "security-test-pack/scripts/run-100k-lab.mjs",
+      "sha256": "610f42bb3e670eb73729025ba9c05d2ae8e4a6ebc4c77e9fcdbf20f36ce31ff3"
+    },
+    {
+      "path": "security-test-pack/scripts/run-browser-farm.mjs",
+      "sha256": "39c4449ba6cd8e256456e25470c8658876a6d8eafa885f234ba9c3bcdd358dd5"
+    },
+    {
+      "path": "security-test-pack/scripts/run-endurance.mjs",
+      "sha256": "a9b1c34a024747bebd879666d776d44acec88dc9dd1d30adc70a739af57a705c"
+    },
+    {
+      "path": "security-test-pack/test/adversarial-lab.test.js",
+      "sha256": "cf10be37cb83efd20c7676f0ea83f241e679513f88d0bf065a3a862c8ec07cc2"
+    },
+    {
+      "path": "security-test-pack/test/asvs-verifier.test.js",
+      "sha256": "b070c4fa0a7fc26f504477ad0c658fea3956bc8f92ad87d96971cd2c485315e9"
+    },
+    {
+      "path": "security-test-pack/test/auth-recovery.test.js",
+      "sha256": "aa46a405612612fd151b9fe3e8bd31e02a69be9d57ce8c8fc44b7ba4c22d9ff9"
+    },
+    {
+      "path": "security-test-pack/test/browser-farm-safety.test.js",
+      "sha256": "27098b00c2da12a3a6eb96c07ee931ccd32274cfd97b5113cf814a96bfdbf3a3"
+    },
+    {
+      "path": "security-test-pack/test/concurrency-network-chaos.test.js",
+      "sha256": "233b041a52022e0f466f2a5c5d02c86d97f628f05e2d18aae0dd57a7b7254e2d"
+    },
+    {
+      "path": "security-test-pack/test/crypto.test.js",
+      "sha256": "5662b46ab0ae3d7d6634e5141a8133d73729814e7e41a0a6557a05489447dd3d"
+    },
+    {
+      "path": "security-test-pack/test/hardening-regressions.test.js",
+      "sha256": "69ab943772f00029e713c8b21a463c524da53af4ebd518a36cef08d586ede5bd"
+    },
+    {
+      "path": "security-test-pack/test/http-parser-differential.test.js",
+      "sha256": "0c028099d618d25040e50b82c1abcbb7ca92eea0bbe3919e28444b95fb882e81"
+    },
+    {
+      "path": "security-test-pack/test/new-domain-primitives.test.js",
+      "sha256": "90bc46088b4c8998f00f2aa401e310a737e64e5eb091e2737b9f04cb6fd27be0"
+    },
+    {
+      "path": "security-test-pack/test/runtime-invariants-25.test.js",
+      "sha256": "ed40f9ae6b4817a0fb5be7890905c7ac410947d0530a804c7ce83506c0d39e6f"
+    },
+    {
+      "path": "security-test-pack/test/security-upgrades.test.js",
+      "sha256": "b6d9a0f6b0f1bc6baf79c2309821bcf698d25f3a89b36e413c36f47609787252"
+    },
+    {
+      "path": "security-test-pack/test/security.test.js",
+      "sha256": "a8d5a17142600e4582006f72eb05ac4b73b4d07c34f6a71964e965febbaa7c63"
+    },
+    {
+      "path": "security-test-pack/test/tenant-isolation-attack-workflows.test.js",
+      "sha256": "92633a529572f1672da4f70074c6b86b94bf659787d577d88a240fd855f3ca8c"
+    },
+    {
+      "path": "test/adversarial-lab.test.js",
+      "sha256": "cf10be37cb83efd20c7676f0ea83f241e679513f88d0bf065a3a862c8ec07cc2"
+    },
+    {
+      "path": "test/asvs-verifier.test.js",
+      "sha256": "b070c4fa0a7fc26f504477ad0c658fea3956bc8f92ad87d96971cd2c485315e9"
+    },
+    {
+      "path": "test/auth-recovery.test.js",
+      "sha256": "aa46a405612612fd151b9fe3e8bd31e02a69be9d57ce8c8fc44b7ba4c22d9ff9"
+    },
+    {
+      "path": "test/bot-risk-boundary.test.js",
+      "sha256": "5009c34b95abe5a60463bf7c9eefb56e318b533b5dc10d2a559aa3097e89dd28"
+    },
+    {
+      "path": "test/browser-farm-safety.test.js",
+      "sha256": "27098b00c2da12a3a6eb96c07ee931ccd32274cfd97b5113cf814a96bfdbf3a3"
+    },
+    {
+      "path": "test/concurrency-network-chaos.test.js",
+      "sha256": "233b041a52022e0f466f2a5c5d02c86d97f628f05e2d18aae0dd57a7b7254e2d"
+    },
+    {
+      "path": "test/crypto.test.js",
+      "sha256": "5662b46ab0ae3d7d6634e5141a8133d73729814e7e41a0a6557a05489447dd3d"
+    },
+    {
+      "path": "test/customer-record-encryption.test.js",
+      "sha256": "a033cb88186cb764485a4909eeaebd63c43ebd7ca0dae5727cd6a212a6836674"
+    },
+    {
+      "path": "test/edge-gateway.test.js",
+      "sha256": "30dd0c03ffb1c99eb4c98daed4537b2f57f33eb5a169a6a9bd6b36b903e5c12f"
+    },
+    {
+      "path": "test/hardening-regressions.test.js",
+      "sha256": "69ab943772f00029e713c8b21a463c524da53af4ebd518a36cef08d586ede5bd"
+    },
+    {
+      "path": "test/http-parser-differential.test.js",
+      "sha256": "0c028099d618d25040e50b82c1abcbb7ca92eea0bbe3919e28444b95fb882e81"
+    },
+    {
+      "path": "test/new-domain-primitives.test.js",
+      "sha256": "90bc46088b4c8998f00f2aa401e310a737e64e5eb091e2737b9f04cb6fd27be0"
+    },
+    {
+      "path": "test/runtime-invariants-25.test.js",
+      "sha256": "ed40f9ae6b4817a0fb5be7890905c7ac410947d0530a804c7ce83506c0d39e6f"
+    },
+    {
+      "path": "test/security-upgrades.test.js",
+      "sha256": "b6d9a0f6b0f1bc6baf79c2309821bcf698d25f3a89b36e413c36f47609787252"
+    },
+    {
+      "path": "test/security.test.js",
+      "sha256": "a8d5a17142600e4582006f72eb05ac4b73b4d07c34f6a71964e965febbaa7c63"
+    },
+    {
+      "path": "test/tenant-isolation-attack-workflows.test.js",
+      "sha256": "92633a529572f1672da4f70074c6b86b94bf659787d577d88a240fd855f3ca8c"
+    }
+  ],
+  "signature": null
+}

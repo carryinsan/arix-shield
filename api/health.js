@@ -38,3 +38,6 @@ async function handler(req, res) {
 }
 
 export default createCompatibleHandler(handler);
+
+// Keep raw request bytes available for origin-proof verification in the shared adapter.
+export const config = { api: { bodyParser: false } };

@@ -1,0 +1,53 @@
+{
+  "generatedAt": "2026-11-02T14:53:44.305Z",
+  "node": "v22.16.0",
+  "durationRequestedMs": 10000,
+  "elapsedSeconds": 10.000066734,
+  "concurrency": 8,
+  "totalRequests": 253170,
+  "allowed": 202537,
+  "rejected": 50633,
+  "invariantErrors": 0,
+  "requestsPerSecond": 25316.831050659664,
+  "peakHeapMiB": 11.889541625976562,
+  "peakRssMiB": 57.12890625,
+  "perSecond": [
+    {
+      "atSeconds": 1,
+      "requests": 10149
+    },
+    {
+      "atSeconds": 2,
+      "requests": 22498
+    },
+    {
+      "atSeconds": 3,
+      "requests": 21990
+    },
+    {
+      "atSeconds": 4,
+      "requests": 27184
+    },
+    {
+      "atSeconds": 5,
+      "requests": 28533
+    },
+    {
+      "atSeconds": 6,
+      "requests": 28510
+    },
+    {
+      "atSeconds": 7,
+      "requests": 28256
+    },
+    {
+      "atSeconds": 8,
+      "requests": 28799
+    },
+    {
+      "atSeconds": 9,
+      "requests": 28691
+    }
+  ],
+  "scope": "Local in-process loop; no real network, browser farm, external Redis, or database involved."
+}

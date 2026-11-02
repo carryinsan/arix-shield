@@ -1,4 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { sanitizeArixIdentity } from './identity.js';
+import { runWithArixContext } from './context.js';
 import { isIP } from 'node:net';
 import { inspectRequest, redactSensitiveText } from '../api/_lib/waf-engine.js';
 import { authorizeRequest, filterReadFields, filterWriteFields, normalizeSecurityPath, scopeQuery } from '../api/_lib/authorization.js';
@@ -117,7 +119,7 @@ export function createArixShield(options = {}) {
     if (!pathname) return sendDecision(res, 400, { error: 'Invalid or ambiguous request path.' });
     const clientIp = resolveClientIp(req, options);
     const identityValue = typeof options.getIdentity === 'function' ? await options.getIdentity(req, { ip: clientIp, method, path: pathname }) : (req.user?.id ?? req.auth?.userId ?? '');
-    const identity = String(identityValue || '').slice(0, 180) || 'anonymous';
+    const identity = sanitizeArixIdentity(identityValue, clientIp) || 'anonymous';
     // Anonymous requests must not collapse into one project-wide `anonymous` bucket.
     // Use a per-request actor until an authenticated identity or verified DPoP key exists.
     let securityActor = identity === 'anonymous' ? `anonymous:${randomUUID()}` : identity;
@@ -135,12 +137,15 @@ export function createArixShield(options = {}) {
       try { authContext = await authProvider(req, { ip: clientIp, identity, method, pathname }) || {}; }
       catch (error) { options.onPolicyError?.(error); return sendDecision(res, 403, { error: 'Authorization context could not be established.' }); }
     }
+    // Capture the authenticated context before filling policy-compatible identity fallbacks.
+    // The automatic Prisma scope adapter deliberately uses only these trusted context fields.
+    const verifiedContextUserId = String(authContext.userId || authContext.ownerId || '').trim();
     let tenantId = String(authContext.tenantId || authContext.projectId || options.tenantId || options.projectId || '').trim();
     if (!tenantId && typeof options.getTenantIdentity === 'function') {
       try { tenantId = String(await options.getTenantIdentity(req, authContext) || '').trim(); }
       catch (error) { options.onPolicyError?.(error); return sendDecision(res, 403, { error: 'Tenant context could not be established.' }); }
     }
-    const userId = String(authContext.userId || authContext.ownerId || (identity !== 'anonymous' ? identity : '')).trim();
+    const userId = String(verifiedContextUserId || (identity !== 'anonymous' ? identity : '')).trim();
     if (userId) securityActor = `user:${userId}`;
     authContext = { ...authContext, userId, tenantId, projectId: authContext.projectId || tenantId };
     const authorizationConfig = options.authorization || {};
@@ -349,7 +354,7 @@ export function createArixShield(options = {}) {
       const event = { action: 'record-outcome', actorId: securityActor, userId: securityActor, ip: clientIp, path: pathname, method, status: res.statusCode, latencyMs: Date.now() - started, resourceCapabilityVerified, ...geo, safeHeaders: safeHeaders(req.headers), findings: findings.slice(0, 20) };
       serverAction(endpoint, serverKey, event, 2500).catch((error) => options.onTelemetryError?.(error));
     });
-    return next();
+    return runWithArixContext({ userId: verifiedContextUserId, tenantId, roles, permissions: authz.context?.permissions || [], method, path: pathname }, () => next());
   };
 }
 
@@ -379,3 +384,6 @@ export async function getArixPolicy({ endpoint, serverKey, fallback = {} } = {})
 export function redactResponseText(text) { return redactSensitiveText(text); }
 export { inspectRequest, redactSensitiveText, validatePayloadSchema, scopeQuery, arixSafeFetch };
 export { compileOpenApiRequestSchema } from '../api/_lib/schema.js';
+
+export { getArixContext, protectPrismaClient } from './context.js';
+export { runWithArixContext };

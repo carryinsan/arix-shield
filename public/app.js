@@ -9,6 +9,28 @@
   };
   const showNotice = (node, message, type = 'success') => { if (!node) return; node.textContent = message; node.className = `notice show ${type}`; };
   const hideNotice = (node) => { if (node) node.className = 'notice'; };
+  const requestStepUp = ({ title = 'Confirm your identity', description = 'Re-enter your credentials to continue.', requirePassword = true, requireTotp = false } = {}) => new Promise((resolve) => {
+    const dialog = $('#step-up-modal'); const form = $('#step-up-form'); const passwordField = $('#step-up-password-field'); const totpField = $('#step-up-totp-field');
+    const password = $('#step-up-password'); const totp = $('#step-up-totp');
+    if (!dialog || typeof dialog.showModal !== 'function' || !form || dialog.open) { resolve(null); return; }
+    $('#step-up-title').textContent = title; $('#step-up-description').textContent = description;
+    passwordField.classList.toggle('hidden', !requirePassword); totpField.classList.toggle('hidden', !requireTotp);
+    password.required = requirePassword; totp.required = requireTotp; password.value = ''; totp.value = '';
+    let settled = false;
+    const finish = (value) => { if (settled) return; settled = true; form.removeEventListener('submit', submit); $('#step-up-cancel').removeEventListener('click', cancel); dialog.removeEventListener('cancel', onCancel); if (dialog.open) dialog.close(); password.value = ''; totp.value = ''; resolve(value); };
+    const cancel = () => finish(null);
+    const onCancel = (event) => { event.preventDefault(); finish(null); };
+    const submit = (event) => {
+      event.preventDefault();
+      const passwordValue = password.value;
+      const totpValue = totp.value.trim();
+      if (requirePassword && !passwordValue) { password.focus(); return; }
+      if (requireTotp && !/^\d{6}$/.test(totpValue)) { totp.setCustomValidity('Enter the six-digit authenticator code.'); totp.reportValidity(); totp.setCustomValidity(''); totp.focus(); return; }
+      finish({ password: passwordValue, totpCode: totpValue });
+    };
+    form.addEventListener('submit', submit); $('#step-up-cancel').addEventListener('click', cancel); dialog.addEventListener('cancel', onCancel);
+    try { dialog.showModal(); (requirePassword ? password : totp).focus(); } catch { finish(null); }
+  });
   const copyText = async (value) => { if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value); const input = document.createElement('textarea'); input.value = value; input.setAttribute('readonly', ''); input.className = 'clipboard-helper'; document.body.append(input); input.select(); const copied = document.execCommand('copy'); input.remove(); if (!copied) throw new Error('Clipboard access was denied.'); };
   const solveLoginPow = async (challenge, onProgress = () => {}) => {
     if (!challenge?.nonce || !challenge?.token || !Number.isInteger(challenge.difficulty) || challenge.difficulty < 12 || challenge.difficulty > 20) throw new Error('The sign-in proof-of-work challenge is invalid.');
@@ -141,7 +163,7 @@ def arix_telemetry(response):
   async function initDashboard() {
     if (!$('#visitor-table')) return;
     const status = $('#connection-status'); const primaryOriginInput = $('#primary-origin'); const customOriginsInput = $('#custom-origins'); const originsForm = $('#origins-form'); const originsNotice = $('#origins-notice'); let originsDirty = false; let dashboardTotpEnabled = false; let currentPolicyMode = 'ENFORCE';
-    const promptStepUp = (purpose) => { const password = window.prompt(`Enter your current password to ${purpose}.`); if (password === null) return null; let totpCode = ''; if (dashboardTotpEnabled) { totpCode = window.prompt('Enter your current six-digit authenticator code.'); if (totpCode === null) return null; if (!/^\d{6}$/.test(String(totpCode).trim())) throw new Error('Enter a valid six-digit authenticator code.'); } return { password, totpCode: String(totpCode || '').trim() }; };
+    const promptStepUp = (purpose) => requestStepUp({ title: 'Confirm sensitive change', description: `Confirm your identity to ${purpose}.`, requirePassword: true, requireTotp: dashboardTotpEnabled });
     const showDashError = (message) => { status.textContent = 'DISCONNECTED'; status.classList.add('is-danger'); status.classList.remove('is-good'); $('#project-origin').textContent = message; };
     const updateOriginCount = () => { if (!primaryOriginInput || !customOriginsInput) return; const primary = primaryOriginInput.value.trim().replace(/\/$/, ''); const extras = [...new Set(customOriginsInput.value.split(/[\n,]+/).map((value) => value.trim().replace(/\/$/, '')).filter((value) => value && value !== primary))]; $('#origin-count').textContent = `${1 + extras.length} / 11 origins configured`; };
     const syncOrigins = (project) => { if (!primaryOriginInput || !customOriginsInput) return; const primary = project.origin || ''; const allowed = Array.isArray(project.allowedOrigins) && project.allowedOrigins.length ? project.allowedOrigins : [primary].filter(Boolean); primaryOriginInput.value = primary; customOriginsInput.value = allowed.filter((origin) => origin && origin !== primary).join(', '); originsDirty = false; updateOriginCount(); };
@@ -149,7 +171,7 @@ def arix_telemetry(response):
     customOriginsInput?.addEventListener('input', () => { originsDirty = true; updateOriginCount(); hideNotice(originsNotice); });
     originsForm?.addEventListener('submit', async (event) => {
       event.preventDefault(); const saveButton = $('#save-origins'); saveButton.disabled = true; saveButton.textContent = 'Saving origins…'; hideNotice(originsNotice);
-      try { const stepUp = promptStepUp('change application origins'); if (!stepUp) { showNotice(originsNotice, 'Origin change canceled.', 'info'); return; } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify({ action: 'origins', origin: primaryOriginInput.value.trim(), customOrigins: customOriginsInput.value, ...stepUp }) }); syncOrigins(result.project); showNotice(originsNotice, 'Origin allowlist saved. It is active for the next browser telemetry request; no redeployment is required.', 'success'); }
+      try { const stepUp = await promptStepUp('change application origins'); if (!stepUp) { showNotice(originsNotice, 'Origin change canceled.', 'info'); return; } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify({ action: 'origins', origin: primaryOriginInput.value.trim(), customOrigins: customOriginsInput.value, ...stepUp }) }); syncOrigins(result.project); showNotice(originsNotice, 'Origin allowlist saved. It is active for the next browser telemetry request; no redeployment is required.', 'success'); }
       catch (error) { showNotice(originsNotice, error.message, 'error'); }
       finally { saveButton.disabled = false; saveButton.textContent = 'Save origins'; }
     });
@@ -241,9 +263,9 @@ def arix_telemetry(response):
         const changeButton = $('#change-password'); const passwordNotice = $('#password-change-notice');
         const currentPassword = $('#password-current').value; const newPassword = $('#password-new').value; const confirmPassword = $('#password-confirm').value;
         if (newPassword !== confirmPassword) { showNotice(passwordNotice, 'New password and confirmation do not match.', 'error'); return; }
-        const totpCode = dashboardTotpEnabled ? window.prompt('Enter your current six-digit authenticator code.') : '';
-        if (totpCode === null) return;
-        if (dashboardTotpEnabled && !/^\d{6}$/.test(String(totpCode).trim())) { showNotice(passwordNotice, 'Enter a valid six-digit authenticator code.', 'error'); return; }
+        const proof = dashboardTotpEnabled ? await requestStepUp({ title: 'Confirm password change', description: 'Enter your current authenticator code.', requirePassword: false, requireTotp: true }) : { totpCode: '' };
+        if (!proof) return;
+        const totpCode = proof.totpCode;
         changeButton.disabled = true;
         try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'change-password', currentPassword, newPassword, confirmPassword, totpCode: String(totpCode || '').trim() }) }); $('#password-current').value = ''; $('#password-new').value = ''; $('#password-confirm').value = ''; showNotice(passwordNotice, 'Password changed. Other sessions were revoked; this browser remains signed in.', 'success'); }
         catch (error) { showNotice(passwordNotice, error.message, 'error'); }
@@ -265,10 +287,8 @@ def arix_telemetry(response):
             const row = document.createElement('div'); row.className = 'inline-form';
             const label = document.createElement('span'); label.textContent = `Passkey ${index + 1} · last used ${item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : 'not yet used'}`;
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-secondary'; remove.textContent = 'Remove'; remove.addEventListener('click', async () => {
-              const password = window.prompt('Enter your current password to remove this passkey.'); if (password === null) return;
-              const totpCode = securityState.totpEnabled === true ? window.prompt('Enter the current six-digit authenticator code.') : '';
-              if (totpCode === null) return;
-              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password, totpCode: String(totpCode || '').trim() }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
+              const proof = await requestStepUp({ title: 'Remove passkey', description: 'Re-authenticate before removing this passkey.', requirePassword: true, requireTotp: securityState.totpEnabled === true }); if (!proof) return;
+              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password: proof.password, totpCode: proof.totpCode }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
               catch (error) { showNotice(notice, error.message, 'error'); }
             }); row.append(label, remove); passkeyList.append(row);
           });
@@ -371,7 +391,7 @@ def arix_telemetry(response):
     }
     $('#save-policy')?.addEventListener('click', async () => {
       const notice = $('#policy-notice'); const payload = { action: 'policy', mode: $('#policy-mode').value, blockDatacenterAsn: $('#policy-dc').checked, deceptionEnabled: $('#policy-deception').checked, abuseProtectionEnabled: $('#policy-abuse').checked, threatFeedEnabled: $('#policy-feeds').checked, geoVelocityEnabled: $('#policy-geo').checked, shadowApiCatalogEnabled: $('#policy-shadow').checked, forensicReplayEnabled: $('#policy-forensic').checked, rateLimitPerMinute: Number($('#policy-limit').value), alertWebhookUrl: $('#policy-alert-webhook').value.trim(), autoContainmentEnabled: $('#policy-auto-containment').checked };
-      try { if (payload.mode === 'DRY_RUN' && currentPolicyMode !== 'DRY_RUN') { const stepUp = promptStepUp('switch enforcement to DRY_RUN'); if (!stepUp) { showNotice(notice, 'Policy change canceled.', 'info'); return; } Object.assign(payload, stepUp); } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) }); syncPolicy(result.policy); showNotice(notice, 'Security policy saved.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); }
+      try { if (payload.mode === 'DRY_RUN' && currentPolicyMode !== 'DRY_RUN') { const stepUp = await promptStepUp('switch enforcement to DRY_RUN'); if (!stepUp) { showNotice(notice, 'Policy change canceled.', 'info'); return; } Object.assign(payload, stepUp); } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) }); syncPolicy(result.policy); showNotice(notice, 'Security policy saved.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); }
     });
     $('#decode-leak')?.addEventListener('click', async () => {
       const notice = $('#decode-notice'); const resultNode = $('#decode-result'); resultNode.classList.add('hidden');

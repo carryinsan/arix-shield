@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { CLEARANCE_RSA_MIN_BITS } from '../api/_lib/security-constants.js';
 
-const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicExponent: 0x10001 });
+const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: CLEARANCE_RSA_MIN_BITS, publicExponent: 0x10001 });
 const kid = `arix-${randomUUID()}`;
 const publicJwk = { ...publicKey.export({ format: 'jwk' }), alg: 'RSA-OAEP-256', use: 'enc', kid, ext: true };
 const privateJwk = { ...privateKey.export({ format: 'jwk' }), alg: 'RSA-OAEP-256', use: 'enc', kid, ext: true };

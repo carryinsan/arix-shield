@@ -1,6 +1,6 @@
 {
   "name": "arixshield",
-  "version": "1.1.0",
+  "version": "1.4.2",
   "private": true,
   "type": "module",
   "description": "Hybrid API security SDK and serverless control plane for ArixShield",
@@ -12,8 +12,13 @@
     "test": "node --test test/*.test.js",
     "generate:clearance-keys": "node scripts/generate-clearance-keys.mjs",
     "integrity:update": "node scripts/check.mjs --write-manifest",
+    "compile:breach-filter": "node scripts/compile-breach-filter.mjs",
+    "compile:policy": "node scripts/compile-policy.mjs",
+    "generate:rls": "node scripts/generate-rls-policies.mjs",
+    "generate:origin-keys": "node scripts/generate-origin-keys.mjs",
     "audit:verify": "node scripts/verify-audit-bundle.mjs",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "edge": "node edge/gateway.mjs"
   },
   "exports": {
     ".": "./sdk/node.js",
@@ -24,6 +29,23 @@
     "./cidr": "./api/_lib/cidr.js",
     "./reputation": "./api/_lib/reputation.js",
     "./analytics": "./api/_lib/analytics.js",
-    "./watermark": "./api/_lib/watermark.js"
+    "./watermark": "./api/_lib/watermark.js",
+    "./context": "./sdk/context.js",
+    "./identity": "./sdk/identity.js",
+    "./breach-filter": "./api/_lib/breach-filter.js",
+    "./file-security": "./api/_lib/file-security.js",
+    "./kms": "./api/_lib/kms.js",
+    "./origin-lock": "./api/_lib/origin-lock.js",
+    "./ai-guard": "./api/_lib/ai-guard.js",
+    "./threat-intel": "./api/_lib/threat-intel.js",
+    "./recovery-codes": "./api/_lib/recovery-codes.js",
+    "./identity-risk": "./api/_lib/identity-risk.js",
+    "./bot-intel": "./api/_lib/bot-intel.js",
+    "./positive-contract": "./api/_lib/positive-contract.js",
+    "./runtime-guard": "./api/_lib/runtime-guard.js",
+    "./audit-ratchet": "./api/_lib/audit-ratchet.js",
+    "./soc": "./api/_lib/soc-engine.js",
+    "./dr-backup": "./api/_lib/dr-backup.js",
+    "./edge": "./edge/gateway.mjs"
   }
 }

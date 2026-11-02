@@ -79,3 +79,26 @@ test('clearance continuity survives Wi-Fi/mobile IP and JA4 changes when the DPo
   assert.equal(result.valid, true);
   assert.equal(result.thumbprint, thumbprint);
 });
+
+
+test('password KDF writes bounded scrypt records and verifies legacy PBKDF2 records', async () => {
+  const { derivePassword, verifyPassword } = await import('../api/_lib/crypto-trap.js');
+  const { LEGACY_PBKDF2_ITERATIONS, PASSWORD_KDF } = await import('../api/_lib/security-constants.js');
+  const password = 'correct-horse-battery-staple-v2';
+  const record = await derivePassword(password);
+  assert.equal(record.algorithm, 'scrypt');
+  assert.equal(record.version, 2);
+  assert.equal(record.N, PASSWORD_KDF.N);
+  assert.equal(record.r, PASSWORD_KDF.r);
+  assert.equal(record.p, PASSWORD_KDF.p);
+  assert.equal(await verifyPassword(password, record), true);
+  assert.equal(await verifyPassword('not-the-password', record), false);
+  assert.equal(await verifyPassword(password, { ...record, N: 2 ** 30 }), false);
+
+  const salt = webcrypto.getRandomValues(new Uint8Array(16));
+  const material = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const hash = new Uint8Array(await webcrypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: LEGACY_PBKDF2_ITERATIONS, hash: 'SHA-256' }, material, 256));
+  const legacy = { salt: Buffer.from(salt).toString('base64url'), hash: Buffer.from(hash).toString('base64url'), iterations: LEGACY_PBKDF2_ITERATIONS };
+  assert.equal(await verifyPassword(password, legacy), true);
+  assert.equal(await verifyPassword('not-the-password', legacy), false);
+});

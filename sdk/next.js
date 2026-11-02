@@ -3,6 +3,7 @@ import { authorizeRequest, filterReadFields, filterWriteFields, isMutatingMethod
 import { rewriteCapabilityRequest } from '../api/_lib/crypto-trap.js';
 import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, consumeLocalOutageRead, validateWorkflowRequest } from './security-runtime.js';
 import { randomUUID } from 'node:crypto';
+import { sanitizeArixIdentity } from './identity.js';
 import { validateOpenApiRequest } from '../api/_lib/schema.js';
 import { verifySignedToken, verifyRequestDpopProof, sha256Hex, createSignedToken } from '../api/_lib/crypto-trap.js';
 import { formatIpPrefix } from '../api/_lib/cidr.js';
@@ -156,7 +157,7 @@ export async function protectRequest(request, options = {}) {
   const identityValue = typeof options.getIdentity === 'function'
     ? await options.getIdentity(request, { ip: clientIp, method, path: pathname })
     : (options.userId ?? '');
-  const subject = String(identityValue || '').slice(0, 180) || 'anonymous';
+  const subject = sanitizeArixIdentity(identityValue, clientIp) || 'anonymous';
   // Do not put every anonymous visitor into the same actor quota/ban bucket.
   let securityActor = subject === 'anonymous' ? `anonymous:${randomUUID()}` : subject;
   let dpopVerified = false;
