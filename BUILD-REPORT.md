@@ -13,7 +13,7 @@ No third-party runtime dependency or new vendor API key was added. The Ed25519 o
 The canonical manifest is generated at `docs/INTEGRITY-MANIFEST.json`; `npm run integrity:update` writes an identical API-bundled mirror at `api/_integrity-manifest.json`. Both contain hashes only and are unsigned in the distributed archive. `npm run check` verifies source hashes, generated metadata and exact mirror equality. Do not edit generated markers manually.
 
 <!-- ARIX-MANIFEST-FILE-COUNT:108 -->
-<!-- ARIX-MANIFEST-ROOT:94ebd13d305fb3665299fa5d3306e15000363c82e4645bbad06b9482b2e0d359 -->
+<!-- ARIX-MANIFEST-ROOT:c8eaf34564c4ae7eda10170dcb73d6ce5bb75b1fe63343a884c10483e5eeb8f3 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification

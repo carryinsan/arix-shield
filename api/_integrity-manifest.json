@@ -3,7 +3,7 @@
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
   "fileCount": 108,
-  "rootDigest": "94ebd13d305fb3665299fa5d3306e15000363c82e4645bbad06b9482b2e0d359",
+  "rootDigest": "c8eaf34564c4ae7eda10170dcb73d6ce5bb75b1fe63343a884c10483e5eeb8f3",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -383,7 +383,7 @@
     },
     {
       "path": "test/auth-recovery.test.js",
-      "sha256": "aa46a405612612fd151b9fe3e8bd31e02a69be9d57ce8c8fc44b7ba4c22d9ff9"
+      "sha256": "0fbf7fcb1ce595641d14e08ca1e381caf9a95daa448a445dd5dc5a4f78e8f5ca"
     },
     {
       "path": "test/bot-risk-boundary.test.js",

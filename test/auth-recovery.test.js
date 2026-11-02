@@ -22,6 +22,9 @@ function requestFor(body) {
     headers: {
       host: 'localhost',
       origin: 'http://localhost',
+      // Vercel deployments set VERCEL=1; model the trusted proxy protocol
+      // so this localhost-origin test exercises the same-origin path.
+      'x-forwarded-proto': 'http',
       'content-type': 'application/json',
       'user-agent': 'arixshield-test'
     },
