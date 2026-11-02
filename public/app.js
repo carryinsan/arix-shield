@@ -5,21 +5,48 @@
   const jsonFetch = async (url, options = {}) => {
     const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
     let data; try { data = await response.json(); } catch { data = {}; }
-    if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`); return data;
+    if (!response.ok) { const error = new Error(data.error || `Request failed (${response.status}).`); error.status = response.status; error.data = data; throw error; } return data;
   };
   const showNotice = (node, message, type = 'success') => { if (!node) return; node.textContent = message; node.className = `notice show ${type}`; };
   const hideNotice = (node) => { if (node) node.className = 'notice'; };
   const copyText = async (value) => { if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value); const input = document.createElement('textarea'); input.value = value; input.setAttribute('readonly', ''); input.className = 'clipboard-helper'; document.body.append(input); input.select(); const copied = document.execCommand('copy'); input.remove(); if (!copied) throw new Error('Clipboard access was denied.'); };
+  const solveLoginPow = async (challenge, onProgress = () => {}) => {
+    if (!challenge?.nonce || !challenge?.token || !Number.isInteger(challenge.difficulty) || challenge.difficulty < 12 || challenge.difficulty > 20) throw new Error('The sign-in proof-of-work challenge is invalid.');
+    const encoder = new TextEncoder(); const prefix = encoder.encode(`${challenge.nonce}:`); const difficulty = challenge.difficulty; const digestInput = new Uint8Array(prefix.length + 16); digestInput.set(prefix);
+    for (let solution = 0; solution < 5000000; solution++) {
+      const suffix = encoder.encode(String(solution)); digestInput.set(suffix, prefix.length);
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', digestInput.subarray(0, prefix.length + suffix.length)));
+      let remaining = difficulty; let valid = true;
+      for (const byte of digest) { const bits = Math.min(8, remaining); if (bits > 0 && (byte >>> (8 - bits)) !== 0) { valid = false; break; } remaining -= bits; if (remaining <= 0) break; }
+      if (valid) return String(solution);
+      if ((solution & 511) === 511) { onProgress(solution); await new Promise((resolve) => setTimeout(resolve, 0)); }
+    }
+    throw new Error('Could not complete the sign-in proof-of-work challenge within the work budget.');
+  };
+
+  const b64urlToBytes = (value) => Uint8Array.from(atob(String(value).replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - String(value).length % 4) % 4)), (character) => character.charCodeAt(0));
+  const bytesToB64url = (value) => btoa(String.fromCharCode(...new Uint8Array(value))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  function serializeWebAuthnCredential(credential) {
+    if (!credential || credential.type !== 'public-key') throw new Error('The authenticator did not return a public-key credential.');
+    const response = credential.response;
+    const result = { id: credential.id, rawId: bytesToB64url(credential.rawId), type: credential.type, response: { clientDataJSON: bytesToB64url(response.clientDataJSON) } };
+    if (response.attestationObject) result.response.attestationObject = bytesToB64url(response.attestationObject);
+    if (response.authenticatorData) result.response.authenticatorData = bytesToB64url(response.authenticatorData);
+    if (response.signature) result.response.signature = bytesToB64url(response.signature);
+    if (response.userHandle) result.response.userHandle = bytesToB64url(response.userHandle);
+    if (typeof response.getTransports === 'function') result.response.transports = response.getTransports().slice(0, 8);
+    return result;
+  }
 
   async function initDeveloper() {
     const form = $('#auth-form'); if (!form) return;
-    const tabs = $$('[data-auth-mode]'); const nameField = $('#full-name'); const projectField = $('#project-name'); const originField = $('#origin'); const passField = $('#password'); const submit = $('#auth-submit'); const notice = $('#auth-notice'); const keysPanel = $('#keys-panel');
+    const tabs = $$('[data-auth-mode]'); const nameField = $('#full-name'); const projectField = $('#project-name'); const originField = $('#origin'); const passField = $('#password'); const submit = $('#auth-submit'); const notice = $('#auth-notice'); const keysPanel = $('#keys-panel'); const passkeyLogin = $('#passkey-login');
     let authMode = 'signup'; let activeKeys = { liveKey: '', serverKey: '', canaryKey: '' };
     const updateSnippet = () => {
       const target = $('#snippet-code'); const type = $('#snippet-type')?.value || 'html'; const base = location.origin; const live = activeKeys.liveKey || 'ARIX_LIVE_PROJECT_IDENTIFIER'; const secret = activeKeys.serverKey || 'ARIX_SECRET_SERVER_ONLY';
       const snippets = {
-        html: `<script src="${base}/arix-client.js" data-arix-key="${live}" defer><\/script>`,
-        node: `import express from 'express';\nimport { createArixShield } from './sdk/node.js';\n\nconst app = express();\napp.use(express.json({ limit: '32kb' }));\napp.use(createArixShield({\n  serverKey: process.env.ARIX_SECRET_KEY,\n  endpoint: '${base}',\n  mode: 'ENFORCE',\n  rateLimitPerMinute: 120,\n  globalRateLimit: true\n}));\n\n// Define your API routes after the ArixShield middleware.`,
+        html: `<script src="${base}/arix-client.js" data-arix-key="${live}" data-arix-protect="/api/login,/api/signup,/api/checkout,/api/otp,/api/ai" defer><\/script>`,
+        node: `import express from 'express';\nimport { createArixShield } from './sdk/node.js';\n\nconst app = express();\n// Preserve exact request bytes so request-body DPoP can verify the same bytes the browser signed.\napp.use(express.json({ limit: '32kb', verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));\napp.use(createArixShield({\n  serverKey: process.env.ARIX_SECRET_KEY,\n  endpoint: '${base}',\n  mode: 'ENFORCE',\n  rateLimitPerMinute: 120,\n  globalRateLimit: true\n}));\n\n// Define your API routes after the ArixShield middleware.`,
         next: `import { protectRequest } from './sdk/next.js';\n\nexport async function POST(request) {\n  const decision = await protectRequest(request, {\n    endpoint: '${base}',\n    serverKey: process.env.ARIX_SECRET_KEY,\n    mode: 'ENFORCE',\n    rateLimitPerMinute: 120,\n    globalRateLimit: true,\n    userId: 'authenticated-user-id'\n  });\n  if (!decision.allowed) return decision.response;\n\n  // Still perform application authorization and schema validation here.\n  return Response.json({ ok: true, riskScore: decision.riskScore });\n}`,
         python: `import json
 import os
@@ -69,15 +96,37 @@ def arix_telemetry(response):
       if (target) target.textContent = snippets[type];
     };
     const changeMode = (mode) => {
-      authMode = mode; tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.authMode === mode)); $$('.signup-field').forEach((element) => element.classList.toggle('hidden', mode !== 'signup'));
+      authMode = mode; tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.authMode === mode)); $$('.signup-field').forEach((element) => element.classList.toggle('hidden', mode !== 'signup')); $$('.login-field').forEach((element) => element.classList.toggle('hidden', mode !== 'login'));
       [nameField, projectField, originField].forEach((field) => { if (field) field.required = mode === 'signup'; }); if (passField) passField.autocomplete = mode === 'signup' ? 'new-password' : 'current-password'; submit.textContent = mode === 'signup' ? 'Create account & project' : 'Sign in'; hideNotice(notice);
     };
     tabs.forEach((tab) => tab.addEventListener('click', () => changeMode(tab.dataset.authMode)));
     try { const session = await jsonFetch('/api/auth'); if (session.authenticated) { location.replace('/dashboard'); return; } } catch { /* Keep the form available; submit shows the service error. */ }
+    passkeyLogin?.addEventListener('click', async () => {
+      passkeyLogin.disabled = true; hideNotice(notice);
+      try {
+        if (!window.isSecureContext || !navigator.credentials?.get) throw new Error('Passkey sign-in requires a supported browser on HTTPS or localhost.');
+        const options = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-login-options' }) });
+        const publicKey = { ...options.publicKey, challenge: b64urlToBytes(options.publicKey.challenge) };
+        const credential = await navigator.credentials.get({ publicKey });
+        if (!credential) throw new Error('Passkey sign-in was cancelled.');
+        const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-login', challenge: options.challenge, credential: serializeWebAuthnCredential(credential) }) });
+        showNotice(notice, `Welcome back, ${result.user.name}. Opening your dashboard…`, 'success'); location.href = '/dashboard';
+      } catch (error) { showNotice(notice, error.message, 'error'); }
+      finally { passkeyLogin.disabled = false; }
+    });
     form.addEventListener('submit', async (event) => {
       event.preventDefault(); hideNotice(notice); submit.disabled = true; submit.textContent = authMode === 'signup' ? 'Creating secure project…' : 'Signing in…'; const data = Object.fromEntries(new FormData(form).entries()); data.action = authMode;
       try {
-        const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) });
+        let result;
+        try { result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) }); }
+        catch (error) {
+          const challenge = error.status === 428 ? error.data?.challenge : null;
+          if (authMode !== 'login' || !challenge) throw error;
+          showNotice(notice, 'Additional sign-in protection is active. Verifying this browser…', 'info');
+          data.powToken = challenge.token;
+          data.powSolution = await solveLoginPow(challenge, (attempt) => { if (attempt % 8192 === 0) showNotice(notice, `Verifying this browser… ${Math.round(attempt / 65536)}%`, 'info'); });
+          result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) });
+        }
         if (authMode === 'login') { showNotice(notice, `Welcome back, ${result.user.name}. Opening your dashboard…`, 'success'); location.href = '/dashboard'; return; }
         activeKeys = result.keys; $('#live-key').textContent = result.keys.liveKey; $('#server-key').textContent = result.keys.serverKey; $('#canary-key').textContent = result.keys.canaryKey; keysPanel.classList.add('show'); changeMode('login'); form.classList.add('hidden'); updateSnippet(); showNotice(notice, 'Account and project created successfully.', 'success');
       } catch (error) { showNotice(notice, error.message, 'error'); }
@@ -91,7 +140,8 @@ def arix_telemetry(response):
 
   async function initDashboard() {
     if (!$('#visitor-table')) return;
-    const status = $('#connection-status'); const primaryOriginInput = $('#primary-origin'); const customOriginsInput = $('#custom-origins'); const originsForm = $('#origins-form'); const originsNotice = $('#origins-notice'); let originsDirty = false;
+    const status = $('#connection-status'); const primaryOriginInput = $('#primary-origin'); const customOriginsInput = $('#custom-origins'); const originsForm = $('#origins-form'); const originsNotice = $('#origins-notice'); let originsDirty = false; let dashboardTotpEnabled = false; let currentPolicyMode = 'ENFORCE';
+    const promptStepUp = (purpose) => { const password = window.prompt(`Enter your current password to ${purpose}.`); if (password === null) return null; let totpCode = ''; if (dashboardTotpEnabled) { totpCode = window.prompt('Enter your current six-digit authenticator code.'); if (totpCode === null) return null; if (!/^\d{6}$/.test(String(totpCode).trim())) throw new Error('Enter a valid six-digit authenticator code.'); } return { password, totpCode: String(totpCode || '').trim() }; };
     const showDashError = (message) => { status.textContent = 'DISCONNECTED'; status.classList.add('is-danger'); status.classList.remove('is-good'); $('#project-origin').textContent = message; };
     const updateOriginCount = () => { if (!primaryOriginInput || !customOriginsInput) return; const primary = primaryOriginInput.value.trim().replace(/\/$/, ''); const extras = [...new Set(customOriginsInput.value.split(/[\n,]+/).map((value) => value.trim().replace(/\/$/, '')).filter((value) => value && value !== primary))]; $('#origin-count').textContent = `${1 + extras.length} / 11 origins configured`; };
     const syncOrigins = (project) => { if (!primaryOriginInput || !customOriginsInput) return; const primary = project.origin || ''; const allowed = Array.isArray(project.allowedOrigins) && project.allowedOrigins.length ? project.allowedOrigins : [primary].filter(Boolean); primaryOriginInput.value = primary; customOriginsInput.value = allowed.filter((origin) => origin && origin !== primary).join(', '); originsDirty = false; updateOriginCount(); };
@@ -99,20 +149,192 @@ def arix_telemetry(response):
     customOriginsInput?.addEventListener('input', () => { originsDirty = true; updateOriginCount(); hideNotice(originsNotice); });
     originsForm?.addEventListener('submit', async (event) => {
       event.preventDefault(); const saveButton = $('#save-origins'); saveButton.disabled = true; saveButton.textContent = 'Saving origins…'; hideNotice(originsNotice);
-      try { const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify({ action: 'origins', origin: primaryOriginInput.value.trim(), customOrigins: customOriginsInput.value }) }); syncOrigins(result.project); showNotice(originsNotice, 'Origin allowlist saved. It is active for the next browser telemetry request; no redeployment is required.', 'success'); }
+      try { const stepUp = promptStepUp('change application origins'); if (!stepUp) { showNotice(originsNotice, 'Origin change canceled.', 'info'); return; } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify({ action: 'origins', origin: primaryOriginInput.value.trim(), customOrigins: customOriginsInput.value, ...stepUp }) }); syncOrigins(result.project); showNotice(originsNotice, 'Origin allowlist saved. It is active for the next browser telemetry request; no redeployment is required.', 'success'); }
       catch (error) { showNotice(originsNotice, error.message, 'error'); }
       finally { saveButton.disabled = false; saveButton.textContent = 'Save origins'; }
     });
     try {
-      const account = await jsonFetch('/api/auth'); if (!account.authenticated) { location.href = '/developer'; return; } $('#dash-user').textContent = account.user.email;
+      const account = await jsonFetch('/api/auth'); if (!account.authenticated) { location.href = '/developer'; return; } $('#dash-user').textContent = account.user.email; dashboardTotpEnabled = account.security?.totpEnabled === true;
+      initializeAccountSecurity(account.security || {});
       const poll = async () => {
         const data = await jsonFetch('/api/telemetry'); $('#project-title').textContent = data.project.name; $('#project-origin').textContent = `${data.project.origin} · ${data.project.id}`; if (!originsDirty) syncOrigins(data.project);
         status.textContent = 'LIVE · 5S POLL'; status.classList.add('is-good'); status.classList.remove('is-danger');
         $('#metric-requests').textContent = Number(data.metrics.totalRequests || 0).toLocaleString(); $('#metric-blocked').textContent = Number(data.metrics.blockedAttacks || 0).toLocaleString(); $('#metric-trapped').textContent = Number(data.metrics.trappedHackers || 0).toLocaleString(); $('#metric-visitors').textContent = Number(data.metrics.activeVisitors || 0).toLocaleString(); $('#visitor-count').textContent = `${data.metrics.activeVisitors || 0} active`;
-        renderVisitors(data.visitors || []); renderThreats(data.threats || []); renderAttackerGraph(data.threats || []); renderAnalytics(data.analytics, data.auditAnchor); renderCatalog(data.apiCatalog || []); renderReplay(data.forensicReplay || []); syncPolicy(data.policy || {});
+        renderVisitors(data.visitors || []); renderThreats(data.threats || []); renderAttackerGraph(data.threats || []); renderAnalytics(data.analytics, data.auditAnchor); renderCatalog(data.apiCatalog || []); renderReplay(data.forensicReplay || []); syncPolicy(data.policy || {}); renderThreatFeedStatus(data.threatFeedStatus); await updateAuditWitness(data.project.id, data.auditChain);
       };
       await poll(); window.setInterval(() => poll().catch((error) => showDashError(error.message)), 5000);
     } catch (error) { showDashError(error.message); if (/sign in/i.test(error.message)) location.href = '/developer'; }
+
+    function openWitnessDb() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) { reject(new Error('IndexedDB is unavailable in this browser.')); return; }
+        const request = indexedDB.open('arixshield-audit-witness-v1', 1);
+        request.onupgradeneeded = () => { const db = request.result; if (!db.objectStoreNames.contains('roots')) db.createObjectStore('roots', { keyPath: 'projectId' }); };
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error || new Error('Could not open local audit witness storage.'));
+      });
+    }
+    async function witnessGet(projectId) {
+      const db = await openWitnessDb();
+      try { return await new Promise((resolve, reject) => { const request = db.transaction('roots', 'readonly').objectStore('roots').get(projectId); request.onsuccess = () => resolve(request.result || null); request.onerror = () => reject(request.error); }); }
+      finally { db.close(); }
+    }
+    async function witnessPut(value) {
+      const db = await openWitnessDb();
+      try { await new Promise((resolve, reject) => { const transaction = db.transaction('roots', 'readwrite'); transaction.objectStore('roots').put(value); transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error || new Error('Audit witness transaction aborted.')); }); }
+      finally { db.close(); }
+    }
+    async function updateAuditWitness(projectId, chain) {
+      if (!witnessStatus) return;
+      if (!chain || chain.verified !== true || !Number.isSafeInteger(Number(chain.sequence)) || !/^[a-f0-9]{64}$/.test(String(chain.head || ''))) {
+        witnessStatus.textContent = 'Server audit chain failed verification; local witness not advanced.'; witnessStatus.dataset.state = 'error'; if (auditDownload) auditDownload.disabled = true; return;
+      }
+      if (auditDownload) auditDownload.disabled = false;
+      try {
+        const saved = await witnessGet(projectId);
+        const sequence = Number(chain.sequence); const head = String(chain.head);
+        if (!saved) {
+          await witnessPut({ projectId, sequence, head, pinnedAt: new Date().toISOString(), trustOnFirstUse: true });
+          witnessStatus.textContent = `First local pin saved at sequence ${sequence}. This device cannot detect tampering that predates this first visit.`; witnessStatus.dataset.state = 'first-pin'; return;
+        }
+        if (sequence < Number(saved.sequence) || (sequence === Number(saved.sequence) && head !== saved.head)) {
+          witnessStatus.textContent = `ALERT: audit rollback or fork detected (local ${saved.sequence}, server ${sequence}).`; witnessStatus.dataset.state = 'error'; if (auditDownload) auditDownload.disabled = true; return;
+        }
+        if (sequence === Number(saved.sequence)) {
+          witnessStatus.textContent = `Local witness matches server head at sequence ${sequence}.`; witnessStatus.dataset.state = 'ok'; return;
+        }
+        const rows = Array.isArray(chain.rows) ? [...chain.rows].sort((a, b) => Number(a.seq) - Number(b.seq)) : [];
+        const extension = rows.filter((row) => Number(row.seq) > Number(saved.sequence));
+        if (!extension.length || Number(extension[0].seq) !== Number(saved.sequence) + 1 || extension[0].prevChainMac !== saved.head || Number(extension.at(-1).seq) !== sequence || extension.at(-1).chainMac !== head) {
+          witnessStatus.textContent = 'Audit history gap: the server window cannot prove a continuous extension from this device’s last pin. Local pin preserved.'; witnessStatus.dataset.state = 'warning'; return;
+        }
+        let priorSeq = Number(saved.sequence); let priorMac = saved.head; let continuous = true;
+        for (const row of extension) { if (Number(row.seq) !== priorSeq + 1 || row.prevChainMac !== priorMac) { continuous = false; break; } priorSeq = Number(row.seq); priorMac = row.chainMac; }
+        if (!continuous) { witnessStatus.textContent = 'ALERT: audit chain extension is discontinuous. Local pin preserved.'; witnessStatus.dataset.state = 'error'; if (auditDownload) auditDownload.disabled = true; return; }
+        await witnessPut({ projectId, sequence, head, pinnedAt: saved.pinnedAt, lastExtendedAt: new Date().toISOString(), trustOnFirstUse: true });
+        witnessStatus.textContent = `Audit chain continuously extended to sequence ${sequence}; local witness updated.`; witnessStatus.dataset.state = 'ok';
+      } catch (error) { witnessStatus.textContent = `Local audit witness unavailable: ${error.message}`; witnessStatus.dataset.state = 'warning'; }
+    }
+    function renderThreatFeedStatus(status) {
+      if (!feedWarning) return;
+      const stale = Array.isArray(status?.staleFeeds) ? status.staleFeeds : [];
+      feedWarning.textContent = status?.warning ? `THREAT_FEED_STALE: reduced confidence for feeds older than 24 hours or missing (${stale.join(', ')}).` : status?.loaded ? 'Threat feeds loaded and within the freshness window.' : 'Threat feed status unavailable; no feed-based hard block is inferred.';
+      feedWarning.classList.toggle('hidden', !status?.warning);
+      feedWarning.classList.toggle('threat-warning', Boolean(status?.warning));
+    }
+    auditDownload?.addEventListener('click', async () => {
+      auditDownload.disabled = true;
+      try {
+        const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify({ action: 'audit-bundle' }) });
+        const lines = [JSON.stringify({ type: 'ARIX_AUDIT_BUNDLE', bundle: result.bundle }), JSON.stringify({ type: 'HMAC_SIGNATURE', algorithm: result.signature.algorithm, signature: result.signature.value })];
+        const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' }); const url = URL.createObjectURL(blob);
+        const link = document.createElement('a'); link.href = url; link.download = `arixshield-audit-${String(result.bundle.projectId).replace(/[^a-z0-9_-]/gi, '_')}-${Date.now()}.jsonl`; document.body.append(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { if (witnessStatus) witnessStatus.textContent = `Evidence export failed: ${error.message}`; }
+      finally { auditDownload.disabled = false; }
+    });
+
+    function initializeAccountSecurity(security) {
+      const notice = $('#security-notice');
+      const enrollment = $('#totp-enrollment'); const disablePanel = $('#totp-disable-panel');
+      dashboardTotpEnabled = security?.totpEnabled === true;
+      $('#password-change-form')?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const changeButton = $('#change-password'); const passwordNotice = $('#password-change-notice');
+        const currentPassword = $('#password-current').value; const newPassword = $('#password-new').value; const confirmPassword = $('#password-confirm').value;
+        if (newPassword !== confirmPassword) { showNotice(passwordNotice, 'New password and confirmation do not match.', 'error'); return; }
+        const totpCode = dashboardTotpEnabled ? window.prompt('Enter your current six-digit authenticator code.') : '';
+        if (totpCode === null) return;
+        if (dashboardTotpEnabled && !/^\d{6}$/.test(String(totpCode).trim())) { showNotice(passwordNotice, 'Enter a valid six-digit authenticator code.', 'error'); return; }
+        changeButton.disabled = true;
+        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'change-password', currentPassword, newPassword, confirmPassword, totpCode: String(totpCode || '').trim() }) }); $('#password-current').value = ''; $('#password-new').value = ''; $('#password-confirm').value = ''; showNotice(passwordNotice, 'Password changed. Other sessions were revoked; this browser remains signed in.', 'success'); }
+        catch (error) { showNotice(passwordNotice, error.message, 'error'); }
+        finally { changeButton.disabled = false; }
+      });
+      const totpStart = $('#totp-start'); const passkeyStatus = $('#passkey-status'); const passkeyList = $('#passkey-list');
+      let securityState = security || {};
+      const render = () => {
+        const enabled = securityState.totpEnabled === true;
+        $('#totp-status').textContent = enabled ? 'Enabled · authenticator code required at sign-in' : 'Not enabled';
+        if (totpStart) { totpStart.disabled = enabled; totpStart.textContent = enabled ? 'MFA enabled' : 'Set up TOTP'; }
+        if (disablePanel) disablePanel.classList.toggle('hidden', !enabled);
+        const keys = Array.isArray(securityState.passkeys) ? securityState.passkeys : [];
+        if (passkeyStatus) passkeyStatus.textContent = `${keys.length} registered · maximum 10`;
+        if (passkeyList) {
+          passkeyList.replaceChildren();
+          if (!keys.length) passkeyList.textContent = 'No passkeys registered.';
+          keys.forEach((item, index) => {
+            const row = document.createElement('div'); row.className = 'inline-form';
+            const label = document.createElement('span'); label.textContent = `Passkey ${index + 1} · last used ${item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : 'not yet used'}`;
+            const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-secondary'; remove.textContent = 'Remove'; remove.addEventListener('click', async () => {
+              const password = window.prompt('Enter your current password to remove this passkey.'); if (password === null) return;
+              const totpCode = securityState.totpEnabled === true ? window.prompt('Enter the current six-digit authenticator code.') : '';
+              if (totpCode === null) return;
+              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password, totpCode: String(totpCode || '').trim() }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
+              catch (error) { showNotice(notice, error.message, 'error'); }
+            }); row.append(label, remove); passkeyList.append(row);
+          });
+        }
+      };
+      const refreshSecurity = async () => { const current = await jsonFetch('/api/auth'); securityState = current.security || {}; dashboardTotpEnabled = securityState.totpEnabled === true; render(); };
+      render();
+
+      $('#totp-start')?.addEventListener('click', async () => {
+        totpStart.disabled = true;
+        try { const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-enroll' }) });
+          $('#totp-secret').textContent = result.secret; $('#totp-uri').value = result.otpauthUri; enrollment.classList.remove('hidden'); showNotice(notice, 'Add this secret to your authenticator app, then enter its current code to confirm. The enrollment expires in 10 minutes.', 'info');
+        } catch (error) { showNotice(notice, error.message, 'error'); }
+        finally { totpStart.disabled = false; }
+      });
+      $('#totp-confirm')?.addEventListener('click', async () => {
+        const totpCode = $('#totp-confirm-code').value.trim();
+        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-confirm', totpCode }) }); enrollment.classList.add('hidden'); $('#totp-confirm-code').value = ''; showNotice(notice, 'Authenticator MFA enabled. Other sessions were revoked; this browser has been issued a fresh session.', 'success'); await refreshSecurity(); }
+        catch (error) { showNotice(notice, error.message, 'error'); }
+      });
+      $('#totp-disable')?.addEventListener('click', async () => {
+        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-disable', password: $('#totp-disable-password').value, totpCode: $('#totp-disable-code').value.trim() }) }); $('#totp-disable-password').value = ''; $('#totp-disable-code').value = ''; showNotice(notice, 'Authenticator MFA disabled. Other sessions were revoked; this browser has a fresh session.', 'success'); await refreshSecurity(); }
+        catch (error) { showNotice(notice, error.message, 'error'); }
+      });
+      $('#passkey-add')?.addEventListener('click', async () => {
+        const button = $('#passkey-add'); button.disabled = true;
+        try {
+          if (!window.isSecureContext || !navigator.credentials?.create) throw new Error('Passkey enrollment requires a supported browser on HTTPS or localhost.');
+          const options = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-register-options' }) });
+          const publicKey = { ...options.publicKey, challenge: b64urlToBytes(options.publicKey.challenge), user: { ...options.publicKey.user, id: b64urlToBytes(options.publicKey.user.id) }, excludeCredentials: (options.publicKey.excludeCredentials || []).map((item) => ({ ...item, id: b64urlToBytes(item.id) })) };
+          const credential = await navigator.credentials.create({ publicKey });
+          if (!credential) throw new Error('Passkey enrollment was cancelled.');
+          await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-register', challenge: options.challenge, credential: serializeWebAuthnCredential(credential) }) });
+          showNotice(notice, 'Passkey registered. Store a recovery method before removing other credentials.', 'success'); await refreshSecurity();
+        } catch (error) { showNotice(notice, error.message, 'error'); }
+        finally { button.disabled = false; }
+      });
+      const refreshSessions = async () => {
+        const root = $('#session-list'); if (!root) return;
+        try {
+          const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'list-sessions' }) }); root.replaceChildren();
+          if (!result.sessions?.length) { root.textContent = 'No active sessions.'; return; }
+          result.sessions.forEach((session, index) => {
+            const row = document.createElement('div'); row.className = 'inline-form';
+            const label = document.createElement('span'); label.textContent = `Device ${index + 1} · last active ${new Date(session.lastActiveAt).toLocaleString()} · ${session.ipHint || 'IP unavailable'} · ${(session.uaHint || '').slice(0, 80)}`;
+            const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'btn btn-secondary'; revoke.textContent = 'Revoke'; revoke.addEventListener('click', async () => {
+              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'revoke-session', tokenHash: session.tokenHash }) }); showNotice(notice, 'Session revoked.', 'success'); await refreshSessions(); }
+              catch (error) { showNotice(notice, error.message, 'error'); }
+            }); row.append(label, revoke); root.append(row);
+          });
+        } catch (error) { root.textContent = error.message; }
+      };
+      $('#refresh-sessions')?.addEventListener('click', () => refreshSessions());
+      $('#rotate-key')?.addEventListener('click', async () => {
+        const button = $('#rotate-key'); button.disabled = true; const graceSeconds = Number($('#rotate-grace').value);
+        try {
+          if (!Number.isInteger(graceSeconds) || graceSeconds < 0 || graceSeconds > 86400) throw new Error('Grace period must be an integer from 0 to 86400 seconds.');
+          const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'rotate-server-key', password: $('#rotate-password').value, totpCode: $('#rotate-totp').value.trim(), graceSeconds }) });
+          $('#rotated-server-key').textContent = result.serverKey; $('#rotated-key-panel').classList.remove('hidden');
+          showNotice(notice, `Server key rotated. Update your server environment now. Previous key grace: ${result.oldKeyGraceSeconds} seconds${result.cleanupWarning ? ' · post-rotation cleanup needs operator review' : ''}.`, result.cleanupWarning ? 'error' : 'success');
+          $('#rotate-password').value = ''; $('#rotate-totp').value = ''; await refreshSessions();
+        } catch (error) { showNotice(notice, error.message, 'error'); }
+        finally { button.disabled = false; }
+      });
+      refreshSessions();
+    }
 
     function renderAttackerGraph(events) {
       const canvas = document.getElementById('attacker-graph'); const note = document.getElementById('attacker-graph-note'); if (!canvas) return; const rect = canvas.getBoundingClientRect(); const ratio = Math.min(2, window.devicePixelRatio || 1); const width = Math.max(320, Math.floor(rect.width || 640)); const height = 280; canvas.width = Math.floor(width * ratio); canvas.height = Math.floor(height * ratio); const ctx = canvas.getContext('2d'); if (!ctx) { if (note) note.textContent = 'Canvas is unavailable in this browser.'; return; }
@@ -145,11 +367,11 @@ def arix_telemetry(response):
       rows.slice(0, 18).forEach((row) => { const line = document.createElement('div'); const time = row.timestamp ? new Date(row.timestamp).toLocaleTimeString() : '--:--:--'; const label = row.type || 'SECURITY_EVENT'; const detail = row.reason || (Array.isArray(row.findings) ? row.findings.map((item) => item.category).join(', ') : row.path || 'Event recorded'); line.textContent = `[${time}] ${label} :: ${detail}`; terminal.append(line); if (row.mirage) { const payload = document.createElement('div'); payload.textContent = ` !³ synthetic response ${JSON.stringify(row.mirage).slice(0, 360)}`; terminal.append(payload); } });
     }
     function syncPolicy(policy) {
-      $('#policy-mode').value = policy.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE'; $('#policy-dc').checked = Boolean(policy.blockDatacenterAsn); $('#policy-deception').checked = policy.deceptionEnabled !== false; $('#policy-abuse').checked = policy.abuseProtectionEnabled === true; $('#policy-feeds').checked = policy.threatFeedEnabled !== false; $('#policy-geo').checked = policy.geoVelocityEnabled === true; $('#policy-shadow').checked = policy.shadowApiCatalogEnabled === true; $('#policy-forensic').checked = policy.forensicReplayEnabled === true; $('#policy-limit').value = Number(policy.rateLimitPerMinute) || 120;
+      currentPolicyMode = policy.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE'; $('#policy-mode').value = currentPolicyMode; $('#policy-dc').checked = Boolean(policy.blockDatacenterAsn); $('#policy-deception').checked = policy.deceptionEnabled !== false; $('#policy-abuse').checked = policy.abuseProtectionEnabled === true; $('#policy-feeds').checked = policy.threatFeedEnabled !== false; $('#policy-geo').checked = policy.geoVelocityEnabled === true; $('#policy-shadow').checked = policy.shadowApiCatalogEnabled === true; $('#policy-forensic').checked = policy.forensicReplayEnabled === true; $('#policy-limit').value = Number(policy.rateLimitPerMinute) || 120; $('#policy-alert-webhook').value = policy.alertWebhookUrl || ''; $('#policy-auto-containment').checked = policy.autoContainmentEnabled === true;
     }
     $('#save-policy')?.addEventListener('click', async () => {
-      const notice = $('#policy-notice'); const payload = { action: 'policy', mode: $('#policy-mode').value, blockDatacenterAsn: $('#policy-dc').checked, deceptionEnabled: $('#policy-deception').checked, abuseProtectionEnabled: $('#policy-abuse').checked, threatFeedEnabled: $('#policy-feeds').checked, geoVelocityEnabled: $('#policy-geo').checked, shadowApiCatalogEnabled: $('#policy-shadow').checked, forensicReplayEnabled: $('#policy-forensic').checked, rateLimitPerMinute: Number($('#policy-limit').value) };
-      try { const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) }); syncPolicy(result.policy); showNotice(notice, 'Security policy saved.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); }
+      const notice = $('#policy-notice'); const payload = { action: 'policy', mode: $('#policy-mode').value, blockDatacenterAsn: $('#policy-dc').checked, deceptionEnabled: $('#policy-deception').checked, abuseProtectionEnabled: $('#policy-abuse').checked, threatFeedEnabled: $('#policy-feeds').checked, geoVelocityEnabled: $('#policy-geo').checked, shadowApiCatalogEnabled: $('#policy-shadow').checked, forensicReplayEnabled: $('#policy-forensic').checked, rateLimitPerMinute: Number($('#policy-limit').value), alertWebhookUrl: $('#policy-alert-webhook').value.trim(), autoContainmentEnabled: $('#policy-auto-containment').checked };
+      try { if (payload.mode === 'DRY_RUN' && currentPolicyMode !== 'DRY_RUN') { const stepUp = promptStepUp('switch enforcement to DRY_RUN'); if (!stepUp) { showNotice(notice, 'Policy change canceled.', 'info'); return; } Object.assign(payload, stepUp); } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) }); syncPolicy(result.policy); showNotice(notice, 'Security policy saved.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); }
     });
     $('#decode-leak')?.addEventListener('click', async () => {
       const notice = $('#decode-notice'); const resultNode = $('#decode-result'); resultNode.classList.add('hidden');

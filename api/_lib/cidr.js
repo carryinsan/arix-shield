@@ -86,3 +86,21 @@ export function prefixTrieHas(trie, ipAddress) {
   }
   return false;
 }
+
+export function formatIpPrefix(ipAddress, prefixLength = null) {
+  const ip = parseIp(ipAddress);
+  if (!ip) return null;
+  const prefix = prefixLength === null ? (ip.family === 4 ? 24 : 48) : Number(prefixLength);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > ip.bits) return null;
+  const shift = BigInt(ip.bits - prefix);
+  const network = shift === 0n ? ip.value : (ip.value >> shift) << shift;
+  let address;
+  if (ip.family === 4) {
+    address = [24n, 16n, 8n, 0n].map((bits) => Number((network >> bits) & 255n)).join('.');
+  } else {
+    const groups = [];
+    for (let index = 7; index >= 0; index--) groups.push(Number((network >> BigInt(index * 16)) & 0xffffn).toString(16));
+    address = groups.join(':');
+  }
+  return `${address}/${prefix}`;
+}

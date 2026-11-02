@@ -1,6 +1,9 @@
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, createHash, createHmac } from 'node:crypto';
+import { runWithCircuit } from './circuit-breaker.js';
 
 const localStore = globalThis.__ARIXSHIELD_LOCAL_REDIS__ ??= new Map();
+const localAuditChains = globalThis.__ARIX_AUDIT_LOCAL_CHAINS__ ??= new Map();
+const localAuditQueues = globalThis.__ARIX_AUDIT_LOCAL_QUEUES__ ??= new Map();
 let warned = false;
 
 function redisConfigured() { return Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN); }
@@ -26,11 +29,13 @@ async function command(parts) {
     warnFallback(); return localCommand(parts);
   }
   const base = process.env.UPSTASH_REDIS_REST_URL.replace(/\/+$/, '');
-  const response = await fetch(base, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(parts), signal: AbortSignal.timeout(5000) });
-  if (!response.ok) throw new Error(`Upstash Redis REST request failed (${response.status}).`);
-  const payload = await response.json();
-  if (Object.hasOwn(payload, 'error')) throw new Error(`Upstash Redis error: ${String(payload.error).slice(0, 240)}`);
-  return payload.result;
+  return runWithCircuit(`redis:${base}`, async (signal) => {
+    const response = await fetch(base, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(parts), signal });
+    if (!response.ok) throw new Error(`Upstash Redis REST request failed (${response.status}).`);
+    const payload = await response.json();
+    if (Object.hasOwn(payload, 'error')) throw new Error(`Upstash Redis error: ${String(payload.error).slice(0, 240)}`);
+    return payload.result;
+  }, { tripAfterMs: 450, timeoutMs: 450, openMs: 10000, failureThreshold: 3 });
 }
 
 async function pipeline(commands) {
@@ -40,11 +45,13 @@ async function pipeline(commands) {
     warnFallback(); const results = []; for (const parts of commands) results.push(await localCommand(parts)); return results;
   }
   const base = process.env.UPSTASH_REDIS_REST_URL.replace(/\/+$/, '');
-  const response = await fetch(`${base}/pipeline`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(commands), signal: AbortSignal.timeout(7000) });
-  if (!response.ok) throw new Error(`Upstash pipeline failed (${response.status}).`);
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error('Unexpected Upstash pipeline response.');
-  return rows.map((row) => { if (row && Object.hasOwn(row, 'error')) throw new Error(`Upstash Redis error: ${String(row.error).slice(0, 240)}`); return row?.result; });
+  return runWithCircuit(`redis:${base}`, async (signal) => {
+    const response = await fetch(`${base}/pipeline`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(commands), signal });
+    if (!response.ok) throw new Error(`Upstash pipeline failed (${response.status}).`);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error('Unexpected Upstash pipeline response.');
+    return rows.map((row) => { if (row && Object.hasOwn(row, 'error')) throw new Error(`Upstash Redis error: ${String(row.error).slice(0, 240)}`); return row?.result; });
+  }, { tripAfterMs: 450, timeoutMs: 450, openMs: 10000, failureThreshold: 3 });
 }
 
 function localCommand(parts) {
@@ -52,6 +59,7 @@ function localCommand(parts) {
   switch (name) {
     case 'PING': return 'PONG';
     case 'GET': return item?.type === 'string' ? item.value : null;
+    case 'GETDEL': { const value = item?.type === 'string' ? item.value : null; localStore.delete(key); return value; }
     case 'MGET': return args.map((candidate) => { const value = getLocal(String(candidate)); return value?.type === 'string' ? value.value : null; });
     case 'SET': { const value = String(args[1] ?? ''); const nx = args.some((v) => String(v).toUpperCase() === 'NX'); const exIndex = args.findIndex((v) => String(v).toUpperCase() === 'EX'); if (nx && item) return null; setLocal(key, 'string', value, exIndex >= 0 ? Number(args[exIndex + 1]) : null); return 'OK'; }
     case 'DEL': { let count = 0; for (const k of args) if (localStore.delete(String(k))) count++; return count; }
@@ -176,11 +184,50 @@ export async function rateLimit({ key, algorithm = 'SLIDING_WINDOW', limit = 60,
 }
 
 export async function getJson(key) { const value = await command(['GET', key]); if (value == null) return null; try { return JSON.parse(value); } catch { return null; } }
+/** Atomically fetches and deletes a JSON value (one-time challenges/nonces). */
+export async function getJsonOnce(key) { const value = await command(['GETDEL', key]); if (value == null) return null; try { return JSON.parse(value); } catch { return null; } }
 export async function setJson(key, value, ttlSeconds = null, nx = false) { const args = ['SET', key, JSON.stringify(value)]; if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds))); if (nx) args.push('NX'); return command(args); }
 export async function setString(key, value, ttlSeconds = null, nx = false) { const args = ['SET', key, String(value)]; if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds))); if (nx) args.push('NX'); return command(args); }
 export async function getString(key) { return command(['GET', key]); }
 export async function deleteKeys(...keys) { return keys.length ? command(['DEL', ...keys]) : 0; }
 export async function increment(key, amount = 1) { return command(['INCRBY', key, String(amount)]); }
+const INCREMENT_TTL_LUA = `
+local value = redis.call('INCRBY', KEYS[1], tonumber(ARGV[1]))
+if value == tonumber(ARGV[1]) then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) end
+return value
+`;
+export async function incrementWithExpiry(key, ttlSeconds, amount = 1) {
+  const ttl = Math.max(1, Math.min(31536000, Math.floor(Number(ttlSeconds) || 1)));
+  const step = Math.max(1, Math.floor(Number(amount) || 1));
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    warnFallback(); const value = await localCommand(['INCRBY', key, String(step)]);
+    const item = getLocal(key); if (item && value === step) item.expiresAt = Date.now() + ttl * 1000;
+    return Number(value);
+  }
+  return Number(await command(['EVAL', INCREMENT_TTL_LUA, '1', key, String(step), String(ttl)]));
+}
+const SET_MAX_WITH_TTL_LUA = `
+local current = tonumber(redis.call('GET', KEYS[1])) or 0
+local requested = tonumber(ARGV[1]) or 0
+local ttl = math.max(1, tonumber(ARGV[2]) or 1)
+if requested > current then
+  redis.call('SET', KEYS[1], tostring(requested), 'EX', ttl)
+  return requested
+end
+return current
+`;
+export async function setMaxStringWithExpiry(key, value, ttlSeconds) {
+  const requested = Math.max(0, Math.floor(Number(value) || 0));
+  const ttl = Math.max(1, Math.min(31536000, Math.floor(Number(ttlSeconds) || 1)));
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    warnFallback(); const current = Number(await localCommand(['GET', key]) || 0);
+    if (requested > current) await setString(key, String(requested), ttl);
+    return Math.max(current, requested);
+  }
+  return Number(await command(['EVAL', SET_MAX_WITH_TTL_LUA, '1', key, String(requested), String(ttl)]));
+}
 const ADD_SET_MEMBER_LUA = `
 local added = redis.call('SADD', KEYS[1], ARGV[1])
 local ttl = tonumber(ARGV[2])
@@ -210,6 +257,130 @@ export async function isUsingUpstash() { return redisConfigured(); }
 export async function pingRedis() { return command(['PING']); }
 export function getRedisConfigurationStatus() { const hasUrl = Boolean(process.env.UPSTASH_REDIS_REST_URL); const hasToken = Boolean(process.env.UPSTASH_REDIS_REST_TOKEN); return { configured: hasUrl && hasToken, hasUrl, hasToken, mode: hasUrl && hasToken ? 'upstash' : (localModeAllowed() ? 'ephemeral-local' : 'unconfigured') }; }
 
+const AUDIT_GENESIS = '0'.repeat(64);
+const AUDIT_CHAIN_CAS_LUA = `
+local seqRaw = redis.call('GET', KEYS[1])
+local headRaw = redis.call('GET', KEYS[2])
+if (not seqRaw and not headRaw) then
+  seqRaw = '0'
+  headRaw = string.rep('0', 64)
+elseif (not seqRaw or not headRaw) then
+  return {-1, tonumber(seqRaw or '-1'), headRaw or ''}
+end
+local currentSeq = tonumber(seqRaw)
+local currentHead = headRaw
+if (not currentSeq) or currentSeq < 0 or currentSeq ~= math.floor(currentSeq) then return {-1, -1, currentHead} end
+if (currentSeq == 0 and currentHead ~= string.rep('0', 64)) or (currentSeq > 0 and string.len(currentHead) ~= 64) then
+  return {-1, currentSeq, currentHead}
+end
+if currentSeq ~= tonumber(ARGV[1]) or currentHead ~= ARGV[2] then return {0, currentSeq, currentHead} end
+local nextSeq = currentSeq + 1
+redis.call('SET', KEYS[1], tostring(nextSeq))
+redis.call('SET', KEYS[2], ARGV[3])
+redis.call('LPUSH', KEYS[3], ARGV[4])
+redis.call('LTRIM', KEYS[3], 0, 9999)
+redis.call('SADD', KEYS[4], ARGV[5])
+return {1, nextSeq, ARGV[3]}
+`;
+
+function auditSecret() {
+  if (typeof process.env.ARIX_MASTER_SECRET === 'string' && Buffer.byteLength(process.env.ARIX_MASTER_SECRET) >= 32) return process.env.ARIX_MASTER_SECRET;
+  if (process.env.NODE_ENV === 'production') throw new Error('ARIX_MASTER_SECRET must contain at least 32 bytes for the audit hash-chain.');
+  return globalThis.__ARIX_AUDIT_LOCAL_SECRET__ ??= `${randomUUID()}${randomUUID()}`;
+}
+
+function calculateAuditMac(secret, previousMac, sequence, digest) {
+  return createHmac('sha256', secret)
+    .update(Buffer.from(previousMac, 'hex'))
+    .update(String(sequence), 'utf8')
+    .update(Buffer.from(digest, 'hex'))
+    .digest('hex');
+}
+
+async function withLocalAuditLock(projectId, operation) {
+  const previous = localAuditQueues.get(projectId) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const tail = previous.then(() => current);
+  localAuditQueues.set(projectId, tail);
+  await previous;
+  try { return await operation(); }
+  finally { release(); if (localAuditQueues.get(projectId) === tail) localAuditQueues.delete(projectId); }
+}
+
+/** Append one real-time tamper-evident audit entry. Redis CAS serializes concurrent writers. */
+export async function recordAuditChainEvent(projectId, event) {
+  const id = String(projectId || '').slice(0, 100);
+  if (!id) throw new TypeError('Audit project ID is required.');
+  const canonical = JSON.stringify({ projectId: id, event });
+  const digest = createHash('sha256').update(canonical).digest('hex');
+  const secret = auditSecret();
+  const keys = [`arix:audit:seq:${id}`, `arix:audit:head:${id}`, `arix:audit:chain:${id}`];
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis for audit-chain writes in production.');
+    return withLocalAuditLock(id, async () => {
+      const state = localAuditChains.get(id) || { seq: 0, head: AUDIT_GENESIS, rows: [] };
+      const seq = state.seq + 1;
+      const chainMac = calculateAuditMac(secret, state.head, seq, digest);
+      const row = { version: 1, projectId: id, seq, digest, prevChainMac: state.head, chainMac, timestamp: new Date().toISOString(), type: String(event?.type || 'SECURITY_EVENT').slice(0, 64), event };
+      state.seq = seq; state.head = chainMac; state.rows.unshift(row); state.rows.length = Math.min(state.rows.length, 10000);
+      localAuditChains.set(id, state);
+      return row;
+    });
+  }
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const [rawSeq, rawHead] = await pipeline([['GET', keys[0]], ['GET', keys[1]]]);
+    const expectedSeq = Math.max(0, Number(rawSeq) || 0);
+    const previousMac = typeof rawHead === 'string' && /^[a-f0-9]{64}$/.test(rawHead) ? rawHead : AUDIT_GENESIS;
+    const seq = expectedSeq + 1;
+    const chainMac = calculateAuditMac(secret, previousMac, seq, digest);
+    const row = { version: 1, projectId: id, seq, digest, prevChainMac: previousMac, chainMac, timestamp: new Date().toISOString(), type: String(event?.type || 'SECURITY_EVENT').slice(0, 64), event };
+    const result = await command(['EVAL', AUDIT_CHAIN_CAS_LUA, '4', keys[0], keys[1], keys[2], 'arix:audit:projects', String(expectedSeq), previousMac, chainMac, JSON.stringify(row), id]);
+    if (Array.isArray(result) && Number(result[0]) === 1) return row;
+    if (Array.isArray(result) && Number(result[0]) === -1) throw new Error('Audit hash-chain sequence/head state is inconsistent; refusing to append.');
+  }
+  throw new Error('Audit hash-chain CAS contention exceeded the bounded retry budget.');
+}
+
+/** Return a verified, bounded witness window. HMACs are checked server-side before it is exposed. */
+export async function getAuditChainSnapshot(projectId, limit = 250) {
+  const id = String(projectId || '').slice(0, 100);
+  const bounded = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 250)));
+  let seqRaw; let headRaw; let rawRows; let chainLength;
+  if (!redisConfigured()) {
+    const state = localAuditChains.get(id) || { seq: 0, head: AUDIT_GENESIS, rows: [] };
+    seqRaw = String(state.seq); headRaw = state.head; rawRows = state.rows.slice(0, bounded).map((row) => JSON.stringify(row)); chainLength = state.rows.length;
+  } else {
+    [seqRaw, headRaw, rawRows, chainLength] = await pipeline([
+      ['GET', `arix:audit:seq:${id}`], ['GET', `arix:audit:head:${id}`],
+      ['LRANGE', `arix:audit:chain:${id}`, '0', String(bounded - 1)], ['LLEN', `arix:audit:chain:${id}`]
+    ]);
+  }
+  const rows = (Array.isArray(rawRows) ? rawRows : []).flatMap((raw) => { try { const row = typeof raw === 'string' ? JSON.parse(raw) : raw; return row && typeof row === 'object' ? [row] : []; } catch { return []; } }).reverse();
+  let verified = true; let previous = null;
+  const secret = auditSecret();
+  for (const row of rows) {
+    if (!Number.isSafeInteger(Number(row.seq)) || !/^[a-f0-9]{64}$/.test(String(row.digest)) || !/^[a-f0-9]{64}$/.test(String(row.prevChainMac)) || !/^[a-f0-9]{64}$/.test(String(row.chainMac))) { verified = false; break; }
+    const expectedDigest = row.event === undefined ? null : createHash('sha256').update(JSON.stringify({ projectId: id, event: row.event })).digest('hex');
+    const expected = calculateAuditMac(secret, row.prevChainMac, Number(row.seq), row.digest);
+    if (row.projectId !== id || row.version !== 1 || !expectedDigest || expectedDigest !== row.digest || expected !== row.chainMac || (previous && (Number(row.seq) !== Number(previous.seq) + 1 || row.prevChainMac !== previous.chainMac))) { verified = false; break; }
+    previous = row;
+  }
+  const sequence = Math.max(0, Number(seqRaw) || 0);
+  const head = typeof headRaw === 'string' && /^[a-f0-9]{64}$/.test(headRaw) ? headRaw : AUDIT_GENESIS;
+  const retainedCount = Math.min(sequence, 10000);
+  const actualChainLength = Math.max(0, Number(chainLength) || 0);
+  if (actualChainLength !== retainedCount) verified = false;
+  if (sequence === 0) verified = verified && rows.length === 0 && head === AUDIT_GENESIS && actualChainLength === 0;
+  else {
+    const expectedFirstSequence = Math.max(1, sequence - rows.length + 1);
+    verified = verified && rows.length > 0 && Number(rows[0].seq) === expectedFirstSequence
+      && Number(rows.at(-1).seq) === sequence && rows.at(-1).chainMac === head;
+    if (Number(rows[0]?.seq) === 1 && rows[0]?.prevChainMac !== AUDIT_GENESIS) verified = false;
+  }
+  return { sequence, head, verified, rows, checkedAt: new Date().toISOString(), windowTruncated: sequence > rows.length, retainedCount: actualChainLength };
+}
+
 export async function recordProjectEvent(projectId, event, { threat = false, countRequest = true } = {}) {
   const keep = Math.max(100, Math.min(1000, Number(process.env.ARIX_EVENT_RETENTION) || 500));
   const kind = threat ? 'threat_logs' : 'live_visitors';
@@ -234,6 +405,26 @@ export async function recordProjectEvent(projectId, event, { threat = false, cou
   }
   // One durable Redis pipeline replaces multiple sequential REST round-trips.
   await pipeline(commands);
+  if (threat) {
+    const auditRow = await recordAuditChainEvent(projectId, safeEvent);
+    const criticalTypes = new Set(['BOLA_200_LEAK_BLOCKED', 'CANARY_KEY_USED', 'GITHUB_SECRET_EXPOSURE', 'AUDIT_CHAIN_BROKEN', 'REDIS_CIRCUIT_OPEN', 'HONEYPOT_ROUTE_HIT', 'CANARY_RECORD_ACCESSED', 'CROSS_ENDPOINT_CORRELATION_ALERT']);
+    if (criticalTypes.has(String(safeEvent.type || ''))) {
+      try {
+        const project = await getJson(`arix:project:${projectId}`);
+        if (project?.policy?.autoContainmentEnabled === true && project.policy.mode === 'DRY_RUN') {
+          project.policy.mode = 'ENFORCE';
+          project.updatedAt = new Date().toISOString();
+          await setJson(`arix:project:${projectId}`, project);
+        }
+        if (typeof project?.policy?.alertWebhookUrl === 'string' && project.policy.alertWebhookUrl) {
+          const { dispatchIncidentAlert } = await import('./alerts.js');
+          await dispatchIncidentAlert(project.policy.alertWebhookUrl, { projectId: String(projectId), event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
+        }
+      } catch (error) {
+        console.warn('[ArixShield] Incident alert/containment workflow did not complete:', String(error?.message || error).slice(0, 180));
+      }
+    }
+  }
 }
 
 export async function recordApiTelemetryEvent(projectId, event) {
@@ -254,11 +445,12 @@ export async function getProjectDashboardSnapshot(projectId) {
     ['LRANGE', `arix:forensic:${projectId}`, '0', '99'], ['MGET', `${metrics}:total_requests`, `${metrics}:blocked_attacks`, `${metrics}:trapped_hackers`, `${metrics}:tarpit_seconds_burned`],
     ['SMEMBERS', `arix:api-catalog:${projectId}`], ['GET', `arix:audit:latest:${projectId}`]
   ]);
+  const auditChain = await getAuditChainSnapshot(projectId, 250);
   const [total, blocked, trapped, tarpit] = Array.isArray(values) ? values : [];
   return {
     visitors: Array.isArray(visitors) ? visitors : [], threats: Array.isArray(threats) ? threats : [], forensicReplay: Array.isArray(forensic) ? forensic : [],
     apiCatalog: Array.isArray(catalog) ? catalog.slice(0, 1000) : [],
-    auditAnchor: (() => { try { return auditLatest ? JSON.parse(auditLatest) : null; } catch { return null; } })(),
+    auditAnchor: (() => { try { return auditLatest ? JSON.parse(auditLatest) : null; } catch { return null; } })(), auditChain,
     metrics: { totalRequests: Number(total || 0), blockedAttacks: Number(blocked || 0), trappedHackers: Number(trapped || 0), tarpitSecondsBurned: Number(tarpit || 0), activeVisitors: null }
   };
 }
@@ -347,4 +539,120 @@ export async function listPopBatch(key, count = 500) {
   const bounded = Math.max(1, Math.min(1000, Math.floor(Number(count) || 500)));
   if (!redisConfigured()) { if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.'); warnFallback(); const item = getLocal(key); if (!item || item.type !== 'list') return []; return item.value.splice(0, bounded); }
   const result = await command(['EVAL', POP_BATCH_LUA, '1', key, String(bounded)]); return Array.isArray(result) ? result : [];
+}
+
+const MULTI_TOKEN_BUCKET_LUA = `
+local now = tonumber(ARGV[1])
+local cost = tonumber(ARGV[2])
+local allowed = 1
+local minRemaining = math.huge
+local maxRetry = 0
+local calculated = {}
+for i = 1, #KEYS do
+  local base = 3 + ((i - 1) * 3)
+  local capacity = tonumber(ARGV[base])
+  local refillPerMs = tonumber(ARGV[base + 1])
+  local ttlMs = tonumber(ARGV[base + 2])
+  local values = redis.call('HMGET', KEYS[i], 'tokens', 'updated')
+  local tokens = tonumber(values[1]) or capacity
+  local updated = tonumber(values[2]) or now
+  tokens = math.min(capacity, tokens + math.max(0, now - updated) * refillPerMs)
+  if tokens < cost then
+    allowed = 0
+    maxRetry = math.max(maxRetry, math.ceil((cost - tokens) / refillPerMs))
+  end
+  minRemaining = math.min(minRemaining, math.floor(tokens))
+  calculated[i] = { tokens, refillPerMs, ttlMs }
+end
+for i = 1, #KEYS do
+  local tokens = calculated[i][1]
+  if allowed == 1 then tokens = tokens - cost end
+  redis.call('HSET', KEYS[i], 'tokens', tokens, 'updated', now)
+  redis.call('PEXPIRE', KEYS[i], calculated[i][3])
+end
+if minRemaining == math.huge then minRemaining = 0 end
+if allowed == 1 then minRemaining = math.max(0, minRemaining - cost) end
+return { allowed, minRemaining, maxRetry }
+`;
+
+/** Atomically checks actor, subnet, tenant and normalized-route buckets in one Redis EVAL. */
+export async function rateLimitMulti({ dimensions, weight = 1 }) {
+  if (!Array.isArray(dimensions) || dimensions.length < 1 || dimensions.length > 8) throw new TypeError('rateLimitMulti requires 1–8 dimensions.');
+  const now = Date.now();
+  const cost = Math.max(1, Math.floor(Number(weight) || 1));
+  const rows = dimensions.map((item) => {
+    const key = String(item?.key || '');
+    const limit = Math.floor(Number(item?.limit));
+    const windowMs = Math.floor(Number(item?.windowMs || 60000));
+    if (!key || key.length > 512 || !Number.isInteger(limit) || limit < 1 || limit > 100000 || !Number.isInteger(windowMs) || windowMs < 100 || windowMs > 3600000) throw new TypeError('Invalid multi-dimensional quota bucket.');
+    if (cost > limit) throw new RangeError('Quota weight exceeds a bucket capacity.');
+    return { key, limit, windowMs, refillPerMs: limit / windowMs, ttlMs: windowMs + 60000 };
+  });
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    warnFallback();
+    const staged = rows.map((row) => {
+      const item = getLocal(row.key);
+      const amount = item?.type === 'bucket' ? Number(item.value.amount) : row.limit;
+      const updated = item?.type === 'bucket' ? Number(item.value.updated) : now;
+      return { ...row, amount: Math.min(row.limit, amount + Math.max(0, now - updated) * row.refillPerMs) };
+    });
+    const allowed = staged.every((row) => row.amount >= cost);
+    let remaining = Infinity; let retryAfterMs = 0;
+    for (const row of staged) {
+      const next = allowed ? row.amount - cost : row.amount;
+      setLocal(row.key, 'bucket', { amount: next, updated: now }, Math.ceil(row.ttlMs / 1000));
+      remaining = Math.min(remaining, Math.floor(next));
+      if (!allowed && row.amount < cost) retryAfterMs = Math.max(retryAfterMs, Math.ceil((cost - row.amount) / row.refillPerMs));
+    }
+    return { allowed, remaining: Number.isFinite(remaining) ? Math.max(0, remaining) : 0, retryAfterMs };
+  }
+  const args = [String(now), String(cost)];
+  for (const row of rows) args.push(String(row.limit), String(row.refillPerMs), String(row.ttlMs));
+  const result = await command(['EVAL', MULTI_TOKEN_BUCKET_LUA, String(rows.length), ...rows.map((row) => row.key), ...args]);
+  if (!Array.isArray(result) || result.length < 3) throw new Error('Invalid multi-dimensional quota response.');
+  return { allowed: Number(result[0]) === 1, remaining: Math.max(0, Number(result[1]) || 0), retryAfterMs: Math.max(0, Number(result[2]) || 0) };
+}
+
+const CONCURRENCY_ACQUIRE_LUA = `
+local now = tonumber(ARGV[1])
+local expires = tonumber(ARGV[2])
+local maximum = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+local count = redis.call('ZCARD', KEYS[1])
+if count >= maximum then return {0, count} end
+redis.call('ZADD', KEYS[1], expires, member)
+redis.call('PEXPIRE', KEYS[1], expires - now + 1000)
+return {1, count + 1}
+`;
+const CONCURRENCY_RELEASE_LUA = `return redis.call('ZREM', KEYS[1], ARGV[1])`;
+
+export async function acquireConcurrency(key, member, { maximum = 3, ttlMs = 120000 } = {}) {
+  if (typeof key !== 'string' || !key || key.length > 512) throw new TypeError('A valid concurrency key is required.');
+  const now = Date.now(); const expiry = now + Math.max(1000, Math.min(600000, Number(ttlMs) || 120000));
+  const max = Math.max(1, Math.min(100, Math.floor(Number(maximum) || 3)));
+  const safeMember = String(member || randomUUID()).slice(0, 180);
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    warnFallback();
+    const item = getLocal(key); const set = item?.type === 'zset' ? item.value : new Map();
+    for (const [id, score] of set) if (score <= now) set.delete(id);
+    const allowed = set.size < max;
+    if (allowed) set.set(safeMember, expiry);
+    setLocal(key, 'zset', set, Math.ceil((expiry - now + 1000) / 1000));
+    return { allowed, count: set.size, member: safeMember, key };
+  }
+  const result = await command(['EVAL', CONCURRENCY_ACQUIRE_LUA, '1', key, String(now), String(expiry), String(max), safeMember]);
+  return { allowed: Number(result?.[0]) === 1, count: Number(result?.[1]) || 0, member: safeMember, key };
+}
+
+export async function releaseConcurrency(key, member) {
+  if (!key || !member) return 0;
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    const item = getLocal(String(key));
+    return item?.type === 'zset' && item.value.delete(String(member)) ? 1 : 0;
+  }
+  return Number(await command(['EVAL', CONCURRENCY_RELEASE_LUA, '1', String(key), String(member)])) || 0;
 }

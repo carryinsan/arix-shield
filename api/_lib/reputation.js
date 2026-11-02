@@ -4,8 +4,9 @@ import { isIP } from 'node:net';
 import { reverse, resolve4, resolve6 } from 'node:dns/promises';
 
 const FEED_TTL_SECONDS = 60 * 60 * 48;
+const FEED_RETENTION_SECONDS = FEED_TTL_SECONDS + 7 * 24 * 60 * 60;
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const cache = globalThis.__ARIX_REPUTATION_CACHE__ ??= { at: 0, trie: null, sources: [] };
+const cache = globalThis.__ARIX_REPUTATION_CACHE__ ??= { at: 0, trie: null, sources: [], byFeed: new Map(), stale: [] };
 const TRUSTED_SUFFIXES = Object.freeze({ google: ['.googlebot.com', '.google.com'], bing: ['.search.msn.com'] });
 
 function parseTextCidrs(text, maxEntries = 100000) {
@@ -84,7 +85,7 @@ export async function refreshThreatFeeds() {
       const cidrs = [...new Set(feed.parser(text).filter((item) => typeof item === 'string' && item.length <= 80 && parseCidr(item)))].slice(0, 100000);
       if (!cidrs.length) throw new Error('Feed parsed to zero network entries.');
       const payload = { name: feed.name, source: feed.url, sourceCount: cidrs.length, cidrs, fetchedAt: new Date().toISOString(), expiresAt: Date.now() + FEED_TTL_SECONDS * 1000 };
-      await setJson(`arix:threat-feed:${feed.name}`, payload, FEED_TTL_SECONDS);
+      await setJson(`arix:threat-feed:${feed.name}`, payload, FEED_RETENTION_SECONDS);
       return { name: feed.name, ok: true, count: cidrs.length };
     } catch (error) { return { name: feed.name, ok: false, error: String(error?.message || error).slice(0, 180) }; }
   }));
@@ -97,10 +98,16 @@ async function loadTrie() {
   if (cache.trie && Date.now() - cache.at < CACHE_TTL_MS) return cache;
   const names = ['spamhaus-drop-v4', 'spamhaus-drop-v6', 'firehol-level1', 'tor-exit', 'abuseipdb-blacklist'];
   const feeds = await Promise.all(names.map((name) => getJson(`arix:threat-feed:${name}`)));
-  const valid = feeds.filter((feed) => feed && Array.isArray(feed.cidrs) && Number(feed.expiresAt) > Date.now());
+  const valid = feeds.filter((feed) => feed && Array.isArray(feed.cidrs) && feed.cidrs.length > 0
+    && (!Number.isFinite(Number(feed.expiresAt)) || Number(feed.expiresAt) > Date.now() - 7 * 24 * 60 * 60 * 1000));
   const cidrs = valid.flatMap((feed) => feed.cidrs).slice(0, 300000);
   cache.trie = buildPrefixTrie(cidrs);
+  cache.byFeed = new Map(valid.map((feed) => [String(feed.name || ''), { trie: buildPrefixTrie(feed.cidrs.slice(0, 150000)), fetchedAt: Number.isFinite(Date.parse(feed.fetchedAt)) ? Date.parse(feed.fetchedAt) : 0, sourceCount: feed.cidrs.length }]));
   cache.sources = valid.map(({ name, sourceCount, fetchedAt }) => ({ name, sourceCount, fetchedAt }));
+  const expectedFeeds = ['spamhaus-drop-v4', 'spamhaus-drop-v6', 'firehol-level1', 'tor-exit'];
+  const oldFeeds = valid.filter((feed) => !Number.isFinite(Date.parse(feed.fetchedAt)) || Date.now() - Date.parse(feed.fetchedAt) > 24 * 60 * 60 * 1000).map((feed) => String(feed.name || 'unknown'));
+  const missingFeeds = expectedFeeds.filter((name) => !valid.some((feed) => feed.name === name));
+  cache.stale = [...new Set([...oldFeeds, ...missingFeeds])];
   cache.at = Date.now();
   return cache;
 }
@@ -112,11 +119,38 @@ export function isIpInLoadedThreatFeed(ip) {
   return isIP(address) !== 0 && Boolean(cache.trie?.count) && prefixTrieHas(cache.trie, address);
 }
 
-export async function checkIpReputation(ip) {
-  if (!ip || isIP(String(ip).split(',')[0].trim()) === 0) return { checked: false, listed: false, reason: 'INVALID_OR_MISSING_IP' };
+export async function getThreatFeedStatus() {
   const loaded = await loadTrie();
-  if (!loaded.trie?.count) return { checked: false, listed: false, reason: 'THREAT_FEEDS_NOT_LOADED', feedCount: 0 };
-  return { checked: true, listed: prefixTrieHas(loaded.trie, String(ip).split(',')[0].trim()), feedCount: loaded.trie.count, sources: loaded.sources };
+  return { loaded: Boolean(loaded.trie?.count), feedCount: loaded.trie?.count || 0, sources: loaded.sources || [], staleFeeds: loaded.stale || [], warning: (loaded.stale || []).length > 0 };
+}
+
+export async function checkIpReputation(ip) {
+  const address = String(ip || '').split(',')[0].trim();
+  if (!address || isIP(address) === 0) return { checked: false, listed: false, threatConfidence: 0, action: 'allow', reason: 'INVALID_OR_MISSING_IP' };
+  const loaded = await loadTrie();
+  if (!loaded.trie?.count) return { checked: false, listed: false, threatConfidence: 0, action: 'allow', reason: 'THREAT_FEEDS_NOT_LOADED', feedCount: 0, staleFeeds: loaded.stale || [] };
+  const signals = [];
+  let threatConfidence = 0;
+  for (const [name, weight] of [['spamhaus-drop-v4', 85], ['spamhaus-drop-v6', 85]]) {
+    const feed = loaded.byFeed?.get(name);
+    if (!feed || !prefixTrieHas(feed.trie, address)) continue;
+    const stale = feed.fetchedAt <= 0 || Date.now() - feed.fetchedAt > 24 * 60 * 60 * 1000;
+    const effectiveWeight = stale ? Math.floor(weight / 2) : weight;
+    signals.push({ source: name, weight: effectiveWeight, stale });
+    threatConfidence = Math.min(100, threatConfidence + effectiveWeight);
+  }
+  const medium = ['firehol-level1', 'tor-exit'].map((name) => ({ name, feed: loaded.byFeed?.get(name) })).filter(({ feed }) => feed && prefixTrieHas(feed.trie, address));
+  if (medium.length) {
+    const stale = medium.every(({ feed }) => feed.fetchedAt <= 0 || Date.now() - feed.fetchedAt > 24 * 60 * 60 * 1000);
+    const weight = stale ? 22 : 45;
+    threatConfidence = Math.min(100, threatConfidence + weight);
+    for (const item of medium) signals.push({ source: item.name, weight: 0, stale });
+  }
+  // FireHOL and Tor are correlated medium-confidence lists: together they still
+  // contribute one +45 signal and require an independent signal to hard-block.
+  const highConfidence = signals.some((signal) => signal.source.startsWith('spamhaus') && !signal.stale);
+  const action = highConfidence || threatConfidence >= 85 ? 'block' : threatConfidence >= 40 ? 'challenge' : 'allow';
+  return { checked: true, listed: signals.length > 0, threatConfidence, action, signals, feedCount: loaded.trie.count, sources: loaded.sources, staleFeeds: loaded.stale || [] };
 }
 
 function hostnameMatches(host, suffixes) {

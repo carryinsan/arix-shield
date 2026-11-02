@@ -1,62 +1,79 @@
-# Security boundaries and non-goals
+# ArixShield security boundaries and verification status
 
-ArixShield is an application-layer security SDK and telemetry/control-plane service. It runs inside a customer application, where route parameters, authenticated identity, request schemas, and final response status may be available. It is not an Anycast network, TLS termination proxy, volumetric DDoS scrubbing network, or replacement for the hosting provider's edge controls.
+ArixShield is an application-layer SDK and control-plane service. It is not a TLS-terminating reverse proxy, an L3/L4 volumetric DDoS scrubbing network, a database authorization engine, or an independently certified security product.
 
-No software can honestly guarantee zero vulnerabilities, bug-free behavior, or perfect bot/BOLA detection. ArixShield is defense-in-depth: applications must still authorize every resource access at the data/query layer, validate their own inputs, and keep secrets server-side.
+No source-code change can honestly guarantee zero vulnerabilities, perfect bot detection, or bug-free operation. ArixShield provides configurable enforcement points; customer applications must supply trusted identity, tenant context, authorization policy, database scoping, and correct deployment/runtime configuration.
 
-## Implemented in this release
+## Implemented security controls in this package
 
-### Request inspection and WAF
+### Authorization, tenant isolation and BOPLA
 
-- Standard JSON bodies default to a 32 KiB inspection limit. Configurable routes may raise the limit up to 256 KiB; SDK adapters enforce byte limits while reading the request stream, before JSON parsing/allocation. `/api/shield` has a separate 36,000-byte control-plane cap.
-- Parsed JSON is traversed structurally. String leaves are inspected individually (4 KiB default leaf cap), with bounded depth/node counts. Large accepted strings can be explicitly allowlisted using `allowedLongFields`; the body itself remains bounded.
-- Raw serialized request text is scanned in 16 KiB chunks with a 512-byte overlap. Canonicalization performs at most three decoding/normalization passes and detects continued nested encoding. A deterministic SQL grammar tokenizer supplements the non-SQL XSS, SSRF, traversal, shell, and prompt-injection rules.
-- Structural object-key checks flag NoSQL `$` operators, dotted keys, and prototype-pollution names (`__proto__`, `constructor`, `prototype`). A 50-character symbol-density check provides another signal on free-text leaves.
-- Explicit developer-provided JSON Schema, OpenAPI, or Zod-like validators remain the authority for application-specific field types and allowed properties.
+- The Node and Next.js SDK adapters evaluate the configured authorization matrix before invoking the protected application handler. Rules can constrain HTTP methods, roles, permissions, authenticated identity, tenant identity and a developer-supplied asynchronous pre-check.
+- `mutationTripwire: true` denies unconfigured `POST`, `PUT`, `PATCH` and `DELETE` routes and requires configured mutation rules to declare `tenantIsolated: true`, `requirePreCheck: true`, and a passing pre-check. The pre-check itself may perform a narrowly scoped read; the protected route handler is not run when it fails.
+- Optional `allowedWriteFields` policies strip fields that the caller's role cannot write. Optional `restrictedReadFields` policies remove configured fields before JSON responses are serialized.
+- `req.arixContext.scopeQuery(...)` and the equivalent Next.js request context helper build tenant-and-owner predicates for Prisma-style and Mongo-style structured queries. Raw SQL strings are intentionally rejected; SQL adapters must use bound parameters.
+- These controls are opt-in/configuration-dependent. ArixShield cannot infer the application's real role hierarchy, tenant model, ownership rules, or arbitrary database access. A route can still be insecure if the developer omits policy, supplies untrusted identity, uses raw database access outside the wrapper, or writes a pre-check that does not verify the specific resource.
 
-### Bot and browser clearance signals
+### Resource capability sealing and identity binding
 
-- Browser clearance uses encrypted telemetry, DPoP ES256 proof-of-possession, a server-signed short-lived challenge, and SHA-256 proof-of-work. Canvas/WebGL pixel digest, renderer/hardware hints, prototype-integrity status, and bounded coarse interaction-kinematic summaries are mixed into the challenge binding.
-- The service can compare browser claims with available Vercel JA3/JA4 headers and flag known software-renderer/browser inconsistencies as risk signals.
-- Client-side values are not attestations. A custom HTTP client can forge JSON telemetry, a renderer string, pointer summaries, and reported timing. TLS digests are only useful when supplied by a trusted ingress and are not a universal browser/non-browser classifier. These signals must never be used as the sole authorization factor.
-- The 1.2-second interactive hold UI and 4–16 MiB memory-hard scratchpad puzzle described in the proposal are not enabled. The proposal's suggested sparse server verification cannot prove that a client performed the full memory-hard work; full server recomputation would create an avoidable CPU/memory amplification risk. The existing signed, signal-bound SHA-256 PoW remains the real implemented challenge.
+- Version-2 HMAC capabilities bind a resource identifier to tenant ID, user ID, read/write mode, and resource ID using the existing `ARIX_MASTER_SECRET`.
+- The SDK can verify and rewrite recognized resource identifiers in path segments, query parameters and recognized JSON body fields before the route handler executes. Capability sealing is opt-in through `capabilitySealing: true` and must be enabled consistently where identifiers are returned and accepted.
+- Resource ID names and opaque string patterns are bounded and intentionally conservative. Custom application-specific ID fields or identifiers that do not match configured patterns are not automatically protected. Capability tokens are defense in depth, not a substitute for record-level ownership predicates.
 
-### BOLA / IDOR telemetry and capability sealing
+### Browser clearance, request-bound DPoP and business-flow breadcrumbs
 
-- SDK outcome reporting tracks distinct resource IDs for successful `200` responses as well as `403` and `404`. Repeated sequential numeric IDs or more than the configured distinct-ID threshold on successful responses trigger an enumeration signal and actor backoff.
-- Optional capability sealing binds outgoing resource IDs to a stable authenticated user identity with a 128-bit truncated HMAC-SHA256 tag using the existing `ARIX_MASTER_SECRET`. When enabled, SDK response wrappers seal recognized resource-ID fields and inbound SDK middleware verifies seals for every numeric/UUID resource-like path segment and rewrites the path before calling the application handler. Opaque string IDs require a carefully scoped `capabilityIdPattern`; query-string IDs are not covered.
-- An outbound `200` JSON ownership guard checks recognized top-level owner fields and bounded `data[]` / `records[]` entries. This is a useful leak detector, not a substitute for route/database ownership checks. It only works when the SDK is given a stable authenticated identity and the response schema uses owner fields that can be compared to that identity.
-- The Knuth-derived reserved-ID trap is disabled unless `ARIX_RESERVED_TRAP_ID_SPACE=true`. Enable it only after the application/database has permanently reserved the entire matching numeric ID subset and guarantees those IDs can never be real records. The formula does not guarantee that an attacker hits a trap within a few dozen requests; it identifies roughly one in 97 integer IDs. Never turn this on for an unreserved ID space.
+- `/api/shield` can issue a short-lived HMAC-signed clearance ticket (60 seconds) after the browser telemetry / PoW flow. The ticket binds project, browser key thumbprint, risk/fingerprint context, IP prefix where available, nonce and expiry.
+- `public/arix-client.js` wraps same-origin `fetch` calls after clearance is obtained. It attaches the clearance ticket and a fresh ES256 DPoP proof bound to the exact target URL, HTTP method and SHA-256 request-body bytes (`ath`). The browser signing key is non-exportable and stored through IndexedDB-backed WebCrypto.
+- The SDK validates clearance and DPoP before protected handlers. DPoP JTIs use the shared Redis replay check; sensitive configured one-shot routes additionally consume the clearance nonce atomically. A shared Redis anti-replay check is required for cross-instance replay resistance.
+- The optional workflow configuration issues signed ordered-step breadcrumbs tied to project, tenant and actor identity. The next step checks step order, route, timing and a Redis-backed one-use nonce. This is not proof that a human performed the workflow; a real browser automation system can still execute legitimate steps.
+- In Express/Node, the JSON parser must preserve the original bytes in `req.rawBody` using the documented `verify` hook. The SDK rejects body-bearing clearance-protected requests when those exact bytes are unavailable. Re-serializing parsed JSON is not an equivalent DPoP check.
+- Browser signals (WebGL/canvas digests, interaction summaries, user-agent values and claimed hardware properties) are spoofable risk inputs, not hardware attestation or proof of a human. They must not replace authentication or authorization.
 
-### Redis, limits, and telemetry
+### MFA, sessions and server-key lifecycle
 
-- SDKs cache policy plus active indexed actor/IP bans for up to 30 seconds. Incomplete or oversized ban indexes cause a direct control-plane abuse check instead of trusting a partial snapshot. Expired indexed bans are filtered and pruned while building snapshots.
-- Distributed rate-limit requests can lease up to 15 tokens from Upstash and spend the remaining lease locally for at most 15 seconds. Because unused tokens are reserved and may expire, this reduces round trips at the cost of conservative quota under-utilization; it does not increase the configured global allowance.
-- DPoP replay protection uses a bounded 15-second per-instance ring as an early duplicate filter and retains the shared Redis `SET NX` replay check for cross-instance enforcement.
-- Project events and telemetry writes use a durable Redis `/pipeline` request rather than six sequential REST round trips. This is not a lossy in-memory write-behind queue. SDK response-outcome reporting may use the host-provided `waitUntil` hook when available.
-- The `/api/shield` control plane validates API-key shape, content length, and Origin before reading/parsing the request body. A short-lived local API-key-to-project cache supports early rejection of locally cached IP bans. Revocation may therefore take up to the cache TTL to propagate on that instance.
-- Optional `ARIX_PREBODY_THREAT_FEED_BLOCK=true` checks the currently loaded in-memory threat feed before body parsing. It is disabled by default because a feed-wide block can create false positives; validate feed quality and policy before enabling.
+- Login controls include client/IP+UA request limiting, IP subnet limiting, per-account failure counters with an atomic 15-minute expiry window, escalating 1–30 second retry backoff, a short account lock and a signed proof-of-work challenge after the configured failure threshold.
+- TOTP uses RFC 6238 six-digit HMAC-SHA1 codes; the secret is AES-256-GCM encrypted under a key derived from the existing `ARIX_MASTER_SECRET`. Accepted time-step counters are consumed with Redis `SET NX` to prevent reuse during the accepted window.
+- WebAuthn/passkeys use browser WebCrypto credentials and server-side challenge verification. This implementation supports P-256 / ES256 public-key credentials and `fmt: none` registration attestation; other algorithms or attestation formats are not claimed as supported. Challenges are atomically consumed with Redis `GETDEL`, with origin/RP-ID, expiry, user-presence / user-verification and signature-counter checks.
+- Sessions have a 30-minute idle timeout and a 24-hour absolute lifetime, with a user session registry and per-session revocation. Session state and cross-instance revocation require shared Redis.
+- Server integration key rotation generates a replacement key, prepares a replacement session before committing the project key pointer, and can keep the prior key in a bounded grace window or revoke it immediately. The control plane checks the project's current key hash on each authenticated control-plane action and returns a key epoch for SDK cache invalidation. The replacement key is shown once; operators must update server environment variables.
+- These controls require a stable `ARIX_MASTER_SECRET`, working Redis, correctly configured secure origins, and customer-managed recovery processes. A compromised application server or master secret can undermine these protections.
 
-## Explicit non-goals and proposal items not implemented
+### Request parser and WAF consistency
 
-- **Stateless cross-instance HMAC rate-limit ratchet during Redis outage:** not implemented. A signed client-carried counter can be replayed or forked across instances without shared anti-replay state; it cannot provide strict globally consistent counters during a total Redis outage. Default behavior is fail-closed (`503`) when the distributed limiter is unavailable. `failOpen: true` is an explicit compatibility override that falls back to a process-local bucket and is not globally distributed or strict.
-- **Automatic schema learning/locking:** not enabled. Inferring schemas from early live traffic can let malicious requests poison the learned schema and reject valid future data. Supply trusted application schemas explicitly.
-- **Full threat-feed trie shipping in every SDK snapshot:** not implemented. The SDK snapshot carries active ban hashes; threat-feed lookups remain server-side/cached to avoid repeatedly transferring a large CIDR structure to every serverless instance.
-- **Universal JA3/JA4 browser classification:** not implemented. TLS digest classification requires trusted, current reference data and cannot be inferred reliably from a digest's presence alone.
-- **Guaranteed human detection from GPU timings, pointer kinematics, or micro-hold behavior:** not implemented; all client-reported values can be fabricated.
-- **Reverse-Slowloris / connection tarpits:** deliberately excluded because holding open connections consumes customer/provider resources and billing is not zero-cost.
-- **Decompression-bomb generation, parser starvation payloads, or destructive active countermeasures:** deliberately excluded.
-- **WebRTC/STUN or cross-origin probing to deanonymize users:** not performed.
-- **Prompt-injection exfiltration:** the product does not attempt to make third-party agents reveal hidden prompts, credentials, or private tool configuration.
-- **Automatic provider abuse reports/takedowns:** operator review and evidence validation are required.
-- Rust/libinjection WebAssembly, a Wasm Bloom filter, a 3D WebGL globe, and a full attacker graph are not included; the WAF and CIDR prefix trie remain JavaScript.
+- Canonicalization applies Unicode NFKC normalization, bounded repeated decoding and structured JSON inspection.
+- The WAF detects duplicate JSON sibling keys from raw JSON, duplicate query keys unless an OpenAPI array parameter allows them, duplicate Node raw headers where available, and simultaneous `Content-Length` plus `Transfer-Encoding`.
+- Security path normalization rejects encoded path separators and resolves dot segments before route matching.
+- OpenAPI request validation supports path/query/header parameters and JSON bodies, local references, and bounded `oneOf`, `anyOf` and `allOf` composition.
+- GraphQL lexical inspection bounds nesting depth and alias count and blocks production introspection. XML checks block DTD/entity declarations. PNG, JPEG and PDF signature checks and active SVG content checks run when the raw request body is available. Multipart bodies are parsed with bounded boundary/header handling and at most 16 file parts; supported image/PDF parts are signature-checked, scriptable MIME types are rejected, and missing raw upload bytes are reported.
+- These checks do not replace the framework's own parser or the application's schema. The multipart parser is deliberately bounded by the WAF 256 KiB body cap and 16 file parts; it is not a general-purpose streaming upload pipeline, archive-bomb detector or antivirus engine. Large uploads should use a dedicated streaming upload pipeline with per-part limits and independent scanning.
 
-## Production boundaries
+### DNS-pinned outbound fetch
 
-- Upstash Redis is required for shared quotas, ban state, DPoP replay prevention, and other distributed guarantees. The local Redis emulator is development-only and is not shared between serverless instances.
-- ClickHouse/Tinybird, AbuseIPDB, GitHub webhook delivery, and GitHub audit anchoring require external accounts, current credentials, schema/pipe setup, and appropriate permissions.
-- Threat-feed freshness and provider allowlists depend on upstream feeds and operator maintenance. False positives and false negatives remain possible.
-- Geo-velocity uses hosting-provider or explicitly supplied location metadata; IP geolocation is approximate.
-- Request replay is sanitized. Raw bodies, cookies, and authorization headers are not retained.
+- `arixSafeFetch` is exported from both SDK entry points. It accepts credential-free HTTPS URLs, resolves A/AAAA records, rejects private, loopback, link-local, documentation, multicast and other non-public ranges, pins a selected resolved address for the TLS connection, disables automatic redirects and validates every redirect hop.
+- The default allowed port is 443. Applications may narrow or extend the allowed-port list explicitly; do not allow non-standard ports without a service-specific review. Response and request bodies are bounded and requests have timeouts.
+- Applications must use `arixSafeFetch` for untrusted outbound URLs. It does not intercept ordinary `fetch`, third-party HTTP clients, database drivers, or other outbound sockets in application code.
 
-Passing local tests is not a production deployment test, independent penetration test, certification, or proof of zero vulnerabilities. Run dependency audits, staging validation, a threat-model review, and an independent penetration test before relying on this as an enterprise security control.
+### Quotas, concurrency and Redis resilience
+
+- The distributed quota check evaluates actor/account, IP subnet, tenant and normalized endpoint dimensions in one Redis Lua operation. SDKs can reserve up to 15 tokens locally for a short lease; unused leased tokens can reduce utilization conservatively.
+- Expensive routes can use a Redis-backed concurrency lease, default maximum 3 per actor, released on response finish/close. Applications should configure TTLs longer than their expected handler duration and ensure streams close cleanly.
+- Responses can report actual cost through `X-Arix-Actual-Cost`; the SDK reconciles additional quota weight after the response and records cost telemetry. This is an application-reported value and must not be trusted if untrusted clients can set the header; strip client-provided copies and set it only in trusted server code.
+- The Redis/control-plane circuit breaker trips after three failures or an operation reaching 450 ms, opens for 10 seconds and permits one half-open probe. State is process-local, so individual instances can be in different breaker states.
+- During control-plane outage, state-changing and other routes fail closed. Designated low-risk documentation/catalog GET routes may use a 25%-capacity local bucket plus a signed stateless PoW challenge. The local bucket is per process and is not globally consistent; this is a reduced-availability fallback, not equivalent to Redis-backed quotas.
+
+## Production requirements
+
+- Node.js 22 runtime and the current SDK/control-plane code deployed together.
+- `ARIX_MASTER_SECRET` with at least 32 bytes of high-entropy random material.
+- Upstash Redis REST URL/token for sessions, shared anti-replay, distributed quotas, concurrency locks, key lifecycle and other shared state. The in-memory fallback is development-only and not cross-instance.
+- Existing server integration key remains server-only. Do not put it in browser code. Browser code uses the separate project live key already provisioned by ArixShield.
+- `ARIX_CLEARANCE_KID` and `ARIX_CLEARANCE_PRIVATE_JWK` are required for encrypted browser clearance; generate/rotate them using the existing helper and retain the private JWK as a server secret.
+- Trust client IP / TLS headers only when supplied by the hosting platform or a verified ingress. Do not trust arbitrary `X-Forwarded-For` or `X-Real-IP` values from the public internet.
+
+No additional third-party API key is introduced by these changes. Existing optional analytics and threat-intelligence integrations still require their separately documented credentials.
+
+## ASVS 5.0.0 status
+
+This package has not been independently assessed or certified against OWASP ASVS 5.0.0 Level 3. Local unit tests and static import checks are not an ASVS verification. Level 3 assessment requires a requirement-by-requirement review of the applicable controls plus evidence from the deployed application, infrastructure, identity provider, database, secret management, operational processes and penetration testing. ArixShield implements selected controls relevant to authorization, authentication, session management, input validation, API security and communications, but this document does not claim that every Level 3 requirement is satisfied.
+
+Passing local tests is not proof of zero vulnerabilities. Run dependency and container scans, staging tests with the actual Redis/Vercel configuration, application-specific threat modelling, independent penetration testing and a formal ASVS verification before making a compliance claim.

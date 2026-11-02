@@ -1,21 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
-import { getString, setString, setAdd, trackWindowEvent, trackResourceVelocity } from './redis.js';
+import { getString, setString, setAdd, trackWindowEvent, trackResourceVelocity, incrementWithExpiry } from './redis.js';
 import { sha256Hex } from './crypto-trap.js';
+import { formatIpPrefix } from './cidr.js';
 import { recordProjectEvent } from './redis.js';
 
 const ID_SEGMENT = /^(?:\d{1,20}|[0-9a-f]{8}-[0-9a-f-]{27,})$/i;
-const localIpBlocks = globalThis.__ARIX_LOCAL_IP_BLOCKS__ ??= new Map();
+// Kept as a compatibility export for older integrations. Shared IP addresses are
+// reputation/quota context only and are never a hard-ban identity.
+export function isIpLocallyBlocked(_projectId, _ip) { return false; }
 
-export function isIpLocallyBlocked(projectId, ip) {
-  const key = `${projectId}:${String(ip || '')}`; const until = Number(localIpBlocks.get(key) || 0);
-  if (until <= Date.now()) { if (until) localIpBlocks.delete(key); return false; }
-  return true;
-}
-
-function cacheLocalIpBlock(projectId, ip, until) {
-  if (!isIP(String(ip || ''))) return; const key = `${projectId}:${ip}`; localIpBlocks.set(key, until);
-  if (localIpBlocks.size > 10000) for (const [id, expiry] of localIpBlocks) if (expiry <= Date.now()) localIpBlocks.delete(id);
+function hasStableActorIdentity(value) {
+  const identity = String(value || '').trim().toLowerCase();
+  return Boolean(identity) && identity !== 'anonymous' && !identity.startsWith('anonymous:');
 }
 
 function normalizeRoute(path) {
@@ -42,20 +38,43 @@ function validCoordinates(lat, lon) {
   return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
 }
 
+export async function recordThreatCorrelation(projectId, actorHash, ip, points, reason = 'SECURITY_SIGNAL') {
+  const value = Math.max(0, Math.min(100, Math.floor(Number(points) || 0)));
+  if (!value) return { actorScore: 0, subnetScore: 0, subnetActors: 0 };
+  const actorKey = actorHash ? `arix:risk:actor:${projectId}:${actorHash}` : null;
+  const prefix = formatIpPrefix(String(ip || ''));
+  const subnetHash = prefix ? await sha256Hex(`${projectId}:${prefix}`) : null;
+  const subnetKey = subnetHash ? `arix:risk:subnet:${projectId}:${subnetHash}` : null;
+  const [actorScore, subnetScore] = await Promise.all([
+    actorKey ? incrementWithExpiry(actorKey, 600, value) : Promise.resolve(0),
+    subnetKey ? incrementWithExpiry(subnetKey, 600, value) : Promise.resolve(0)
+  ]);
+  if (subnetKey) await setString(`${subnetKey}:last`, String(reason).slice(0, 48), 600);
+  return { actorScore: Math.min(1000, Number(actorScore) || 0), subnetScore: Math.min(1000, Number(subnetScore) || 0), subnetActors: 0, subnetHash };
+}
+
+async function readThreatCorrelation(projectId, actorHash, ip) {
+  const prefix = formatIpPrefix(String(ip || ''));
+  const subnetHash = prefix ? await sha256Hex(`${projectId}:${prefix}`) : null;
+  const keys = [actorHash ? `arix:risk:actor:${projectId}:${actorHash}` : null, subnetHash ? `arix:risk:subnet:${projectId}:${subnetHash}` : null].filter(Boolean);
+  const values = await Promise.all(keys.map((key) => getString(key)));
+  return { actorScore: actorHash ? Math.max(0, Number(values[0]) || 0) : 0, subnetScore: subnetHash ? Math.max(0, Number(values.at(-1)) || 0) : 0 };
+}
+
 export async function isActorBackedOff(projectId, actorId, ip = '') {
   const identity = String(actorId || '').trim();
-  const hasStableActor = identity.length > 0 && identity.toLowerCase() !== 'anonymous';
+  const hasStableActor = hasStableActorIdentity(identity);
   const actorHash = hasStableActor ? await sha256Hex(`${projectId}:${identity.slice(0, 180)}`) : null;
-  const ipHash = isIP(String(ip || '')) ? await sha256Hex(`${projectId}:${String(ip)}`) : null;
-  const keys = [
-    ...(actorHash ? [`arix:abuse:ban:${projectId}:${actorHash}`] : []),
-    ...(ipHash ? [`arix:abuse:ban:${projectId}:${ipHash}`] : [])
-  ];
+  // A raw IP (or its hash) is deliberately not a ban key: carrier-grade NAT,
+  // office gateways, VPN exits and campus networks are shared by unrelated users.
+  const keys = actorHash ? [`arix:abuse:ban:${projectId}:${actorHash}`] : [];
   if (!keys.length) return { blocked: false, actorHash: null };
-  const values = await Promise.all(keys.map((key) => getString(key)));
+  const [values, correlation] = await Promise.all([Promise.all(keys.map((key) => getString(key))), readThreatCorrelation(projectId, actorHash, ip)]);
   const until = values.map(Number).filter((value) => Number.isFinite(value) && value > Date.now()).sort((a, b) => b - a)[0];
-  if (!until) return { blocked: false, actorHash };
-  return { blocked: true, actorHash, retryAfterMs: until - Date.now() };
+  const correlatedScore = Math.max(correlation.actorScore, correlation.subnetScore);
+  if (correlation.actorScore >= 65) return { blocked: true, challenge: true, actorHash, riskScore: correlatedScore, actorScore: correlation.actorScore, subnetScore: correlation.subnetScore, retryAfterMs: 60000, reason: 'CROSS_ENDPOINT_RISK_THRESHOLD' };
+  if (!until) return { blocked: false, challenge: correlation.subnetScore >= 65, actorHash, riskScore: correlatedScore, actorScore: correlation.actorScore, subnetScore: correlation.subnetScore };
+  return { blocked: true, challenge: correlation.subnetScore >= 65, actorHash, riskScore: correlatedScore, actorScore: correlation.actorScore, subnetScore: correlation.subnetScore, retryAfterMs: until - Date.now() };
 }
 
 export function isReservedKnuthTrapId(value) {
@@ -63,28 +82,33 @@ export function isReservedKnuthTrapId(value) {
   try { return (BigInt(value) * 2654435761n) % 97n === 0n; } catch { return false; }
 }
 
-export async function banActorForHoneypot(projectId, actorId, ip = '', durationMs = 24 * 60 * 60 * 1000) {
+export async function banActorForHoneypot(projectId, actorId, _ip = '', durationMs = 24 * 60 * 60 * 1000) {
   const boundedDuration = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(durationMs) || 24 * 60 * 60 * 1000));
   const until = Date.now() + boundedDuration;
   const identity = String(actorId || '').trim();
-  const hasStableActor = identity.length > 0 && identity.toLowerCase() !== 'anonymous';
+  const hasStableActor = hasStableActorIdentity(identity);
   const actorHash = hasStableActor ? await sha256Hex(`${projectId}:${identity.slice(0, 180)}`) : null;
   if (actorHash) {
     await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), Math.ceil(boundedDuration / 1000));
     await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, Math.ceil(boundedDuration / 1000));
+    // Subnet correlation is accumulated only from distinct attributable actors.
+    // It can raise challenge/review signals, but it never blocks the entire subnet.
+    const prefix = formatIpPrefix(String(_ip || ''));
+    if (prefix) {
+      const subnetHash = await sha256Hex(`${projectId}:${prefix}`);
+      const distinctBannedActors = await setAdd(`arix:abuse:banned-subnet-actors:${projectId}:${subnetHash}`, actorHash, 600);
+      if (Number(distinctBannedActors) >= 3) await incrementWithExpiry(`arix:risk:subnet:${projectId}:${subnetHash}`, 600, 15);
+    }
   }
-  if (isIP(String(ip || ''))) {
-    const ipHash = await sha256Hex(`${projectId}:${String(ip)}`);
-    await setString(`arix:abuse:ban:${projectId}:${ipHash}`, String(until), Math.ceil(boundedDuration / 1000));
-    cacheLocalIpBlock(projectId, String(ip), until);
-    await setAdd(`arix:abuse:ban-ips:${projectId}`, ipHash, Math.ceil(boundedDuration / 1000));
-  }
-  return { actorHash, until };
+  return { actorHash, until, scope: actorHash ? 'actor' : 'none' };
 }
 
-export async function recordRequestOutcome({ projectId, actorId, ip = '', method = 'GET', path = '/', status = 0, latencyMs = 0, country = '', city = '', asn = '', latitude, longitude, geoVelocityEnabled = false, shadowCatalogEnabled = false }) {
+export async function recordRequestOutcome({ projectId, actorId, ip = '', method = 'GET', path = '/', status = 0, latencyMs = 0, country = '', city = '', asn = '', latitude, longitude, geoVelocityEnabled = false, shadowCatalogEnabled = false, resourceCapabilityVerified = false }) {
   const requestedActor = String(actorId || '').trim();
-  const effectiveActor = requestedActor && requestedActor.toLowerCase() !== 'anonymous' ? requestedActor : (isIP(String(ip || '')) ? String(ip) : randomUUID());
+  // Never collapse anonymous users onto a shared public IP. SDKs should pass a
+  // verified DPoP thumbprint for anonymous-but-device-bound requests; otherwise
+  // isolate the event rather than creating a cross-user velocity identity.
+  const effectiveActor = requestedActor && requestedActor.toLowerCase() !== 'anonymous' ? requestedActor : randomUUID();
   const actorHash = await sha256Hex(`${projectId}:${effectiveActor.slice(0, 180)}`);
   const now = Date.now();
   const requestId = randomUUID();
@@ -104,25 +128,29 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
 
   let bolaCount = 0;
   let bolaTriggered = false;
-  const objectId = [200, 403, 404].includes(numericStatus) ? extractResourceId(path) : null;
+  let bolaObserved = false;
+  const objectId = !resourceCapabilityVerified && [200, 403, 404].includes(numericStatus) ? extractResourceId(path) : null;
   let sequentialHits = 0;
   let reservedTrap = false;
   if (objectId) {
     const velocity = await trackResourceVelocity(`arix:abuse:resource:${projectId}:${actorHash}`, objectId, 60000);
     bolaCount = velocity.distinct;
     sequentialHits = velocity.sequential;
-    reservedTrap = isReservedKnuthTrapId(objectId);
+    // Numeric ranges are not deception tokens: a modulo-based 'trap ID' can
+    // collide with a real invoice/order. Only explicitly registered canary IDs
+    // are treated as traps by the response-outcome handler.
+    reservedTrap = false;
     const threshold = Math.max(8, Number(process.env.ARIX_BOLA_DISTINCT_ID_THRESHOLD) || 12);
     const successEnumeration = numericStatus === 200 && (bolaCount > threshold || sequentialHits >= 2);
     const deniedEnumeration = [403, 404].includes(numericStatus) && bolaCount >= threshold;
-    bolaTriggered = successEnumeration || deniedEnumeration || (numericStatus === 200 && reservedTrap);
-    if (bolaTriggered) {
-      if (reservedTrap) await banActorForHoneypot(projectId, effectiveActor, ip, 24 * 60 * 60 * 1000);
-      else {
-        const until = now + 10 * 60 * 1000;
-        await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), 600);
-        await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, 600);
-      }
+    bolaObserved = successEnumeration;
+    // A successful read-velocity heuristic is observation-only. It must never
+    // lock out an accountant, dashboard fan-out, pagination, or a sealed ID.
+    bolaTriggered = deniedEnumeration;
+    if (deniedEnumeration) {
+      const until = now + 2 * 60 * 1000;
+      await setString(`arix:abuse:ban:${projectId}:${actorHash}`, String(until), 120);
+      await setAdd(`arix:abuse:ban-actors:${projectId}`, actorHash, 120);
     }
   }
 
@@ -152,9 +180,9 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
     await setJson(locationKey, current, 60 * 60 * 24 * 30);
   }
 
-  if (backoffMs || bolaTriggered || geoVelocity?.detected) {
+  if (backoffMs || bolaTriggered || bolaObserved || geoVelocity?.detected) {
     const event = {
-      type: reservedTrap ? 'BOLA_RESERVED_TRAP_ID' : bolaTriggered ? 'BOLA_ENUMERATION' : backoffMs ? 'CREDENTIAL_STUFFING_BACKOFF' : 'GEO_VELOCITY_ANOMALY',
+      type: bolaObserved ? 'BOLA_SUCCESS_VELOCITY_OBSERVED' : bolaTriggered ? 'BOLA_DENIED_ENUMERATION' : backoffMs ? 'CREDENTIAL_STUFFING_BACKOFF' : 'GEO_VELOCITY_ANOMALY',
       blocked: bolaTriggered || backoffMs > 0,
       actorHash,
       route: normalizedRoute,
@@ -172,7 +200,7 @@ export async function recordRequestOutcome({ projectId, actorId, ip = '', method
     await recordProjectEvent(projectId, event, { threat: true, countRequest: false });
   }
 
-  return { actorHash, requestCount, unauthorizedCount, unauthorizedRatio: requestCount ? unauthorizedCount / requestCount : 0, backoffMs, bolaDistinctIds: bolaCount, sequentialHits, reservedTrap, bolaTriggered, geoVelocity };
+  return { actorHash, requestCount, unauthorizedCount, unauthorizedRatio: requestCount ? unauthorizedCount / requestCount : 0, backoffMs, bolaDistinctIds: bolaCount, sequentialHits, reservedTrap, bolaObserved, bolaTriggered, capabilityVerified: resourceCapabilityVerified === true, geoVelocity };
 }
 
 export function sanitizeForensicEvent(event) {

@@ -21,10 +21,12 @@
             <div class="field signup-field"><label for="full-name">Full name</label><input id="full-name" name="name" autocomplete="name" minlength="2" maxlength="80" required></div>
             <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" maxlength="254" required></div>
             <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required><small class="muted-note">Use at least 12 characters.</small></div>
+            <div class="field login-field hidden"><label for="totp-code">Authenticator code (when MFA is enabled)</label><input id="totp-code" name="totpCode" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit code"><small class="muted-note">Leave blank when authenticator MFA is not enabled.</small></div>
             <div class="field signup-field"><label for="project-name">Project name</label><input id="project-name" name="projectName" maxlength="80" required></div>
             <div class="field signup-field"><label for="origin">Website origin</label><input id="origin" name="origin" type="url" placeholder="https://example.com" required><small class="muted-note">Enter the exact origin (scheme + host, no path). This is checked for browser telemetry.</small></div>
             <div class="notice" id="auth-notice" role="status"></div>
             <button class="btn btn-primary" id="auth-submit" type="submit">Create account & project</button>
+            <button class="btn btn-secondary login-field hidden" id="passkey-login" type="button">Sign in with a passkey</button>
           </form>
           <div class="keys-panel" id="keys-panel">
             <div class="notice success show">Project created. Copy these credentials now; the server secret is not shown again.</div>

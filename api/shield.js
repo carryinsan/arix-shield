@@ -1,11 +1,13 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, getNetworkHints, normalizeOrigin } from './_lib/http.js';
-import { rateLimit, getJson, getString, setString, setMembers, setCard, getStrings, setRemoveMany, recordProjectEvent, recordApiTelemetryEvent } from './_lib/redis.js';
+import { rateLimit, rateLimitMulti, acquireConcurrency, releaseConcurrency, increment, getJson, getString, setString, setMembers, setCard, getStrings, setRemoveMany, recordProjectEvent, recordApiTelemetryEvent } from './_lib/redis.js';
 import { sha256Hex, hashCredential, verifyDpopProof, trapMirage, createSignedToken, verifySignedToken, randomToken, sha256, getClearancePublicJwk, decryptClearanceJwe } from './_lib/crypto-trap.js';
 import { inspectRequest } from './_lib/waf-engine.js';
-import { checkIpReputation, verifyForwardConfirmedCrawler, verifyConfiguredProviderIp, isIpInLoadedThreatFeed } from './_lib/reputation.js';
-import { isActorBackedOff, isIpLocallyBlocked, banActorForHoneypot, recordRequestOutcome, sanitizeForensicEvent } from './_lib/abuse.js';
-import { createInvisibleWatermarkMarker } from './_lib/watermark.js';
+import { checkIpReputation, verifyForwardConfirmedCrawler, verifyConfiguredProviderIp } from './_lib/reputation.js';
+import { isActorBackedOff, banActorForHoneypot, recordRequestOutcome, sanitizeForensicEvent, recordThreatCorrelation } from './_lib/abuse.js';
+import { createInvisibleWatermarkMarker, createChameleonCanaryId, storeChameleonCanary, lookupChameleonCanary, storeChameleonExposedId, lookupChameleonCanaryByExposedId } from './_lib/watermark.js';
+import { formatIpPrefix } from './_lib/cidr.js';
+import { verifyRuntimeIntegrity } from './_lib/integrity.js';
 
 const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
 const localApiKeyCache = globalThis.__ARIX_LOCAL_API_KEY_CACHE__ ??= new Map();
@@ -13,7 +15,7 @@ const localApiKeyCache = globalThis.__ARIX_LOCAL_API_KEY_CACHE__ ??= new Map();
 function responseCors(req, res, allowOrigin = '*') {
   res.setHeader('Access-Control-Allow-Origin', allowOrigin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Arix-Key, X-Arix-PoP, X-Arix-JWK, X-Arix-Server-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Arix-Key, X-Arix-PoP, X-Arix-JWK, X-Arix-Server-Key, X-Arix-Clearance, X-Arix-Outage-PoW');
   res.setHeader('Access-Control-Max-Age', '600');
   res.setHeader('Vary', 'Origin');
 }
@@ -47,16 +49,12 @@ async function validatePow(projectId, token, solution, signals = {}) {
 async function resolveProjectFromApiKey(apiKey) {
   if (typeof apiKey !== 'string' || apiKey.length < 20 || apiKey.length > 160) return null;
   const hash = await hashCredential(apiKey);
-  const cached = localApiKeyCache.get(hash);
-  if (cached && cached.expiresAt > Date.now()) return cached.mapping?.revokedAt ? null : { mapping: cached.mapping, hash };
+  // Server integration keys are checked against Redis on every action. Do not
+  // cache this mapping: an emergency revoke must take effect on the next
+  // control-plane request, not after a worker-local TTL expires.
   const mapping = await getJson(`arix:key:${hash}`);
-  if (mapping && !mapping.revokedAt) {
-    localApiKeyCache.set(hash, { mapping, expiresAt: Date.now() + 3000 });
-    if (localApiKeyCache.size > 2000) for (const [key, value] of localApiKeyCache) if (value.expiresAt <= Date.now()) localApiKeyCache.delete(key);
-    return { mapping, hash };
-  }
-  localApiKeyCache.delete(hash);
-  return null;
+  if (!mapping || mapping.revokedAt) return null;
+  return { mapping, hash };
 }
 
 async function getCachedProjectIdForApiKey(apiKey) {
@@ -108,10 +106,11 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   }
   const hints = getNetworkHints(req);
   if (project.policy?.threatFeedEnabled !== false && hints.ip !== 'unavailable') {
+    // Threat-feed matches are network reputation, not proof that this browser/user is malicious.
+    // Keep the signal for audit/analytics; actor-bound DPoP, authorization and WAF findings enforce.
     const reputation = await checkIpReputation(hints.ip);
-    if (reputation.checked && reputation.listed && project.policy?.mode !== 'DRY_RUN') {
-      await recordProjectEvent(project.id, { type: 'THREAT_FEED_IP_BLOCK', blocked: true, timestamp: new Date().toISOString(), ip: hints.ip, country: hints.country, asn: hints.asn, path: String(body.path || '/').split('?')[0].slice(0, 180), feedCount: reputation.feedCount }, { threat: true });
-      return sendJson(res, 403, { error: 'Request blocked by ArixShield IP reputation policy.' });
+    if (reputation.threatConfidence > 0) {
+      await recordProjectEvent(project.id, { type: 'THREAT_FEED_IP_OBSERVED', blocked: false, timestamp: new Date().toISOString(), ip: hints.ip, country: hints.country, asn: hints.asn, path: String(body.path || '/').split('?')[0].slice(0, 180), threatConfidence: reputation.threatConfidence, signals: reputation.signals }, { threat: true });
     }
   }
 
@@ -122,15 +121,16 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   const pathForPolicy = String(body.path ?? req.url ?? '/');
   const asnForPolicy = String(req.headers?.['x-vercel-ip-as-number'] ?? '');
   const humanOnly = /\/(?:login|signup|checkout)(?:\/|\?|$)/i.test(pathForPolicy);
-  const dcBlocked = Boolean(project.policy?.blockDatacenterAsn && humanOnly && DATA_CENTER_ASNS.has(asnForPolicy));
-  if ((inspection?.findings?.length || dcBlocked) && project.policy?.mode !== 'DRY_RUN') {
+  // A valid, single-use DPoP proof is an explicit clearance signal. ASN alone is never a hard block here.
+  const dcSignal = Boolean(project.policy?.blockDatacenterAsn && humanOnly && DATA_CENTER_ASNS.has(asnForPolicy));
+  if (inspection?.findings?.length && project.policy?.mode !== 'DRY_RUN') {
     const hints = getNetworkHints(req);
-    await recordProjectEvent(project.id, { type: dcBlocked ? 'DATACENTER_ASN_BLOCK' : 'WAF_BLOCK', blocked: true, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, country: hints.country, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: dcBlocked ? 90 : inspection?.riskScore ?? 0 }, { threat: true });
+    await recordProjectEvent(project.id, { type: 'WAF_BLOCK', blocked: true, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, country: hints.country, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
     return sendJson(res, 403, { error: 'Request blocked by ArixShield policy.', findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0 });
   }
-  if (inspection?.findings?.length || dcBlocked) {
+  if (inspection?.findings?.length || dcSignal) {
     const hints = getNetworkHints(req);
-    await recordProjectEvent(project.id, { type: 'WAF_OBSERVED', blocked: false, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0 }, { threat: true });
+    await recordProjectEvent(project.id, { type: 'WAF_OBSERVED', blocked: false, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
   }
 
   if (!body.powToken || !(await validatePow(project.id, body.powToken, String(body.powSolution ?? ''), body.signals || {}))) {
@@ -141,12 +141,13 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   const botSignals = body.signals && typeof body.signals === 'object' ? body.signals : {};
   const userAgent = String(req.headers?.['user-agent'] || '');
   const ja4 = String(hints.ja4 || '');
-  const softwareRenderer = /swiftshader|llvmpipe|mesa offscreen|software rasterizer/i.test(String(botSignals.webglRenderer || ''));
-  const appleBrowserClaim = /(?:macintosh|iphone|ipad|ipod).*?(?:safari|applewebkit)/i.test(userAgent);
-  const hardwareContradiction = appleBrowserClaim && softwareRenderer;
+  // Canvas/WebGL availability and software rendering are privacy/enterprise
+  // capability signals, not proof of automation. Never score them as bot evidence.
   const nonBrowserClient = /(?:python-requests|go-http-client|curl\/|undici|node-fetch)/i.test(userAgent);
-  const signalCount = ['webdriver', 'headless', 'automationFlag', 'screenMismatch', 'eventTimingAnomaly', 'prototypeTampered', 'kinematicAnomaly', 'hardwareContradiction', 'nonBrowserClient'].filter((name) => botSignals[name] === true || ({ hardwareContradiction, nonBrowserClient })[name] === true).length;
-  const suspicious = botSignals.webdriver === true || botSignals.headless === true || hardwareContradiction || nonBrowserClient || signalCount >= 2;
+  const keyboardHumanSignal = Number(botSignals.keyboardSamples) >= 3 || Number(botSignals.focusTransitions) >= 3;
+  const signalCount = ['webdriver', 'headless', 'automationFlag', 'screenMismatch', 'eventTimingAnomaly', 'prototypeTampered', 'kinematicAnomaly'].filter((name) => botSignals[name] === true).length + (nonBrowserClient ? 1 : 0);
+  const strongAutomationSignal = botSignals.webdriver === true || botSignals.headless === true || nonBrowserClient;
+  const suspicious = strongAutomationSignal || (signalCount >= 2 && !keyboardHumanSignal);
   const tlsMismatch = Boolean(nonBrowserClient && ja4);
   const path = typeof body.path === 'string' ? body.path.slice(0, 180) : '/';
   const event = {
@@ -166,22 +167,34 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     latencyMs: Math.max(0, Math.min(60000, Number(body.latencyMs) || 0)),
     status: 'OBSERVED',
     dpopVerified: true,
-    riskScore: suspicious ? Math.min(95, 55 + signalCount * 5 + (tlsMismatch ? 5 : 0)) : 0,
-    botSignals: { webdriver: botSignals.webdriver === true, headless: botSignals.headless === true, automationFlag: botSignals.automationFlag === true, screenMismatch: botSignals.screenMismatch === true, eventTimingAnomaly: botSignals.eventTimingAnomaly === true, prototypeTampered: botSignals.prototypeTampered === true, kinematicAnomaly: botSignals.kinematicAnomaly === true, hardwareContradiction, nonBrowserClient, tlsFingerprintPresent: Boolean(ja4), canvasHashPresent: typeof botSignals.canvasPixelHash === 'string' && /^[a-f0-9]{64}$/i.test(botSignals.canvasPixelHash) }
+    riskScore: suspicious ? Math.min(70, 45 + signalCount * 5 + (tlsMismatch ? 5 : 0)) : 0,
+    botSignals: { webdriver: botSignals.webdriver === true, headless: botSignals.headless === true, automationFlag: botSignals.automationFlag === true, screenMismatch: botSignals.screenMismatch === true, eventTimingAnomaly: botSignals.eventTimingAnomaly === true, prototypeTampered: botSignals.prototypeTampered === true, kinematicAnomaly: botSignals.kinematicAnomaly === true, keyboardHumanSignal, keyboardSamples: Math.max(0, Math.min(1000, Number(botSignals.keyboardSamples) || 0)), focusTransitions: Math.max(0, Math.min(1000, Number(botSignals.focusTransitions) || 0)), nonBrowserClient, canvasAvailable: botSignals.canvasAvailable === true, webglAvailable: botSignals.webglAvailable === true, softwareRendererObserved: /swiftshader|llvmpipe|mesa offscreen|software rasterizer/i.test(String(botSignals.webglRenderer || '')), tlsFingerprintPresent: Boolean(ja4), canvasHashPresent: typeof botSignals.canvasPixelHash === 'string' && /^[a-f0-9]{64}$/i.test(botSignals.canvasPixelHash) }
   };
   await recordProjectEvent(project.id, event);
-  return sendJson(res, 200, { ok: true, result: 'OBSERVED', dpopVerified: true, riskScore: event.riskScore });
+  const clearanceNonce = randomToken(24);
+  const clearance = await createSignedToken({
+    projectId: project.id,
+    dpopThumbprint: proofResult.thumbprint,
+    // Clearance continuity is cryptographic (DPoP thumbprint), not network-bound.
+    riskScore: event.riskScore,
+    singleUseNonce: clearanceNonce,
+    issuedAt: Date.now(),
+    exp: Date.now() + 60000
+  }, 'browser-clearance');
+  return sendJson(res, 200, { ok: true, result: 'CLEARED', dpopVerified: true, riskScore: event.riskScore, clearanceTicket: clearance, expiresInSeconds: 60 });
 }
 
 async function serverEvent(body, req, res) {
   const serverKey = req.headers?.['x-arix-server-key'];
   const resolved = await resolveProjectFromApiKey(serverKey);
-  if (!resolved || resolved.mapping.type !== 'server') return sendJson(res, 401, { error: 'Invalid server integration key.' });
+  if (!resolved || !['server', 'server-retiring'].includes(resolved.mapping.type) || (resolved.mapping.type === 'server-retiring' && Number(resolved.mapping.retireAt || 0) <= Date.now())) return sendJson(res, 401, { error: 'Invalid or retired server integration key.' });
   const project = await getJson(`arix:project:${resolved.mapping.projectId}`);
   if (!project) return sendJson(res, 401, { error: 'Project not found.' });
+  if (resolved.mapping.type === 'server' && resolved.hash !== project.serverKeyHash) return sendJson(res, 401, { error: 'Server integration key has been rotated or revoked.' });
+  res.setHeader?.('X-Arix-Epoch', String(Math.max(0, Number(project.keyEpoch) || 0)));
   const action = String(body.action || 'server-event');
   const recordOutcomeLimit = Math.max(600, Math.min(100000, Number(process.env.ARIX_RECORD_OUTCOME_LIMIT_PER_MINUTE) || 10000));
-  const actionLimits = { 'get-policy': 600, 'check-limit': 30000, 'check-abuse': 30000, 'check-reputation': 30000, 'record-outcome': recordOutcomeLimit, 'honeypot': 120, 'watermark-material': 5000, 'server-event': 900 };
+  const actionLimits = { 'get-policy': 600, 'check-limit': 30000, 'check-abuse': 30000, 'check-reputation': 30000, 'record-outcome': recordOutcomeLimit, 'honeypot': 120, 'watermark-material': 5000, 'register-chameleon-id': 5000, 'server-event': 900, 'consume-clearance': 30000, 'consume-dpop': 30000, 'consume-flow': 30000, 'acquire-concurrency': 30000, 'release-concurrency': 30000, 'record-cost': 30000 };
   const actionQuota = await rateLimit({ key: `arix:server-action:${action}:${project.id}:${resolved.hash}`, algorithm: 'TOKEN_BUCKET', limit: actionLimits[action] || 300, windowMs: 60000 });
   if (!actionQuota.allowed) return sendJson(res, 429, { error: `ArixShield ${action} quota exceeded.` }, { 'Retry-After': String(Math.max(1, Math.ceil(actionQuota.retryAfterMs / 1000))) });
   if (body.action === 'honeypot') {
@@ -190,13 +203,23 @@ async function serverEvent(body, req, res) {
     const actorId = String(body.actorId || 'anonymous').slice(0, 180);
     const ip = String(body.ip || '').slice(0, 64);
     const ban = await banActorForHoneypot(project.id, actorId, ip);
+    const ja4 = process.env.VERCEL === '1' ? String(body.ja4 || '').slice(0, 160) : '';
+    const ja4Hash = ja4 ? await sha256Hex(`${project.id}:${ja4}`) : null;
+    if (ja4Hash && ban.actorHash) await setString(`arix:trap:ja4:${project.id}:${ja4Hash}:${ban.actorHash}`, String(Date.now()), 600);
     await recordProjectEvent(project.id, {
-      type: 'HONEYPOT_ROUTE_HIT', blocked: true, reason: 'Configured honeypot path accessed',
+      type: 'HONEYPOT_ROUTE_HIT', blocked: Boolean(ban.actorHash), reason: 'Reconnaissance route accessed',
       timestamp: new Date().toISOString(), path, method: String(body.method || 'GET').toUpperCase().slice(0, 12),
-      ipHint: ip, actorHash: ban.actorHash, banUntil: new Date(ban.until).toISOString(),
+      ipHint: ip, actorHash: ban.actorHash, ja4Hash, banUntil: new Date(ban.until).toISOString(),
       mirage: mirage.data
     }, { threat: true });
     return sendJson(res, 200, { ...mirage, arix: { mode: 'PHANTOM_SANDBOX', synthetic: true } });
+  }
+  if (body.action === 'register-chameleon-id') {
+    const canaryId = String(body.canaryId || '').toLowerCase();
+    const exposedId = String(body.exposedId ?? '');
+    if (!/^[a-f0-9]{24}$/.test(canaryId) || !exposedId || exposedId.length > 128 || /[\u0000-\u001f\u007f]/.test(exposedId)) return sendJson(res, 400, { error: 'Invalid chameleon identifier registration.' });
+    await storeChameleonExposedId(project.id, canaryId, exposedId);
+    return sendJson(res, 200, { ok: true, registered: true });
   }
   if (body.action === 'watermark-material') {
     const sessionId = String(body.sessionId || '').slice(0, 100);
@@ -208,7 +231,11 @@ async function serverEvent(body, req, res) {
     });
     const canaryRowsEnabled = typeof body.canaryRowsEnabled === 'boolean' ? body.canaryRowsEnabled : project.policy?.canaryRowsEnabled === true;
     let canaryKey = null;
+    let canaryId = null;
     if (canaryRowsEnabled) {
+      canaryId = await createChameleonCanaryId(project.id, sessionId);
+      const sessionIdHash = await sha256Hex(`${project.id}:${sessionId}`);
+      await storeChameleonCanary(project.id, canaryId, { sessionIdHash, userId: body.userId, ip: body.ip });
       const activeCanaryKey = `arix:canary:active:${project.id}`;
       canaryKey = await getString(activeCanaryKey);
       if (!canaryKey) {
@@ -221,10 +248,10 @@ async function serverEvent(body, req, res) {
         await setString(`arix:key:${canaryHash}`, JSON.stringify({ projectId: project.id, type: 'canary', createdAt: Date.now() }), 60 * 60 * 24 * 90);
       }
     }
-    return sendJson(res, 200, { ok: true, marker, canaryKey, attributionTtlDays: 90 });
+    return sendJson(res, 200, { ok: true, marker, canaryKey, canaryId, projectId: project.id, attributionTtlDays: 90 });
   }
   if (body.action === 'check-abuse') {
-    const actorId = String(body.actorId || body.ip || 'anonymous').slice(0, 180);
+    const actorId = String(body.actorId || 'anonymous').slice(0, 180);
     const result = await isActorBackedOff(project.id, actorId, String(body.ip || '').slice(0, 64));
     return sendJson(res, 200, { ok: true, ...result });
   }
@@ -232,12 +259,26 @@ async function serverEvent(body, req, res) {
     const ip = String(body.ip || '').slice(0, 64);
     const userAgent = String(body.userAgent || '').slice(0, 240);
     const provider = String(body.provider || '').slice(0, 40);
+    const asn = String(body.asn || '').slice(0, 16);
+    const actorId = String(body.actorId || 'anonymous').slice(0, 180);
+    const path = String(body.path || '/').split('?')[0].slice(0, 180);
     const [reputation, crawler] = await Promise.all([checkIpReputation(ip), verifyForwardConfirmedCrawler(ip, userAgent)]);
     const configuredProvider = provider ? verifyConfiguredProviderIp(ip, provider) : { verified: false, provider: null };
-    return sendJson(res, 200, { ok: true, reputation, crawler, configuredProvider });
+    const verifiedSource = crawler.verified === true || configuredProvider.verified === true;
+    const datacenter = DATA_CENTER_ASNS.has(asn);
+    const correlation = await isActorBackedOff(project.id, actorId, ip);
+    const actorScore = Math.max(0, Math.min(100, Number(correlation.actorScore) || 0));
+    const subnetScore = Math.max(0, Math.min(100, Number(correlation.subnetScore) || 0));
+    let threatConfidence = Math.min(100, Number(reputation.threatConfidence) || 0) + (datacenter ? 20 : 0) + Math.max(actorScore, subnetScore);
+    if (verifiedSource) threatConfidence = 0;
+    threatConfidence = Math.max(0, Math.min(100, threatConfidence));
+    // Only accumulated actor-specific evidence may enforce or step-up a visitor.
+    // Shared IP/subnet/ASN reputation is retained as a signal, never a collateral block.
+    const action = verifiedSource ? 'allow' : actorScore >= 65 ? 'block' : actorScore >= 40 ? 'challenge' : 'allow';
+    return sendJson(res, 200, { ok: true, reputation, crawler, configuredProvider, datacenter, threatConfidence, action, correlation: { actorScore, subnetScore, blocked: correlation.blocked === true }, staleFeedWarning: Array.isArray(reputation.staleFeeds) && reputation.staleFeeds.length > 0 });
   }
   if (body.action === 'record-outcome') {
-    const actorId = String(body.actorId || body.userId || body.ip || 'anonymous').slice(0, 180);
+    const actorId = String(body.actorId || body.userId || 'anonymous').slice(0, 180);
     const path = String(body.path || '/').slice(0, 240);
     const status = Math.max(0, Math.min(599, Number(body.status) || 0));
     const outcome = await recordRequestOutcome({
@@ -246,9 +287,35 @@ async function serverEvent(body, req, res) {
       latencyMs: body.latencyMs, country: body.country, city: body.city, asn: body.asn,
       latitude: body.latitude, longitude: body.longitude,
       geoVelocityEnabled: project.policy?.geoVelocityEnabled === true,
-      shadowCatalogEnabled: project.policy?.shadowApiCatalogEnabled === true
+      shadowCatalogEnabled: project.policy?.shadowApiCatalogEnabled === true,
+      resourceCapabilityVerified: body.resourceCapabilityVerified === true
     });
     const securityBlocked = [401, 403, 429].includes(status);
+    const normalizedPathForRisk = path.split('?')[0].toLowerCase();
+    const pathTokens = path.split(/[/?#=&]/).filter(Boolean);
+    const possibleCanaryIds = [...new Set(pathTokens.filter((value) => /^[a-z0-9_-]{12,80}$/i.test(value) || /^\d{10,16}$/.test(value)))].slice(0, 8);
+    for (const possibleId of possibleCanaryIds) {
+      const attribution = await lookupChameleonCanaryByExposedId(project.id, possibleId)
+        || (/^[a-f0-9]{24}$/i.test(possibleId) ? await lookupChameleonCanary(project.id, possibleId.toLowerCase()) : null);
+      if (!attribution) continue;
+      const ban = await banActorForHoneypot(project.id, actorId, String(body.ip || '').slice(0, 64));
+      await recordProjectEvent(project.id, {
+        type: 'CANARY_RECORD_ACCESSED', blocked: Boolean(ban.actorHash), reason: 'A protected record identifier was queried',
+        actorHash: ban.actorHash || outcome.actorHash, canaryId: possibleId,
+        sessionIdHash: attribution.sessionIdHash, leakedUserId: attribution.userId,
+        timestamp: new Date().toISOString(), path: normalizedPathForRisk
+      }, { threat: true, countRequest: false });
+      break;
+    }
+    const riskPoints = (Array.isArray(body.findings) && body.findings.length ? 20 : 0)
+      + (status === 404 && /\/api\/(?:[^/]+\/)*admin(?:\/|$)/i.test(normalizedPathForRisk) ? 25 : 0)
+      + (/\/api\/(?:login|auth)(?:\/|$)/i.test(normalizedPathForRisk) ? 20 : 0);
+    if (riskPoints > 0) {
+      const correlation = await recordThreatCorrelation(project.id, outcome.actorHash, String(body.ip || ''), riskPoints, 'CROSS_ENDPOINT_BEHAVIOR');
+      if (Math.max(correlation.actorScore, correlation.subnetScore) >= 65) {
+        await recordProjectEvent(project.id, { type: 'CROSS_ENDPOINT_CORRELATION_ALERT', blocked: true, actorHash: outcome.actorHash, path: normalizedPathForRisk, riskScore: Math.max(correlation.actorScore, correlation.subnetScore), timestamp: new Date().toISOString() }, { threat: true, countRequest: false });
+      }
+    }
     await recordApiTelemetryEvent(project.id, {
       type: 'API_REQUEST', blocked: securityBlocked, timestamp: new Date().toISOString(),
       path: path.split('?')[0].slice(0, 220), method: String(body.method || 'GET').toUpperCase().slice(0, 12), status,
@@ -272,40 +339,68 @@ async function serverEvent(body, req, res) {
     const limit = await rateLimit({ key: `arix:server-policy-limit:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 600, windowMs: 60000 });
     if (!limit.allowed) return sendJson(res, 429, { error: 'Policy-read quota exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))) });
     const actorIndexKey = `arix:abuse:ban-actors:${project.id}`;
-    const ipIndexKey = `arix:abuse:ban-ips:${project.id}`;
     const maxEntries = 2000;
-    const [actorCount, ipCount] = await Promise.all([setCard(actorIndexKey), setCard(ipIndexKey)]);
-    if (Number(actorCount) > maxEntries || Number(ipCount) > maxEntries) {
-      return sendJson(res, 200, { ok: true, projectId: project.id, policy: project.policy ?? {}, snapshot: { fetchedAt: Date.now(), actorHashes: [], ipHashes: [], complete: false } });
+    const actorCount = await setCard(actorIndexKey);
+    if (Number(actorCount) > maxEntries) {
+      return sendJson(res, 200, { ok: true, projectId: project.id, keyEpoch: Math.max(0, Number(project.keyEpoch) || 0), policy: project.policy ?? {}, snapshot: { fetchedAt: Date.now(), actorHashes: [], complete: false } });
     }
-    const [actorHashes, ipHashes] = await Promise.all([setMembers(actorIndexKey), setMembers(ipIndexKey)]);
+    const actorHashes = await setMembers(actorIndexKey);
     const actorList = Array.isArray(actorHashes) ? actorHashes : [];
-    const ipList = Array.isArray(ipHashes) ? ipHashes : [];
-    // Ban-index sets are indexes, not the source of truth. A hash remains in
-    // the index until cleanup, so only currently unexpired ban keys may enter
-    // a 30-second SDK snapshot. Bound each read and prune stale index members.
+    // Actor-ban indexes are bounded and cleaned against their expiring source keys.
+    // Legacy IP-ban indexes are deliberately ignored and never enter SDK snapshots.
     const actorBatch = actorList.slice(0, maxEntries);
-    const ipBatch = ipList.slice(0, maxEntries);
-    const [actorStates, ipStates] = await Promise.all([
-      getStrings(...actorBatch.map((hash) => `arix:abuse:ban:${project.id}:${hash}`)),
-      getStrings(...ipBatch.map((hash) => `arix:abuse:ban:${project.id}:${hash}`))
-    ]);
+    const actorStates = await getStrings(...actorBatch.map((hash) => `arix:abuse:ban:${project.id}:${hash}`));
     const now = Date.now();
     const activeActors = []; const staleActors = [];
-    const activeIps = []; const staleIps = [];
     actorBatch.forEach((hash, index) => (Number(actorStates[index]) > now ? activeActors : staleActors).push(hash));
-    ipBatch.forEach((hash, index) => (Number(ipStates[index]) > now ? activeIps : staleIps).push(hash));
-    await Promise.all([
-      setRemoveMany(`arix:abuse:ban-actors:${project.id}`, staleActors),
-      setRemoveMany(`arix:abuse:ban-ips:${project.id}`, staleIps)
-    ]);
+    await setRemoveMany(`arix:abuse:ban-actors:${project.id}`, staleActors);
     return sendJson(res, 200, {
-      ok: true, projectId: project.id, policy: project.policy ?? {},
-      snapshot: {
-        fetchedAt: now, actorHashes: activeActors, ipHashes: activeIps,
-        complete: actorList.length <= maxEntries && ipList.length <= maxEntries
-      }
+      ok: true, projectId: project.id, keyEpoch: Math.max(0, Number(project.keyEpoch) || 0), policy: project.policy ?? {},
+      snapshot: { fetchedAt: now, actorHashes: activeActors, complete: actorList.length <= maxEntries }
     });
+  }
+  if (body.action === 'consume-dpop') {
+    const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+    if (!/^[a-f0-9]{64}$/i.test(nonce)) return sendJson(res, 400, { error: 'Invalid DPoP replay identifier.' });
+    const result = await setString(`arix:dpop:customer:${project.id}:${nonce}`, '1', 120, true);
+    if (result !== 'OK') return sendJson(res, 409, { error: 'DPoP proof has already been used.' });
+    return sendJson(res, 200, { ok: true, consumed: true });
+  }
+  if (body.action === 'consume-flow') {
+    const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+    if (!/^[a-f0-9-]{32,64}$/i.test(nonce)) return sendJson(res, 400, { error: 'Invalid workflow breadcrumb nonce.' });
+    const nonceHash = await sha256Hex(nonce);
+    const result = await setString(`arix:flow-used:${project.id}:${nonceHash}`, '1', 900, true);
+    if (result !== 'OK') return sendJson(res, 409, { error: 'Workflow breadcrumb has already been consumed.' });
+    return sendJson(res, 200, { ok: true, consumed: true });
+  }
+  if (body.action === 'consume-clearance') {
+    const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+    if (nonce.length < 20 || nonce.length > 128) return sendJson(res, 400, { error: 'Invalid clearance nonce.' });
+    const nonceHash = await sha256Hex(nonce);
+    const result = await setString(`arix:clearance-used:${project.id}:${nonceHash}`, '1', 70, true);
+    if (result !== 'OK') return sendJson(res, 409, { error: 'Clearance ticket has already been consumed.' });
+    return sendJson(res, 200, { ok: true, consumed: true });
+  }
+  if (body.action === 'acquire-concurrency') {
+    const actorHash = String(body.actorHash || '').slice(0, 128);
+    const requestId = String(body.requestId || '').slice(0, 128);
+    if (!actorHash || !requestId) return sendJson(res, 400, { error: 'Concurrency actor and request identifiers are required.' });
+    const lease = await acquireConcurrency(`arix:conc:${project.id}:${actorHash}`, requestId, { maximum: Math.max(1, Math.min(20, Number(body.maximum) || 3)), ttlMs: Math.max(5000, Math.min(300000, Number(body.ttlMs) || 120000)) });
+    return sendJson(res, lease.allowed ? 200 : 429, { ok: lease.allowed, ...lease });
+  }
+  if (body.action === 'release-concurrency') {
+    const actorHash = String(body.actorHash || '').slice(0, 128);
+    const requestId = String(body.requestId || '').slice(0, 128);
+    if (!actorHash || !requestId) return sendJson(res, 400, { error: 'Concurrency actor and request identifiers are required.' });
+    const removed = await releaseConcurrency(`arix:conc:${project.id}:${actorHash}`, requestId);
+    return sendJson(res, 200, { ok: true, released: removed > 0 });
+  }
+  if (body.action === 'record-cost') {
+    const cost = Math.max(0, Math.min(1000000, Number(body.actualCost) || 0));
+    if (!Number.isFinite(cost)) return sendJson(res, 400, { error: 'Invalid actual cost.' });
+    await increment(`arix:metrics:${project.id}:actual_cost_units`, Math.ceil(cost));
+    return sendJson(res, 202, { ok: true, recorded: true });
   }
   if (body.action === 'check-limit') {
     const control = await rateLimit({ key: `arix:server-quota-api:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 30000, windowMs: 60000 });
@@ -318,10 +413,30 @@ async function serverEvent(body, req, res) {
     if (!scope || scope.length > 256 || !['TOKEN_BUCKET', 'SLIDING_WINDOW', 'FIXED_WINDOW', 'LEAKY_BUCKET'].includes(algorithm)) return sendJson(res, 400, { error: 'Invalid distributed quota scope or algorithm.' });
     if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 10000 || !Number.isInteger(windowMs) || windowMs < 100 || windowMs > 3600000 || !Number.isInteger(weight) || weight < 1 || weight > 10000) return sendJson(res, 400, { error: 'Invalid distributed quota limit, window or weight.' });
     const projectCeiling = Math.max(1, Math.min(10000, Number(project.policy?.rateLimitPerMinute) || 120));
-    const effectiveLimit = Math.min(requestedLimit, projectCeiling);
+    // SDK-provided limits are authenticated with the server integration key.
+    // Permit only the documented maximum 4x actor trust multiplier, never an
+    // arbitrary quota increase above the configured project policy.
+    const effectiveLimit = Math.min(requestedLimit, projectCeiling * 4, 10000);
     if (weight > effectiveLimit) return sendJson(res, 400, { error: 'Quota weight cannot exceed the effective project limit.' });
-    const scopeHash = await sha256Hex(scope);
-    const decision = await rateLimit({ key: `arix:customer-quota:${project.id}:${algorithm}:${windowMs}:${scopeHash}`, algorithm, limit: effectiveLimit, windowMs, weight });
+    let decision;
+    if (Array.isArray(body.dimensions) && body.dimensions.length > 0) {
+      if (body.dimensions.length > 8) return sendJson(res, 400, { error: 'Too many quota dimensions.' });
+      const dimensions = [];
+      for (const item of body.dimensions) {
+        const name = String(item?.name || '').toLowerCase();
+        const dimensionScope = String(item?.scope || '');
+        const allowedNames = ['actor', 'subnet', 'tenant', 'endpoint'];
+        const aggregateCap = name === 'subnet' ? Math.min(100000, projectCeiling * 500) : (name === 'tenant' || name === 'endpoint') ? Math.min(100000, projectCeiling * 100) : effectiveLimit;
+        const dimLimit = Math.min(aggregateCap, Math.max(1, Math.floor(Number(item?.limit) || effectiveLimit)));
+        if (!allowedNames.includes(name) || !dimensionScope || dimensionScope.length > 256 || dimLimit > 100000) return sendJson(res, 400, { error: 'Invalid quota dimension.' });
+        const hash = await sha256Hex(dimensionScope);
+        dimensions.push({ key: `arix:customer-quota:${project.id}:${name}:${hash}`, limit: dimLimit, windowMs });
+      }
+      decision = await rateLimitMulti({ dimensions, weight });
+    } else {
+      const scopeHash = await sha256Hex(scope);
+      decision = await rateLimit({ key: `arix:customer-quota:${project.id}:${algorithm}:${windowMs}:${scopeHash}`, algorithm, limit: effectiveLimit, windowMs, weight });
+    }
     return sendJson(res, 200, { ok: true, decision: { ...decision, limit: effectiveLimit, algorithm, windowMs } });
   }
   const limit = await rateLimit({ key: `arix:server-event-limit:${project.id}:${resolved.hash}`, algorithm: 'SLIDING_WINDOW', limit: 600, windowMs: 60000 });
@@ -343,6 +458,8 @@ async function serverEvent(body, req, res) {
 }
 
 async function handler(req, res) {
+  const integrity = await verifyRuntimeIntegrity();
+  if (!integrity.ok) return sendJson(res, 503, { error: 'Runtime integrity verification failed.', code: 'RUNTIME_INTEGRITY_FAILURE', issues: integrity.issues });
   if (req.method === 'OPTIONS') {
     responseCors(req, res, '*');
     res.statusCode = 204;
@@ -365,12 +482,15 @@ async function handler(req, res) {
     }
     const originHeader = req.headers?.origin;
     if (originHeader && !normalizeOrigin(originHeader)) return sendJson(res, 403, { error: 'Invalid request origin.' });
-    const ingressIp = typeof req.headers?.['x-real-ip'] === 'string' ? req.headers['x-real-ip'].split(',')[0].trim() : '';
-    const cachedProjectId = await getCachedProjectIdForApiKey(validServerKeyShape ? serverKeyHeader : browserKeyHeader);
-    if (cachedProjectId && isIpLocallyBlocked(cachedProjectId, ingressIp)) return sendJson(res, 429, { error: 'Request blocked by ArixShield abuse controls.' }, { 'Cache-Control': 'no-store', 'Retry-After': '60' });
-    if (process.env.ARIX_PREBODY_THREAT_FEED_BLOCK === 'true' && isIpInLoadedThreatFeed(ingressIp)) return sendJson(res, 403, { error: 'Request blocked by ArixShield threat-feed policy.' }, { 'Cache-Control': 'no-store' });
+    // Reject parser-ambiguous headers before buffering or parsing an untrusted body.
+    const headerInspection = inspectRequest({ method: req.method, url: req.url, headers: req.headers, rawHeaders: req.rawHeaders, httpVersion: req.httpVersion, contentLength: contentLengthHeader, maxBodyBytes: 36000 });
+    if (headerInspection.findings.some((item) => ['HTTP_SMUGGLING_HEADERS', 'HTTP_HEADER_INJECTION', 'HTTP2_CONNECTION_SPECIFIC_HEADER', 'DUPLICATE_HEADER'].includes(item.id))) {
+      return sendJson(res, 400, { error: 'Request header consistency check failed.' });
+    }
+    // Never pre-body hard-block by ingress IP: this endpoint serves users behind
+    // shared carrier/office/VPN addresses. Actor bans are evaluated after auth.
     const body = await readJson(req, 36000);
-    if (['server-event', 'get-policy', 'check-limit', 'check-abuse', 'check-reputation', 'record-outcome', 'honeypot', 'watermark-material'].includes(body.action)) return await serverEvent(body, req, res);
+    if (['server-event', 'get-policy', 'check-limit', 'check-abuse', 'check-reputation', 'record-outcome', 'honeypot', 'watermark-material', 'register-chameleon-id', 'consume-clearance', 'consume-dpop', 'consume-flow', 'acquire-concurrency', 'release-concurrency', 'record-cost'].includes(body.action)) return await serverEvent(body, req, res);
 
     const apiKey = req.headers?.['x-arix-key'];
     const resolved = await resolveProjectFromApiKey(apiKey);
@@ -387,7 +507,7 @@ async function handler(req, res) {
     }
     if (resolved.mapping.type !== 'live') return sendJson(res, 401, { error: 'This key type cannot be used for browser telemetry.' });
 
-    const inspection = inspectRequest({ method: req.method, url: req.url, headers: req.headers, body });
+    const inspection = inspectRequest({ method: req.method, url: req.url, headers: req.headers, rawHeaders: req.rawHeaders, httpVersion: req.httpVersion, body });
     return await browserVisit(body, req, res, resolved.mapping, project, inspection);
   } catch (error) {
     console.error('[ArixShield] /api/shield request failed:', error?.stack || error);

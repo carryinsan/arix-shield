@@ -57,46 +57,95 @@ export function getMasterSecret() {
   return globalThis.__ARIX_LOCAL_MASTER_SECRET__;
 }
 
-const RESOURCE_ID_KEYS = new Set(['id', 'orderid', 'docid', 'documentid', 'accountid', 'invoiceid', 'paymentid', 'resourceid']);
+const RESOURCE_ID_KEYS = new Set(['id', 'orderid', 'docid', 'documentid', 'accountid', 'invoiceid', 'paymentid', 'resourceid', 'recordid', 'customerid', 'userid', 'fileid', 'projectid']);
 const OWNER_ID_KEYS = new Set(['userid', 'user_id', 'ownerid', 'owner_id', 'accountid', 'customerid']);
+const CAPABILITY_MODES = new Set(['read', 'write', 'delete']);
 
-/** Deterministic user-bound capability marker. Requires the existing ARIX_MASTER_SECRET. */
-export function sealResourceId(resourceId, identity) {
-  const id = String(resourceId);
+function capabilityContext(identity) {
+  if (identity && typeof identity === 'object') {
+    const tenantId = String(identity.tenantId || identity.projectId || '').trim();
+    const userId = String(identity.userId || identity.ownerId || '').trim();
+    if (!tenantId || !userId || tenantId.length > 180 || userId.length > 180 || userId.toLowerCase() === 'anonymous') return null;
+    return { version: 2, tenantId, userId };
+  }
   const subject = String(identity || '').trim();
-  if (!subject || subject.toLowerCase() === 'anonymous' || id.length < 1 || id.length > 128 || /[~/\\]/.test(id)) throw new Error('A stable authenticated identity and a safe resource ID are required.');
-  const mac = createHmac('sha256', getMasterSecret()).update(`arix-capability-v1:${subject}:${id}`).digest('hex').slice(0, 32);
-  return `${id}~${mac}`;
+  if (!subject || subject.toLowerCase() === 'anonymous' || subject.length > 180) return null;
+  return { version: 1, userId: subject };
 }
 
-export function verifyResourceId(sealedId, identity) {
-  if (typeof sealedId !== 'string' || typeof identity !== 'string' || !identity.trim()) return null;
-  const match = sealedId.match(/^(.{1,128})~([a-f0-9]{32})$/i);
-  if (!match || /[~/\\]/.test(match[1])) return null;
+function capabilityMode(mode) {
+  const value = String(mode || 'read').toLowerCase();
+  if (!CAPABILITY_MODES.has(value)) throw new TypeError('Capability mode must be read, write or delete.');
+  return value;
+}
+
+function resourceMac(resourceId, context, mode) {
+  const secret = getMasterSecret();
+  const material = context.version === 2
+    ? `arix-cap-v2:${context.tenantId}:${context.userId}:${mode}:${resourceId}`
+    : `arix-capability-v1:${context.userId}:${resourceId}`;
+  return createHmac('sha256', secret).update(material).digest('hex').slice(0, 32);
+}
+
+/**
+ * Deterministic capability marker. Object identities use v2 and bind tenant, user,
+ * permission and resource ID. String identities retain v1 compatibility only.
+ */
+export function sealResourceId(resourceId, identity, mode = 'read') {
+  const id = String(resourceId);
+  const context = capabilityContext(identity);
+  if (!context || id.length < 1 || id.length > 128 || /[~\/\\\u0000-\u001f]/.test(id)) throw new Error('A stable authenticated tenant/user identity and a safe resource ID are required.');
+  if (context.version === 1) return `${id}~${resourceMac(id, context, 'read')}`;
+  const permission = capabilityMode(mode);
+  return `${id}~${permission[0]}~${resourceMac(id, context, permission)}`;
+}
+
+export function verifyResourceId(sealedId, identity, requiredMode = 'read') {
+  if (typeof sealedId !== 'string') return null;
+  const context = capabilityContext(identity);
+  if (!context) return null;
   try {
-    const expected = sealResourceId(match[1], identity).split('~').at(-1);
+    if (context.version === 2) {
+      const match = sealedId.match(/^(.{1,128})~([rwd])~([a-f0-9]{32})$/i);
+      if (!match || /[~\/\\\u0000-\u001f]/.test(match[1])) return null;
+      const mode = ({ r: 'read', w: 'write', d: 'delete' })[match[2].toLowerCase()];
+      if (mode !== capabilityMode(requiredMode)) return null;
+      const expected = resourceMac(match[1], context, mode);
+      const actual = Buffer.from(match[3].toLowerCase(), 'hex');
+      const wanted = Buffer.from(expected, 'hex');
+      return actual.length === wanted.length && timingSafeEqual(actual, wanted) ? match[1] : null;
+    }
+    const match = sealedId.match(/^(.{1,128})~([a-f0-9]{32})$/i);
+    if (!match || /[~\/\\\u0000-\u001f]/.test(match[1])) return null;
+    const expected = resourceMac(match[1], context, 'read');
     const actual = Buffer.from(match[2].toLowerCase(), 'hex');
     const wanted = Buffer.from(expected, 'hex');
     return actual.length === wanted.length && timingSafeEqual(actual, wanted) ? match[1] : null;
   } catch { return null; }
 }
 
-export function sealResourceIdsInPayload(payload, identity, depth = 0) {
+function looksLikeId(value) {
+  const text = String(value);
+  return /^\d{1,20}$/.test(text) || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text) || /^[A-Za-z0-9_-]{20,128}$/.test(text);
+}
+
+export function sealResourceIdsInPayload(payload, identity, depth = 0, mode = 'read') {
   if (depth > 24 || payload === null || typeof payload !== 'object') return payload;
-  if (Array.isArray(payload)) return payload.map((value) => sealResourceIdsInPayload(value, identity, depth + 1));
-  const output = {};
+  if (Array.isArray(payload)) return payload.map((value) => sealResourceIdsInPayload(value, identity, depth + 1, mode));
+  const output = Object.create(null);
   for (const [key, value] of Object.entries(payload)) {
     if (RESOURCE_ID_KEYS.has(key.toLowerCase()) && (typeof value === 'string' || typeof value === 'number') && String(value).length <= 128 && !String(value).includes('~')) {
-      try { output[key] = sealResourceId(value, identity); } catch { output[key] = value; }
-    } else output[key] = sealResourceIdsInPayload(value, identity, depth + 1);
+      try { output[key] = sealResourceId(value, identity, mode); } catch { output[key] = value; }
+    } else output[key] = sealResourceIdsInPayload(value, identity, depth + 1, mode);
   }
   return output;
 }
 
 /** Returns only an ownership mismatch; it never guesses ownership from arbitrary fields. */
 export function findOwnershipMismatch(payload, identity, additionalFields = []) {
-  const subject = String(identity || '').trim();
-  if (!subject || subject.toLowerCase() === 'anonymous' || !payload || typeof payload !== 'object') return null;
+  const context = capabilityContext(identity);
+  const subject = context?.userId || '';
+  if (!subject || !payload || typeof payload !== 'object') return null;
   const fields = new Set([...OWNER_ID_KEYS, ...(Array.isArray(additionalFields) ? additionalFields.map((field) => String(field).toLowerCase()) : [])]);
   const emailIdentity = subject.includes('@');
   if (emailIdentity) fields.add('email');
@@ -113,9 +162,42 @@ export function findOwnershipMismatch(payload, identity, additionalFields = []) 
   return null;
 }
 
-export function rewriteCapabilityPath(url, identity, { requireSealed = true, idPattern = null } = {}) {
+function requiredModeForMethod(method) {
+  const verb = String(method || 'GET').toUpperCase();
+  return verb === 'DELETE' ? 'delete' : ['POST', 'PUT', 'PATCH'].includes(verb) ? 'write' : 'read';
+}
+
+function rewriteBodyCapabilities(value, identity, mode, { requireSealed = true, depth = 0 } = {}) {
+  if (depth > 24 || value === null || typeof value !== 'object') return { value, invalid: false, verified: 0 };
+  if (Array.isArray(value)) {
+    let invalid = false; let verified = 0;
+    const output = value.map((child) => { const result = rewriteBodyCapabilities(child, identity, mode, { requireSealed, depth: depth + 1 }); invalid ||= result.invalid; verified += result.verified || 0; return result.value; });
+    return { value: output, invalid, verified };
+  }
+  const output = Object.create(null);
+  let invalid = false; let verified = 0;
+  for (const [key, child] of Object.entries(value)) {
+    if (RESOURCE_ID_KEYS.has(key.toLowerCase()) && (typeof child === 'string' || typeof child === 'number')) {
+      const raw = String(child);
+      const clean = verifyResourceId(raw, identity, mode);
+      if (clean !== null) { output[key] = clean; verified++; }
+      else if (requireSealed && !raw.includes('~')) { invalid = true; output[key] = child; }
+      else if (raw.includes('~')) { invalid = true; output[key] = child; }
+      else output[key] = child;
+    } else {
+      const result = rewriteBodyCapabilities(child, identity, mode, { requireSealed, depth: depth + 1 });
+      output[key] = result.value; invalid ||= result.invalid; verified += result.verified || 0;
+    }
+  }
+  return { value: output, invalid, verified };
+}
+
+/** Verify and unseal resource capabilities in path, query string and JSON body. */
+export function rewriteCapabilityRequest(url, body, identity, { requireSealed = true, idPattern = null, method = 'GET', arrayQueryFields = [] } = {}) {
   const parsed = new URL(String(url), 'https://arixshield.invalid');
   let invalid = false;
+  let verifiedResourceIds = 0;
+  const mode = requiredModeForMethod(method);
   const segments = parsed.pathname.split('/');
   for (let index = 0; index < segments.length; index++) {
     let decoded;
@@ -126,16 +208,37 @@ export function rewriteCapabilityPath(url, identity, { requireSealed = true, idP
       if (requireSealed && looksLikeResourceId) invalid = true;
       continue;
     }
-    const clean = verifyResourceId(decoded, identity);
+    const clean = verifyResourceId(decoded, identity, mode);
     if (clean === null) { invalid = true; break; }
     segments[index] = encodeURIComponent(clean);
+    verifiedResourceIds++;
   }
   parsed.pathname = segments.join('/');
-  const rewritten = `${parsed.pathname}${parsed.search}`;
-  return { url: rewritten, invalid };
+  const permittedArrays = new Set(arrayQueryFields.map((v) => String(v).toLowerCase()));
+  const queryKeys = new Set();
+  for (const key of parsed.searchParams.keys()) {
+    const lower = key.toLowerCase();
+    if (queryKeys.has(lower) && !permittedArrays.has(lower)) invalid = true;
+    queryKeys.add(lower);
+    if (!RESOURCE_ID_KEYS.has(lower)) continue;
+    const values = parsed.searchParams.getAll(key);
+    if (values.length !== 1) { invalid = true; continue; }
+    const clean = verifyResourceId(values[0], identity, mode);
+    if (clean === null) { if (requireSealed || values[0].includes('~')) invalid = true; }
+    else { parsed.searchParams.set(key, clean); verifiedResourceIds++; }
+  }
+  const bodyResult = rewriteBodyCapabilities(body, identity, mode, { requireSealed });
+  invalid ||= bodyResult.invalid;
+  verifiedResourceIds += bodyResult.verified || 0;
+  return { url: `${parsed.pathname}${parsed.search}`, body: bodyResult.value, invalid, verifiedResourceIds, capabilityVerified: !invalid && verifiedResourceIds > 0 };
 }
 
-export async function derivePassword(password, salt = randomToken(16), iterations = 240000) {
+export function rewriteCapabilityPath(url, identity, { requireSealed = true, idPattern = null, method = 'GET' } = {}) {
+  const result = rewriteCapabilityRequest(url, null, identity, { requireSealed, idPattern, method });
+  return { url: result.url, invalid: result.invalid };
+}
+
+export async function derivePassword(password, salt = randomToken(16), iterations = 600000) {
   const material = await cryptoApi.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
   const bits = await cryptoApi.subtle.deriveBits({ name: 'PBKDF2', salt: base64urlDecode(salt), iterations, hash: 'SHA-256' }, material, 256);
   return { salt, hash: base64urlEncode(bits), iterations };
@@ -182,6 +285,41 @@ export async function verifyDpopProof({ proof, method, url, projectId, redisGetS
     const inserted = await redisGetSet(replayKey, '1', 120, true);
     if (inserted !== 'OK') return { valid: false, reason: 'DPOP_REPLAY' };
     return { valid: true, thumbprint };
+  } catch {
+    return { valid: false, reason: 'DPOP_VALIDATION_ERROR' };
+  }
+}
+
+/** Verify a body-bound DPoP proof for customer API requests without a control-plane lookup. */
+export async function verifyRequestDpopProof({ proof, method, url, bodyBytes = new Uint8Array(), expectedThumbprint = null, clearanceNonce = null, projectId = 'arix' }) {
+  try {
+    if (typeof proof !== 'string' || proof.length > 12000) return { valid: false, reason: 'MISSING_OR_OVERSIZED_DPOP' };
+    const parts = proof.split('.');
+    if (parts.length !== 3) return { valid: false, reason: 'MALFORMED_DPOP' };
+    const header = JSON.parse(Buffer.from(base64urlDecode(parts[0])).toString('utf8'));
+    const payload = JSON.parse(Buffer.from(base64urlDecode(parts[1])).toString('utf8'));
+    if (header.typ !== 'dpop+jwt' || header.alg !== 'ES256' || !header.jwk || !payload.jti) return { valid: false, reason: 'INVALID_DPOP_HEADER' };
+    const thumbprint = await dpopThumbprint(header.jwk);
+    const expectedUrl = new URL(String(url)); expectedUrl.hash = '';
+    if (payload.htm !== String(method).toUpperCase() || payload.htu !== expectedUrl.href) return { valid: false, reason: 'DPOP_TARGET_MISMATCH' };
+    if (expectedThumbprint && thumbprint !== expectedThumbprint) return { valid: false, reason: 'DPOP_KEY_MISMATCH' };
+    if (clearanceNonce && payload.nonce !== clearanceNonce) return { valid: false, reason: 'DPOP_CLEARANCE_NONCE_MISMATCH' };
+    const now = Math.floor(Date.now() / 1000);
+    if (!Number.isInteger(payload.iat) || Math.abs(now - payload.iat) > 45) return { valid: false, reason: 'DPOP_EXPIRED' };
+    if (typeof payload.jti !== 'string' || payload.jti.length < 12 || payload.jti.length > 128) return { valid: false, reason: 'INVALID_DPOP_JTI' };
+    const digest = await sha256(bodyBytes instanceof Uint8Array ? bodyBytes : new Uint8Array(bodyBytes));
+    if (payload.ath !== base64urlEncode(digest)) return { valid: false, reason: 'DPOP_BODY_HASH_MISMATCH' };
+    const publicKey = await cryptoApi.subtle.importKey('jwk', header.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    const verified = await cryptoApi.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, base64urlDecode(parts[2]), encoder.encode(`${parts[0]}.${parts[1]}`));
+    if (!verified) return { valid: false, reason: 'DPOP_SIGNATURE_INVALID' };
+    const jtiHash = await sha256Hex(payload.jti);
+    const replayKey = `${projectId}:${jtiHash}`;
+    const nowMs = Date.now();
+    for (const [key, expiry] of dpopReplayRing) if (expiry <= nowMs) dpopReplayRing.delete(key);
+    if (dpopReplayRing.has(replayKey)) return { valid: false, reason: 'DPOP_REPLAY' };
+    dpopReplayRing.set(replayKey, nowMs + 15000);
+    if (dpopReplayRing.size > 4096) dpopReplayRing.delete(dpopReplayRing.keys().next().value);
+    return { valid: true, thumbprint, jtiHash };
   } catch {
     return { valid: false, reason: 'DPOP_VALIDATION_ERROR' };
   }
@@ -245,9 +383,13 @@ function parseClearanceJwk(raw) {
 export function getClearancePublicJwk() {
   const privateJwk = parseClearanceJwk(process.env.ARIX_CLEARANCE_PRIVATE_JWK);
   if (!privateJwk) return null;
+  const configuredKid = process.env.ARIX_CLEARANCE_KID;
+  if (configuredKid && privateJwk.kid && configuredKid !== privateJwk.kid) return null;
+  const kid = String(configuredKid || privateJwk.kid || 'arix-clearance-v1');
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(kid)) return null;
   return {
     kty: 'RSA', n: privateJwk.n, e: privateJwk.e,
-    alg: 'RSA-OAEP-256', use: 'enc', kid: String(privateJwk.kid || 'arix-clearance-v1'), ext: true
+    alg: 'RSA-OAEP-256', use: 'enc', kid, ext: true
   };
 }
 
@@ -256,10 +398,14 @@ export async function decryptClearanceJwe(compact) {
   const parts = compact.split('.');
   if (parts.length !== 5 || parts.some((part) => !part)) throw new Error('Malformed compact JWE.');
   const [protectedHeader, encryptedKey, ivPart, cipherPart, tagPart] = parts;
-  const header = JSON.parse(Buffer.from(base64urlDecode(protectedHeader)).toString('utf8'));
-  if (header.alg !== 'RSA-OAEP-256' || header.enc !== 'A256GCM' || header.kid !== String(process.env.ARIX_CLEARANCE_KID || 'arix-clearance-v1')) throw new Error('Unsupported clearance encryption header.');
   const privateJwk = parseClearanceJwk(process.env.ARIX_CLEARANCE_PRIVATE_JWK);
   if (!privateJwk?.d) throw new Error('Clearance decryption key is not configured.');
+  const configuredKid = process.env.ARIX_CLEARANCE_KID;
+  if (configuredKid && privateJwk.kid && configuredKid !== privateJwk.kid) throw new Error('Clearance key identifier does not match the configured private key.');
+  const expectedKid = String(configuredKid || privateJwk.kid || 'arix-clearance-v1');
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(expectedKid)) throw new Error('Invalid clearance key identifier.');
+  const header = JSON.parse(Buffer.from(base64urlDecode(protectedHeader)).toString('utf8'));
+  if (header.alg !== 'RSA-OAEP-256' || header.enc !== 'A256GCM' || header.kid !== expectedKid) throw new Error('Unsupported clearance encryption header.');
   const subtle = cryptoApi.subtle;
   if (!subtle) throw new Error('WebCrypto is unavailable in this runtime.');
   const privateKey = await subtle.importKey('jwk', privateJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);

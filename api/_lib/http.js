@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export function sendJson(res, status, body, extraHeaders = {}) {
   res.statusCode = status;
@@ -36,7 +37,15 @@ export function methodNotAllowed(res, allowed) {
 
 export function setSessionCookie(res, token, maxAgeSeconds, secure = true) {
   const prefix = secure ? '__Host-' : '';
-  res.setHeader('Set-Cookie', `${prefix}arix_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}${secure ? '; Secure' : ''}`);
+  const name = `${prefix}arix_session`;
+  const value = encodeURIComponent(String(token));
+  if (Buffer.byteLength(`${name}=${value}`, 'utf8') > 4096) {
+    throw new RangeError('Session cookie name and value must not exceed 4096 bytes.');
+  }
+  if (!Number.isFinite(Number(maxAgeSeconds))) throw new TypeError('Session cookie Max-Age must be a finite number.');
+  const cookie = `${name}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}${secure ? '; Secure' : ''}`;
+  if (/\r|\n/.test(cookie)) throw new TypeError('Session cookie contains an invalid header character.');
+  res.setHeader('Set-Cookie', cookie);
 }
 
 export function clearSessionCookie(res, secure = true) {
@@ -57,12 +66,28 @@ export function readCookie(req, name) {
 
 export function sameOriginRequest(req) {
   const origin = req.headers?.origin;
-  const host = req.headers?.['x-forwarded-host'] || req.headers?.host;
-  const forwardedProto = String(req.headers?.['x-forwarded-proto'] ?? 'https').split(',')[0].trim().toLowerCase();
-  if (typeof origin !== 'string' || typeof host !== 'string' || !['https', 'http'].includes(forwardedProto)) return false;
+  // Host is the request authority. Forwarded-Host is not accepted here: unless
+  // a proxy contract is enforced outside this process, it can be client supplied.
+  const rawHost = req.headers?.host;
+  if (typeof origin !== 'string' || typeof rawHost !== 'string' || rawHost.length > 255 || /[\s,\/@?#\\\r\n]/.test(rawHost)) return false;
+
+  const trustProxyHeaders = process.env.VERCEL === '1' || process.env.ARIX_TRUST_PROXY_HEADERS === 'true';
+  let requestProtocol;
+  if (trustProxyHeaders) {
+    const forwardedProto = req.headers?.['x-forwarded-proto'];
+    if (typeof forwardedProto !== 'string' || forwardedProto.includes(',')) return false;
+    requestProtocol = forwardedProto.trim().toLowerCase();
+  } else {
+    requestProtocol = req.socket?.encrypted === true ? 'https' : 'http';
+  }
+  if (!['https', 'http'].includes(requestProtocol)) return false;
+
   try {
-    const parsed = new URL(origin);
-    return parsed.origin === `${forwardedProto}://${String(host).toLowerCase()}`;
+    const authority = new URL(`https://${rawHost}`);
+    if (authority.username || authority.password || authority.pathname !== '/' || authority.search || authority.hash) return false;
+    const parsedOrigin = new URL(origin);
+    if (!['https:', 'http:'].includes(parsedOrigin.protocol) || parsedOrigin.username || parsedOrigin.password || parsedOrigin.pathname !== '/' || parsedOrigin.search || parsedOrigin.hash) return false;
+    return parsedOrigin.origin === `${requestProtocol}://${authority.host}`;
   } catch { return false; }
 }
 
@@ -85,9 +110,22 @@ function decodeURIComponentSafe(value) {
 }
 
 export function clientRateKey(req) {
-  // Vercel documents x-real-ip as identical to its overwritten x-forwarded-for value;
-  // treat it only as a rate-limit/telemetry hint, never as authentication proof.
-  const ip = typeof req.headers?.['x-vercel-forwarded-for'] === 'string' ? req.headers['x-vercel-forwarded-for'] : typeof req.headers?.['x-real-ip'] === 'string' ? req.headers['x-real-ip'] : 'unknown';
+  // Trust IP headers only when the request is known to have crossed Vercel's
+  // ingress. Everywhere else, use the direct socket peer and ignore forwarding
+  // headers that a client can forge.
+  let ip = '';
+  if (process.env.VERCEL === '1') {
+    for (const header of ['x-real-ip', 'x-vercel-forwarded-for']) {
+      const raw = req.headers?.[header];
+      if (typeof raw !== 'string') continue;
+      const candidate = raw.split(',')[0].trim();
+      if (candidate && isIP(candidate)) { ip = candidate; break; }
+    }
+  }
+  if (!ip) {
+    const peer = String(req.socket?.remoteAddress || '').trim();
+    ip = peer && isIP(peer) ? peer : 'unknown';
+  }
   const agent = typeof req.headers?.['user-agent'] === 'string' ? req.headers['user-agent'].slice(0, 160) : 'unknown';
   return `${ip.slice(0, 64)}:${agent}`;
 }

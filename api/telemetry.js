@@ -3,6 +3,9 @@ import { sendJson, readJson, methodNotAllowed, sameOriginRequest, getNetworkHint
 import { requireSession } from './_lib/session.js';
 import { getJson, setJson, getProjectDashboardSnapshot } from './_lib/redis.js';
 import { queryClickHouseSnapshot, queryTinybirdSnapshot } from './_lib/analytics.js';
+import { getThreatFeedStatus } from './_lib/reputation.js';
+import { createHmac } from 'node:crypto';
+import { verifyStepUpCredentials } from './_lib/step-up.js';
 
 function parseEvents(values) {
   return (values ?? []).flatMap((value) => {
@@ -59,6 +62,8 @@ async function handler(req, res) {
       const threats = parseEvents(snapshot.threats);
       const metrics = snapshot.metrics;
       let analytics = null;
+      let threatFeedStatus = null;
+      try { threatFeedStatus = await getThreatFeedStatus(); } catch { threatFeedStatus = { loaded: false, warning: true, staleFeeds: ['status-unavailable'] }; }
       try { analytics = await queryClickHouseSnapshot(project.id) || await queryTinybirdSnapshot(project.id); } catch (error) { console.warn('[ArixShield] External analytics dashboard query unavailable:', error?.message || error); }
       const cutoff = Date.now() - 60_000;
       const active = new Map();
@@ -91,6 +96,8 @@ async function handler(req, res) {
         forensicReplay: parseEvents(snapshot.forensicReplay).slice(0, 100),
         apiCatalog: Array.isArray(snapshot.apiCatalog) ? snapshot.apiCatalog : [],
         auditAnchor: snapshot.auditAnchor || null,
+        auditChain: snapshot.auditChain || null,
+        threatFeedStatus,
         analytics
       });
     }
@@ -99,9 +106,21 @@ async function handler(req, res) {
 
     const body = await readJson(req, 8000);
 
+    if (body.action === 'audit-bundle') {
+      const chain = await getProjectDashboardSnapshot(project.id);
+      if (!chain.auditChain?.verified) return sendJson(res, 409, { error: 'Audit chain did not verify; evidence export was refused.' });
+      const secret = process.env.ARIX_MASTER_SECRET;
+      if (typeof secret !== 'string' || Buffer.byteLength(secret) < 32) return sendJson(res, 503, { error: 'ARIX_MASTER_SECRET >= 32 bytes is required to sign evidence.' });
+      const bundle = { schema: 'arixshield.audit-evidence.v1', projectId: String(project.id), createdAt: new Date().toISOString(), auditChain: chain.auditChain };
+      const signature = createHmac('sha256', secret).update(JSON.stringify(bundle)).digest('hex');
+      return sendJson(res, 200, { ok: true, bundle, signature: { algorithm: 'HMAC-SHA256', value: signature } });
+    }
+
     if (body.action === 'origins') {
       const nextOrigins = buildAllowedOrigins(body);
       if (nextOrigins.error) return sendJson(res, 400, { error: nextOrigins.error });
+      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, password: body.password, totpCode: body.totpCode });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
 
       project.origin = nextOrigins.origin;
       project.allowedOrigins = nextOrigins.allowedOrigins;
@@ -160,7 +179,26 @@ async function handler(req, res) {
         nextPolicy[flag] = body[flag];
       }
     }
+    if (body.autoContainmentEnabled !== undefined) {
+      if (typeof body.autoContainmentEnabled !== 'boolean') return sendJson(res, 400, { error: 'autoContainmentEnabled must be boolean.' });
+      nextPolicy.autoContainmentEnabled = body.autoContainmentEnabled;
+    }
+    if (body.alertWebhookUrl !== undefined) {
+      const raw = String(body.alertWebhookUrl || '').trim();
+      if (!raw) nextPolicy.alertWebhookUrl = null;
+      else {
+        if (raw.length > 2048) return sendJson(res, 400, { error: 'Alert webhook URL exceeds 2048 characters.' });
+        let parsed;
+        try { parsed = new URL(raw); } catch { return sendJson(res, 400, { error: 'Alert webhook URL is invalid.' }); }
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) return sendJson(res, 400, { error: 'Alert webhook must be an HTTPS URL without credentials or a fragment.' });
+        nextPolicy.alertWebhookUrl = parsed.href;
+      }
+    }
 
+    if (body.mode === 'DRY_RUN' && project.policy?.mode !== 'DRY_RUN') {
+      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, password: body.password, totpCode: body.totpCode });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
+    }
     project.policy = nextPolicy;
     project.updatedAt = new Date().toISOString();
     await setJson(`arix:project:${project.id}`, project);

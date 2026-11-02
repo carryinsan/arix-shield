@@ -18,9 +18,15 @@ openssl rand -base64 48
 
 Copy `.env.example` into Vercel Project Settings → Environment Variables. Never commit `.env`, private JWK values, server keys, or provider credentials. No new third-party API key is required by the security additions in this release.
 
+## 1A. Password security and step-up verification
+
+New passwords use PBKDF2-HMAC-SHA-256 with 600,000 iterations. Existing lower-iteration hashes remain verifiable and are upgraded after a successful full login. Registration and password changes reject common patterns, ArixShield/project/email context words, and passwords found in the Have I Been Pwned Pwned Passwords corpus. The breach lookup uses its k-anonymity range protocol: only a five-hex-character SHA-1 prefix is sent, never the password. If the service is unavailable, registration/password change fails closed with `503` rather than silently skipping the breach check.
+
+Users can change passwords from the dashboard using the current password; TOTP is also required when enabled. Password changes revoke other sessions and issue a fresh session to the current browser. Origin allowlist changes and transitions from `ENFORCE` to `DRY_RUN` require fresh password proof and TOTP when enabled.
+
 ## 2. Browser clearance encryption and bot signals
 
-Generate a per-deployment RSA-2048 key pair:
+Generate a per-deployment RSA-3072 key pair (minimum 128-bit classical security strength):
 
 ```sh
 npm run generate:clearance-keys
@@ -99,35 +105,60 @@ ArixShield now tracks resource IDs reported in final `200`, `403`, and `404` out
 
 The outbound ownership guard is opt-in (`responseOwnershipGuard: true`) and checks conventional `userId`, `ownerId`, `accountId`, `customerId`, and related fields. Provide a stable authenticated identity through `getOwnershipIdentity` (synchronous in Node; async or sync in Next.js) that returns the same owner value used in response records. The guard cannot detect ownership leaks in payloads with no comparable owner field, and it does not replace a database query constraint such as `WHERE id = ? AND owner_id = ?`.
 
-Capability sealing is an optional stronger guard. Enable `capabilitySealing: true` on both the response-producing and request-protecting SDK integration. The SDK seals recognized ID properties in outgoing JSON using the existing `ARIX_MASTER_SECRET` and the stable authenticated owner identity (a 128-bit truncated HMAC tag), then verifies and strips sealed IDs on the next request. Every numeric/UUID resource-like path segment must be sealed, including IDs in nested paths. Supply `getOwnershipIdentity` explicitly in both SDKs; the Node SDK callback must be synchronous, while the Next.js callback may be async. Do not derive ownership from an unverified client header. Validate all route shapes and update clients/links to use sealed IDs before enabling this for production routes. If your application uses opaque string IDs (for example, cuid/nanoid), configure `capabilityIdPattern` with a developer-owned `RegExp` that matches only resource-ID segments on the protected routes (for example, your app's exact CUID format). Avoid broad patterns that can match static route names. Query-string IDs are not covered by path sealing. Custom ID field names can be configured only by extending the code or mapping to recognized ID fields; all application authorization checks must remain in place.
+Capability sealing is an optional stronger guard. Enable `capabilitySealing: true` on both the response-producing and request-protecting SDK integration. Version-2 HMAC capabilities bind recognized IDs to tenant, user and read/write permission mode using the existing `ARIX_MASTER_SECRET`. The request adapter verifies and rewrites recognized IDs in path segments, query parameters and JSON body fields before the handler runs. Supply a stable authenticated user and tenant context; do not derive either from an unverified client header. Validate all route shapes and update clients/links to use sealed IDs before enabling this for production routes. If your application uses opaque string IDs, configure `capabilityIdPattern` narrowly. Custom ID fields and IDs outside the configured patterns still require application-specific mapping and normal ownership checks. Capability sealing is not a replacement for scoped database queries.
 
 The optional Knuth reserved-ID trap is disabled by default. Set `ARIX_RESERVED_TRAP_ID_SPACE=true` only when your database permanently reserves every integer ID satisfying `(id * 2654435761) % 97 === 0` and can prove that no real record can receive one. This identifies approximately one integer in 97; it does not guarantee a hit within a few dozen probes. Enabling it without reserving the ID space can ban legitimate users who access a real record.
 
+
+## 4A. Route authorization, tenant scoping and BOPLA
+
+The SDK evaluates configured route authorization before calling the protected handler. Supply verified context through `getAuthorizationContext` (`userId`, `tenantId`, roles and permissions). Use `authorization.routes` for method/path rules, roles, permissions, `tenantIsolated`, and an application-specific `preCheck`. Enable `mutationTripwire: true` to deny unconfigured mutating routes and require tenant isolation plus a pre-check on configured mutations. Do not use a generic pre-check that always returns true.
+
+The optional `allowedWriteFields` role map strips fields that a caller cannot write. `restrictedReadFields` strips fields that the caller cannot read from JSON responses. The request context exposes `scopeQuery` to compose tenant and owner predicates for Prisma-style and Mongo-style structured queries. This helper does not intercept direct ORM/driver calls or raw SQL: every repository read and mutation must still enforce ownership, including background jobs and admin paths.
+
+See [SECURITY-UPGRADES.md](SECURITY-UPGRADES.md) for complete Node and Next.js configuration examples, raw-body DPoP integration, workflow configuration, safe outbound fetch and account security behavior.
+
 ## 5. Abuse snapshots, quotas, and Redis outage behavior
 
-- Project policy and currently active actor/IP ban hashes are fetched together and cached by SDKs for up to 30 seconds. If the index exceeds the bounded snapshot size, the SDK falls back to a direct abuse check instead of using a partial snapshot.
+- Project policy and currently active actor-ban hashes are fetched together and cached by SDKs for up to 30 seconds. If the index exceeds the bounded snapshot size, the SDK falls back to a direct abuse check instead of using a partial snapshot.
 - The control plane filters expired bans out of snapshots and prunes stale ban-index members. New bans may take up to 30 seconds to reach SDK instances using a valid cached snapshot.
 - Distributed quota checks can lease up to 15 tokens for a scope. Remaining tokens are consumed locally and expire after at most 15 seconds; the lease reserves quota centrally, so unused tokens may reduce utilization but are not an allowance increase.
-- DPoP uses an in-memory ring as an early replay filter and still checks Redis for cross-instance replay protection.
+- DPoP is bound to the exact request URL, method and raw request-body bytes. A bounded in-memory ring is an early replay filter; Redis `SET NX` is required for cross-instance replay protection. The Node/Express adapter requires the raw-body capture hook shown in `docs/SECURITY-UPGRADES.md`.
 - Event/audit/analytics writes use a durable Upstash Redis pipeline. They are not queued only in process memory and are not promised to survive without Redis.
 
 When Redis is unavailable, the default SDK behavior is fail-closed with `503` rather than silently bypassing a distributed limit. `failOpen: true` is a compatibility override that uses a process-local bucket; it is not global, can be bypassed across new instances, and should not be used where strict quota/security enforcement is required. A signed client-carried counter cannot provide globally consistent rate limits while the shared anti-replay store is unavailable, so the proposed stateless ratchet is not advertised as implemented.
 
-## 6. Optional pre-body threat-feed block
+## 6. Pre-body request validation and key epochs
 
-`ARIX_PREBODY_THREAT_FEED_BLOCK=true` enables a local in-memory threat-feed IP rejection before the `/api/shield` control-plane reads a request body. It is off by default. Enable only after verifying that feeds are loaded, up to date, and appropriate for your false-positive tolerance. This check uses the request IP value supplied by the trusted deployment ingress; do not expose the function directly behind an untrusted proxy that lets clients supply `x-real-ip`.
-
-The pre-body path also validates the existing ArixShield API-key header format, content-length syntax/limit, and Origin syntax. It does not treat header shape as authentication; the key is still resolved and authenticated by the control plane. Its worker-local API-key/project cache may delay key revocation by up to 3 seconds on that instance.
+The `/api/shield` control-plane validates the existing ArixShield API-key header format, content-length syntax/limit, and Origin syntax before reading the request body. Header shape is not authentication; the key is resolved and authenticated by the control plane. IP threat-feed matches are not used for pre-body rejection. Server key mappings are checked against the committed project key hash on each control-plane action; key-epoch headers allow SDK instances to invalidate local policy, snapshot and quota leases when they observe a new epoch. Worker-side cached policy can remain up to 30 seconds between refreshes, so this is not instantaneous fleet-wide revocation.
 
 ## 7. Threat feed worker
 
-`/api/cron/threat-feeds` refreshes bounded public feeds from Spamhaus DROP, FireHOL Level 1, and the Tor bulk exit-node API. It optionally adds AbuseIPDB when `ARIX_ABUSEIPDB_API_KEY` is configured. Feed downloads have byte caps and timeouts; invalid/empty responses are not installed. Successful data is stored in Redis with a 48-hour expiry and evaluated with an in-process IPv4/IPv6 prefix trie.
+`/api/cron/threat-feeds` refreshes bounded public feeds from Spamhaus DROP, FireHOL Level 1, and the Tor bulk exit-node API. It optionally adds AbuseIPDB when `ARIX_ABUSEIPDB_API_KEY` is configured. Feed downloads have byte caps and timeouts; invalid/empty responses are not installed. Successful data retains its original 48-hour freshness expiry; Redis keeps the snapshot through an additional seven-day grace period so the runtime can mark feeds stale and decay their confidence. The feed is evaluated with an in-process IPv4/IPv6 prefix trie.
 
-The default `threatFeedEnabled` project policy is on, but no IP is blocked until a feed has been loaded and the relevant enforcement action is enabled. Review feed hits before enabling ENFORCE mode in high false-positive environments. Googlebot and Bingbot are checked through reverse DNS plus forward confirmation. Provider source networks are not guessed; configure verified provider CIDRs in `ARIX_TRUSTED_PROVIDER_CIDRS_JSON` using official current ranges and maintain them yourself.
+The default `threatFeedEnabled` project policy is on. Feed matches, ASN context, and subnet correlation contribute to risk telemetry, but a shared IP/subnet/ASN match alone does not hard-block a visitor. Enforcement decisions in the SDK require actor-specific correlation (or independent WAF, authentication, authorization, and quota findings). Review feed hits before enabling ENFORCE mode in high false-positive environments. Googlebot and Bingbot are checked through reverse DNS plus forward confirmation. Provider source networks are not guessed; configure verified provider CIDRs in `ARIX_TRUSTED_PROVIDER_CIDRS_JSON` using official current ranges and maintain them yourself.
+
+## 7A. Confidence scoring, incident alerts and real-time audit chain
+
+Reputation telemetry combines feed confidence, datacenter ASN context, verified crawler/provider allow signals, and rolling actor/subnet behavior. Shared IP, subnet, ASN, and threat-feed matches are context only: the current `check-reputation` enforcement action is derived from actor-specific correlation, so one listed carrier/office/campus address cannot block unrelated visitors. Fresh Spamhaus DROP matches remain visible as high-confidence network telemetry; FireHOL/Tor and datacenter ASN observations are lower-confidence context. Feeds older than 24 hours are confidence-decayed and shown in the dashboard. Configure provider CIDRs from verified provider sources; do not copy example/test ranges into production.
+
+Security events are appended to a Redis-backed HMAC-SHA256 chain using the existing `ARIX_MASTER_SECRET`. The Redis Lua compare-and-set script is the distributed serialization point. The local fallback is for tests/development, not cross-instance production security. The dashboard audit witness uses browser IndexedDB and trust-on-first-use; keep separate evidence exports and protect administrator endpoints. It is not independent WORM storage.
+
+An optional project `alertWebhookUrl` can receive critical incident events over HTTPS. Requests are signed with an HMAC derived from the existing master secret; do not put a shared API key in the webhook URL. Only enable automatic containment after testing the project policy. The current supported automatic transition is DRY_RUN to ENFORCE; external credential rotation is not automatic.
+
+## 7B. Production integrity manifest
+
+The build checker hashes repository `.js`, `.mjs`, and `.html` files into `docs/INTEGRITY-MANIFEST.json`. The source archive does not contain a production signature or master secret. The committed Vercel build command runs `npm run build`, which regenerates and verifies the manifest using the configured `ARIX_MASTER_SECRET`; production builds fail before deployment if the secret is missing or shorter than 32 bytes. For a local release build, provide the same secret through the environment and run:
+
+```sh
+ARIX_MASTER_SECRET="$ARIX_MASTER_SECRET" npm run build
+```
+
+The production runtime checks manifest coverage and hashes for `api/_lib/*.js`, manifest signature, required master-secret length, RSA-3072 clearance private JWK strength, and HTTPS headers. Regenerate older 2048-bit clearance keys with `npm run generate:clearance-keys` and update both public/private key environment values before deploying this release. Do not commit the master secret or generated private JWK. The static scanner is a dependency-free lexical gate, not a full AST SAST engine; supplement it with independent SAST/SCA/DAST and penetration testing.
 
 ## 8. OpenAPI and Zod schema integration
 
-Pass a parsed OpenAPI v3 document (JavaScript object) or a Zod-like schema with `.safeParse()` to the SDK `schema` option. `compileOpenApiRequestSchema(document, method, path)` returns a validator for an operation's JSON request body. This package does not parse YAML files: parse YAML in your build step and pass the resulting object. Local `$ref` references are supported; remote references and recursive references are rejected. Unsupported OpenAPI composition keywords are not silently evaluated.
+Pass a parsed OpenAPI v3 document (JavaScript object) through `openapiDocument` and set `strictOpenApi: true` to validate operation path/query/header parameters and JSON request bodies. `compileOpenApiRequestSchema(document, method, path)` remains available for body validation. This package does not parse YAML files: parse YAML in your build step and pass the resulting object. Local `$ref` references and bounded `oneOf`, `anyOf` and `allOf` composition are supported; remote and recursive references are rejected.
 
 ## 9. ClickHouse / Tinybird analytics
 

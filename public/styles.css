@@ -196,3 +196,5 @@ td strong { color: var(--ink); font-size: 11px; }
 .snippet-copy-row{display:flex;justify-content:flex-end;margin-top:10px}.snippet-note{margin-top:16px}.decode-button{margin-top:10px}.decode-result{margin-top:13px}.is-danger{color:var(--red)}.is-good{color:var(--green)}.clipboard-helper{position:fixed;opacity:0;pointer-events:none;left:-9999px;top:0}
 
 .policy-save-row{margin-top:15px}.policy-note{margin:15px 0 0}
+
+.threat-warning { margin: 0 0 16px; padding: 11px 14px; border: 1px solid rgba(220, 155, 67, .4); border-radius: 10px; color: #f4c77c; background: rgba(170, 111, 24, .12); font-size: 12px; line-height: 1.5; }

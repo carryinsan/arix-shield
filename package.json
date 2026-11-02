@@ -4,11 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Hybrid API security SDK and serverless control plane for ArixShield",
-  "engines": { "node": "22.x" },
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "check": "node scripts/check.mjs",
     "test": "node --test test/*.test.js",
-    "generate:clearance-keys": "node scripts/generate-clearance-keys.mjs"
+    "generate:clearance-keys": "node scripts/generate-clearance-keys.mjs",
+    "integrity:update": "node scripts/check.mjs --write-manifest",
+    "audit:verify": "node scripts/verify-audit-bundle.mjs",
+    "build": "node scripts/build.mjs"
   },
   "exports": {
     ".": "./sdk/node.js",
