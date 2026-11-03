@@ -34,6 +34,22 @@ The suite exercises API/SDK policy and tenant controls, crypto and key handling,
 - Added `proxy-core.js` and 10 targeted tests covering disabled pass-through, static exclusions, missing/short secret fail-closed behavior, malformed/tampered tokens, header and cookie clearance, duplicate-cookie rejection, origin/path/method binding, invalid URLs, and deployment configuration.
 - The API runtime-integrity path allowlist was updated to permit the new root proxy modules.
 - Verification: 207/207 repository tests; `npm run check` passed (113 JS/MJS syntax checks, 66 API/SDK imports, 116-entry manifest); controlled production-build preflight passed using disposable test-only values.
-- Supplied brutal test pack v1.0.0: 30/30 passed against a clean extraction of the final ZIP, with 50,000 soak operations and 12 OS race workers. 256 KiB inspection p50 was 2.48 ms, p99 4.38 ms (5 ms gate), max 37.10 ms. Event-loop lag p99 was 52.07 ms and the runtime guard raised `EVENT_LOOP_LAG`; the assertion preserving authenticated traffic under load passed.
+- Supplied brutal test pack v1.0.0: final clean-extraction run 30/30 passed, with 50,000 soak operations and 12 OS race workers. 256 KiB inspection p50 was 2.41 ms, p99 4.54 ms (5 ms gate), max 32.20 ms. A prior local run missed the p99 gate at 5.05 ms; no test threshold was changed. Event-loop lag p99 was 53.90 ms and the runtime guard raised `EVENT_LOOP_LAG`; the assertion preserving authenticated traffic under load passed.
 
 **Deployment limitation:** this is local source/build/test verification. The target Vercel project was not deployed from this environment, so confirm that the next Vercel production deployment installs `@vercel/functions@3.10.5`, recognizes `proxy.entrypoint`, and serves `/` and `/arix-client.js` successfully.
+
+
+## Follow-up Vercel build failure — ticket tamper test (2026-11-03)
+
+The Vercel build got past package installation, manifest signing/verification, and 206 of 207 tests. The remaining assertion exposed a non-canonical base64url alias: some decoders accept alternative values in the unused low bits of the final character, so a changed ticket string could decode to the original signature bytes. The original test changed the final character to a fixed `A`, making the failure intermittent depending on the random HMAC output.
+
+The Node verifier and framework-independent Vercel proxy now require canonical unpadded base64url round-trips for both the payload and signature segments before validating the ticket. The regression tests now generate guaranteed byte-equivalent non-canonical aliases for both segments. Valid ticket compatibility, HMAC domain/key derivation, audience, path, method, nonce and expiry checks remain unchanged.
+
+- Targeted canonicalization regression tests: **2 passed, 0 failed**.
+- `npm run check`: passed; 113 JS/MJS syntax checks, 66 API/SDK imports, static scanner and 116-entry source manifest verification.
+- `npm test`: **207 passed, 0 failed, 0 skipped**.
+- Controlled `npm run build`: **passed**, including manifest generation, signature verification and its own 207-test run, using temporary local-only validation secrets and a generated RSA-3072 key. The shipped manifest is reset unsigned; trusted Vercel CI signs it with the configured production secret.
+- External test-pack final clean-extraction rerun: **30 passed, 0 failed, 0 skipped**, 50,000 soak operations and 12 race workers; inspection p50 2.41 ms / p99 4.54 ms / max 32.20 ms against the unchanged 5 ms p99 gate. One immediately preceding local run recorded 5.05 ms and failed only this timing assertion, demonstrating host sensitivity; no threshold or test was weakened.
+- Event-loop lag p99 was 53.90 ms and raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed. This remains a warning to investigate under production-like load.
+
+The final local build is not a live Vercel deployment. The production deployment must still confirm the platform recognizes `proxy.entrypoint` and serves `/` and `/arix-client.js` without middleware invocation errors.

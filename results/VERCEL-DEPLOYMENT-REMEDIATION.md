@@ -16,14 +16,15 @@ The deployed root `middleware.js` statically imported `NextResponse` from `next/
 4. Moved the edge-clearance verification into `proxy-core.js` and converted it to the standard Web `Request` API (`new URL(request.url)` and bounded `Cookie` header parsing).
 5. Preserved the HMAC ticket signing contract and policy: same domain separator, HKDF salt/info, key derivation, payload version, five-minute maximum lifetime, audience, path-prefix boundary, optional method allowlist, nonce shape, and fail-closed responses. Duplicate clearance cookie names are rejected as ambiguous.
 6. Updated the runtime integrity path allowlist and repository check to enforce the configured `proxy.entrypoint`, default export, exact helper dependency, and removal of the obsolete root middleware.
+7. Closed a base64url canonicalization ambiguity in both the Node ticket verifier and edge proxy: both the payload and signature segments must round-trip to the exact canonical unpadded base64url spelling. This rejects alternate trailing-pad-bit aliases that some decoders otherwise map to identical bytes. Regression tests now generate guaranteed same-byte aliases for each segment.
 
 ## Verification
 
-- Repository suite: **207 passed, 0 failed, 0 skipped**.
-- New Vercel middleware tests: **10 passed**.
+- Repository suite after the canonical-encoding fix: **207 passed, 0 failed, 0 skipped**.
+- Vercel middleware / ticket tests: **10 passed**; dedicated targeted rerun for canonical alias rejection: **2 passed**.
 - `npm run check`: passed; 113 JS/MJS syntax checks, 66 API/SDK imports, static checks, 116-file integrity manifest.
 - Controlled `npm run build` preflight: passed with disposable local test-only secrets and a generated temporary RSA-3072 key. No real production credentials were used.
-- Supplied brutal security pack v1.0.0: **30 passed, 0 failed, 0 skipped** on a clean extraction of the final ZIP, with 50,000 soak operations and 12 OS race workers. Inspection p99 for a 256 KiB payload was **4.38 ms** against the pack's 5 ms threshold; p50 was 2.48 ms and max sample 37.10 ms. This run was executed against a clean extraction of the final ZIP. Runtime event-loop p99 lag was 52.07 ms and correctly raised the `EVENT_LOOP_LAG` signal.
+- Supplied brutal security pack v1.0.0 after the canonical-encoding fix: the final clean-extraction run **30 passed, 0 failed, 0 skipped**, with 50,000 soak operations and 12 OS race workers. Inspection p99 for a 256 KiB payload was **4.54 ms** (p50 2.41 ms, max 32.20 ms) against the unchanged 5 ms threshold. One prior local run measured 5.05 ms and missed only this timing gate; the clean-extraction run passed without changing the threshold. Runtime event-loop p99 lag was 53.90 ms and raised `EVENT_LOOP_LAG` while the authenticated-traffic-preservation assertion passed.
 
 ## Deployment instructions
 

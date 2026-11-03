@@ -11,13 +11,14 @@ Runtime: Node.js v22.16.0, Linux x64
 2. **ZIP local-record aliasing** — ZIP inspection now rejects repeated canonical entry names, repeated local-header offsets, and overlapping local-record byte ranges. A regression fixture with two different central-directory names pointing to one local header is rejected.
 3. **Non-finite JSON number** — WAF structure inspection rejects non-finite numeric values, JSON Schema validation rejects them, and raw JSON scanning detects number literals such as `1e309` that overflow JavaScript's finite number range. Finite negative zero remains valid.
 4. **Request inspection latency** — WAF canonicalization avoids unnecessary full-buffer decode/normalization work on ordinary text, and SQL grammar pre-screening avoids uppercasing oversized identifiers. Detection logic remains enabled; no rules were disabled to achieve the measurement.
+5. **Vercel build ticket-test regression** — canonical base64url checks now reject non-canonical trailing-pad-bit aliases in both payload and signature segments in the Node verifier and framework-independent edge proxy. The test suite uses deterministic byte-equivalent aliases rather than a fixed random-dependent final character.
 
 ## Verification performed
 
-- Repository tests against a clean extraction of the final ZIP: **207 passed, 0 failed, 0 skipped** (`npm test`); 10 targeted tests cover the framework-independent Vercel proxy entrypoint and edge-clearance policy.
+- Repository tests after the Vercel ticket-alias correction: **207 passed, 0 failed, 0 skipped** (`npm test`); 10 targeted tests cover the framework-independent Vercel proxy entrypoint and edge-clearance policy; the two canonical-alias targeted tests also passed.
 - Static/syntax/import/integrity check against that extracted ZIP: **passed** (`npm run check`): 113 JS/MJS modules syntax-checked, 66 API/SDK imports resolved, static scanner passed, and the 116-file integrity manifest verified.
-- External brutal test pack v1.0.0 against a clean extraction of the final ZIP: **30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS processes in cross-process race scenarios. Latest 256 KiB inspection: **p50 2.48 ms, p99 4.38 ms, max 37.10 ms** against the 5 ms p99 gate. The 5 ms p99 threshold passed by 0.91 ms. Individual maximum samples exceeded 5 ms and are reported rather than hidden.
-- In the same final-ZIP external run, the runtime guard observed event-loop lag p99 of **52.07 ms** and raised `EVENT_LOOP_LAG`. The assertion that health reporting preserves authenticated traffic under observed overload passed. This is an observed load/host signal, not a claim that the process stayed within its healthy-lag target.
+- External brutal test pack v1.0.0 after the fix, against a clean extraction: final clean-ZIP extraction rerun **30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS processes in cross-process race scenarios. Latest 256 KiB inspection: **p50 2.41 ms, p99 4.54 ms, max 32.20 ms** against the unchanged 5 ms p99 gate. One preceding local rerun measured 5.05 ms and failed only that performance assertion; the clean-ZIP rerun passed, with no threshold change. Individual maximum samples above 5 ms are reported rather than hidden.
+- In the latest clean-extraction external run, the runtime guard observed event-loop lag p99 of **53.90 ms** and raised `EVENT_LOOP_LAG`. The assertion that health reporting preserves authenticated traffic under observed overload passed. This is an observed load/host signal, not a claim that the process stayed within its healthy-lag target.
 - ZIP integrity: final archive opened and passed CRC verification; 166 entries, no duplicate paths, includes `proxy.js` and `proxy-core.js`, excludes obsolete root `middleware.js`.
 
 ## Repeatability / interpretation
@@ -33,3 +34,10 @@ No claim is made that software is bug-free or that no undiscovered vulnerability
 The provided Vercel logs showed `ERR_MODULE_NOT_FOUND: Cannot find package 'next' imported from /var/task/middleware.js`, followed by `MIDDLEWARE_INVOCATION_FAILED`. The archive no longer contains the legacy root `middleware.js`. It now configures `proxy.js` with Vercel's framework-independent `proxy.entrypoint` and uses the standard `Request` API plus pinned `@vercel/functions@3.10.5` for request continuation. The HMAC clearance domain, HKDF salt/info, payload format, TTL ceiling, audience/path/method checks and fail-closed 403/503 behavior are preserved.
 
 Ten targeted middleware tests passed. This is not a live Vercel deployment test; deployment-time installation of the Vercel helper and routing behavior must still be confirmed by the next production deployment.
+
+
+## Canonical edge-clearance ticket encoding regression
+
+The Vercel build logs showed 206/207 tests passing; `grounded-hardening.test.js:57` was intermittently accepting a tampered ticket. The cause was non-canonical base64url pad-bit aliases, not a mismatch in the HMAC secret or ticket policy. Both ticket segments now require exact canonical re-encoding in Node and in the edge proxy. New tests assert that equivalent-byte aliases are rejected for the encoded payload and the signature, and the final controlled production build passed all 207 tests.
+
+The final ZIP was extracted to a clean directory and the external pack passed 30/30; the preceding local run's 5.05 ms p99 miss is retained in the verification history to show benchmark variability. Event-loop lag (53.90 ms p99) continues to flag under synthetic pressure. The final archive has not been deployed to the live Vercel project from this environment.

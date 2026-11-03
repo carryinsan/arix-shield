@@ -34,12 +34,17 @@ export function createEdgeClearanceTicket({ audience, pathPrefix = '/', methods 
 export function verifyEdgeClearanceTicket(ticket, { audience, path, method, now = Date.now(), secret = process.env.ARIX_MASTER_SECRET } = {}) {
   if (typeof ticket !== 'string' || ticket.length > 4096 || !ticket.includes('.')) return false;
   const [encoded, supplied, extra] = ticket.split('.');
-  if (!encoded || !supplied || extra !== undefined || !/^[A-Za-z0-9_-]{43}$/.test(supplied)) return false;
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded) || !supplied || extra !== undefined || !/^[A-Za-z0-9_-]{43}$/.test(supplied)) return false;
   try {
-    const expected = createHmac('sha256', signingKey(secret)).update(`${DOMAIN}.${encoded}`).digest();
+    // Buffer's base64url decoder accepts non-canonical encodings whose unused
+    // trailing pad bits differ. Require a byte-for-byte canonical round trip
+    // for BOTH signed components to prevent multiple textual ticket aliases.
+    const payloadBytes = Buffer.from(encoded, 'base64url');
     const actual = Buffer.from(supplied, 'base64url');
+    if (payloadBytes.toString('base64url') !== encoded || actual.toString('base64url') !== supplied) return false;
+    const expected = createHmac('sha256', signingKey(secret)).update(`${DOMAIN}.${encoded}`).digest();
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return false;
-    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    const payload = JSON.parse(payloadBytes.toString('utf8'));
     if (payload?.v !== 1 || !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp) || payload.exp <= now || payload.iat > now + 30_000 || payload.exp - payload.iat > 300_000) return false;
     if (safeAudience(audience) !== payload.aud) return false;
     const requestedPath = String(path || '/');

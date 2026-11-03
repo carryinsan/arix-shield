@@ -3,11 +3,22 @@ const SALT = new TextEncoder().encode('ArixShield Edge Clearance Salt v1');
 const INFO = new TextEncoder().encode('edge-middleware-hmac-sha256');
 const encoder = new TextEncoder();
 
+function encodeBase64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
 function decodeBase64Url(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) throw new TypeError('Invalid base64url value.');
   const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
   const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
   const raw = atob(padded);
-  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  const decoded = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  // Web/Edge atob decoders may accept non-zero unused pad bits. Enforce the
+  // same canonical representation as the Node ticket issuer/verifier.
+  if (encodeBase64Url(decoded) !== value) throw new TypeError('Non-canonical base64url value.');
+  return decoded;
 }
 
 function isExcluded(pathname) {

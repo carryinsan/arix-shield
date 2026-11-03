@@ -3,7 +3,7 @@
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
   "fileCount": 116,
-  "rootDigest": "610d5db27a4067fa260f71a8ec11204da9eab281f754dc808ff447b00d8b7d0e",
+  "rootDigest": "8b00d72e9d7ff2579a865ded228e030b1b344b8bde034f669718afe1db8e4f69",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -79,7 +79,7 @@
     },
     {
       "path": "api/_lib/edge-clearance.js",
-      "sha256": "b3c819a84394abfeac78a7fa81ec8b391f34ef684caa7039e76f970e1741595c"
+      "sha256": "bea955d993b4f862ff3841d8a0032e032e918e0b5d3a2b2000372350e211192e"
     },
     {
       "path": "api/_lib/file-security.js",
@@ -235,7 +235,7 @@
     },
     {
       "path": "proxy-core.js",
-      "sha256": "984b81ff68fddc8669cd560b1d526e71bd0c3bd68f52e9b08d2659619f3641fa"
+      "sha256": "018986f6de750d71bf44e18810212558ccb6f8483f7d0d06d101e578521e0f6e"
     },
     {
       "path": "proxy.js",
@@ -423,7 +423,7 @@
     },
     {
       "path": "test/grounded-hardening.test.js",
-      "sha256": "c33d119bc38742ce83afa69154b2bdd27c202634be1025843b93dfbcde8e6b47"
+      "sha256": "2958fabc66adc9980febb1b2b4fad2a38f8a507e88149fa78d300c75e139d69e"
     },
     {
       "path": "test/hardening-regressions.test.js",
@@ -467,7 +467,7 @@
     },
     {
       "path": "test/vercel-routing-middleware.test.js",
-      "sha256": "2c5940912e71998f69af0934b812c2a7847d9800dcb22fb3a1c0e0755fecdd55"
+      "sha256": "b0344f878cfe447e56081297e69bce9b751c7760d2186ae1a6265ffb6f1463bb"
     }
   ],
   "signature": null

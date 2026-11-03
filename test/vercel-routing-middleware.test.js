@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 
 const SECRET = 'test-only-arix-edge-secret-'.padEnd(48, 'x');
 const ORIGIN = 'https://shield.example';
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 test('deployment config points at the framework-independent proxy and pins its runtime helper', async () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,6 +45,23 @@ function ticket(options = {}) {
     secret: SECRET,
     ...options,
   });
+}
+
+function nonCanonicalSegmentAlias(segment) {
+  const remainder = segment.length % 4;
+  const unusedBits = remainder === 2 ? 4 : remainder === 3 ? 2 : 0;
+  assert.ok(unusedBits > 0, 'segment must have unused base64url pad bits');
+  const index = BASE64URL_ALPHABET.indexOf(segment.at(-1));
+  assert.ok(index >= 0);
+  const unusedMask = (1 << unusedBits) - 1;
+  const aliasIndex = (index & ~unusedMask) | ((index + 1) & unusedMask);
+  return `${segment.slice(0, -1)}${BASE64URL_ALPHABET[aliasIndex]}`;
+}
+
+function nonCanonicalTicketAlias(value, segmentIndex) {
+  const parts = value.split('.');
+  parts[segmentIndex] = nonCanonicalSegmentAlias(parts[segmentIndex]);
+  return parts.join('.');
 }
 
 test('Vercel proxy passes through normally when optional edge proof is disabled', async () => {

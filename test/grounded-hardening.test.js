@@ -17,6 +17,24 @@ import { createEdgeGatewayServer } from '../edge/gateway.mjs';
 import { createReplicatedStateServer } from '../state/replicated-state-server.mjs';
 
 const SECRET = 'arixshield-test-master-secret-with-at-least-32-bytes';
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function nonCanonicalSegmentAlias(segment) {
+  const remainder = segment.length % 4;
+  const unusedBits = remainder === 2 ? 4 : remainder === 3 ? 2 : 0;
+  assert.ok(unusedBits > 0, 'segment must have unused base64url pad bits');
+  const index = BASE64URL_ALPHABET.indexOf(segment.at(-1));
+  assert.ok(index >= 0);
+  const unusedMask = (1 << unusedBits) - 1;
+  const aliasIndex = (index & ~unusedMask) | ((index + 1) & unusedMask);
+  return `${segment.slice(0, -1)}${BASE64URL_ALPHABET[aliasIndex]}`;
+}
+
+function nonCanonicalTicketAlias(ticket, segmentIndex) {
+  const parts = ticket.split('.');
+  parts[segmentIndex] = nonCanonicalSegmentAlias(parts[segmentIndex]);
+  return parts.join('.');
+}
 
 
 test('Node response receipt gate atomically blocks unscoped JSON and permits scoped JSON', async () => {
@@ -54,7 +72,8 @@ test('edge clearance tickets bind origin, path and method and reject tampering',
   assert.equal(verifyEdgeClearanceTicket(ticket, { audience: 'https://app.example', path: '/api/private/users', method: 'GET', now: now + 100, secret: SECRET }), true);
   assert.equal(verifyEdgeClearanceTicket(ticket, { audience: 'https://evil.example', path: '/api/private/users', method: 'GET', now: now + 100, secret: SECRET }), false);
   assert.equal(verifyEdgeClearanceTicket(ticket, { audience: 'https://app.example', path: '/api/private/users', method: 'POST', now: now + 100, secret: SECRET }), false);
-  assert.equal(verifyEdgeClearanceTicket(`${ticket.slice(0, -1)}A`, { audience: 'https://app.example', path: '/api/private/users', method: 'GET', now: now + 100, secret: SECRET }), false);
+  assert.equal(verifyEdgeClearanceTicket(nonCanonicalTicketAlias(ticket, 0), { audience: 'https://app.example', path: '/api/private/users', method: 'GET', now: now + 100, secret: SECRET }), false);
+  assert.equal(verifyEdgeClearanceTicket(nonCanonicalTicketAlias(ticket, 1), { audience: 'https://app.example', path: '/api/private/users', method: 'GET', now: now + 100, secret: SECRET }), false);
   assert.equal(verifyEdgeClearanceTicket(ticket, { audience: 'https://app.example', path: '/api/private/users', method: 'GET', now: now + 20_000, secret: SECRET }), false);
 });
 
