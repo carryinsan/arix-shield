@@ -114,6 +114,9 @@ export function inspectZipBuffer(input, options = {}) {
   let offset = centralOffset;
   let totalUncompressed = 0;
   const entries = [];
+  const seenNames = new Set();
+  const seenLocalOffsets = new Set();
+  const localRecordRanges = [];
   for (let index = 0; index < entryCount; index++) {
     if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) return { safe: false, reason: 'ZIP_CENTRAL_ENTRY_INVALID', entries };
     const flags = buffer.readUInt16LE(offset + 8);
@@ -134,6 +137,13 @@ export function inspectZipBuffer(input, options = {}) {
     let name;
     try { name = decodeZipName(buffer.subarray(offset + 46, offset + 46 + nameLength), flags); } catch { return { safe: false, reason: 'ZIP_FILENAME_ENCODING_INVALID', entries }; }
     if (name.normalize('NFKC') !== name || /[\u0000-\u001f\u007f]/.test(name)) return { safe: false, reason: 'ZIP_FILENAME_NONCANONICAL', entry: name, entries };
+    // Normalize separators and case for cross-platform extraction semantics;
+    // reject aliases instead of letting the extraction library choose a winner.
+    const canonicalName = name.replaceAll('\\', '/').normalize('NFKC').toLowerCase();
+    if (seenNames.has(canonicalName)) return { safe: false, reason: 'ZIP_DUPLICATE_NAME', entry: name, entries };
+    seenNames.add(canonicalName);
+    if (seenLocalOffsets.has(localOffset)) return { safe: false, reason: 'ZIP_LOCAL_RECORD_ALIAS', entry: name, entries };
+    seenLocalOffsets.add(localOffset);
     const unixMode = (externalAttributes >>> 16) & 0o170000;
     if (!safeArchivePath(name)) return { safe: false, reason: 'ZIP_PATH_TRAVERSAL', entry: name, entries };
     if (unixMode === 0o120000) return { safe: false, reason: 'ZIP_SYMLINK', entry: name, entries };
@@ -172,10 +182,17 @@ export function inspectZipBuffer(input, options = {}) {
       if (descriptorCrc !== crc32 || descriptorCompressed !== compressedSize || descriptorUncompressed !== uncompressedSize) return { safe: false, reason: 'ZIP_DATA_DESCRIPTOR_MISMATCH', entry: name, entries };
       descriptorEnd = descriptorOffset + 12;
     }
+    localRecordRanges.push({ start: localOffset, end: descriptorEnd, name });
     entries.push({ name, method, crc32, compressedSize, uncompressedSize, dataStart, dataEnd, descriptorEnd });
     offset = end;
   }
   if (offset !== centralOffset + centralSize) return { safe: false, reason: 'ZIP_DIRECTORY_SIZE_MISMATCH', entries };
+  localRecordRanges.sort((left, right) => left.start - right.start || left.end - right.end);
+  for (let index = 1; index < localRecordRanges.length; index++) {
+    if (localRecordRanges[index].start < localRecordRanges[index - 1].end) {
+      return { safe: false, reason: 'ZIP_LOCAL_RECORD_OVERLAP', entry: localRecordRanges[index].name, entries };
+    }
+  }
   return { safe: true, totalUncompressed, entries };
 }
 

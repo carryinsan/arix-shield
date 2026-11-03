@@ -4,6 +4,7 @@ import { rewriteCapabilityRequest } from '../api/_lib/crypto-trap.js';
 import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, consumeLocalOutageRead, validateWorkflowRequest } from './security-runtime.js';
 import { randomUUID } from 'node:crypto';
 import { sanitizeArixIdentity } from './identity.js';
+import { runWithArixContext, hasScopedDataReceipt } from './context.js';
 import { validateOpenApiRequest } from '../api/_lib/schema.js';
 import { verifySignedToken, verifyRequestDpopProof, sha256Hex, createSignedToken } from '../api/_lib/crypto-trap.js';
 import { formatIpPrefix } from '../api/_lib/cidr.js';
@@ -416,7 +417,25 @@ export function withArixShield(handler, options = {}) {
       scopeQuery: (query, args = {}) => scopeQuery(query, decision.authorizationContext, args)
     };
     const handlerContext = { ...context, arixDecision: decision, arixContext: authorizationApi };
-    try { response = await handler(decision.forwardedRequest || request, handlerContext); }
+    try {
+      const context = decision.authorizationContext || {};
+      response = await runWithArixContext({
+        tenantId: context.tenantId || context.projectId || '',
+        userId: context.userId || context.ownerId || '',
+        roles: decision.roles || context.roles || [],
+        permissions: context.permissions || [],
+        method: request.method,
+        path: decision.path || new URL(request.url).pathname
+      }, async () => {
+        const handled = await handler(decision.forwardedRequest || request, handlerContext);
+        if (options.requireScopedDataReceipt === true && handled instanceof Response && handled.status === 200
+          && /application\/(?:[a-z0-9.+-]+\+)?json/i.test(handled.headers.get('content-type') || '')
+          && !hasScopedDataReceipt()) {
+          return Response.json({ error: 'Unscoped Data Access Blocked' }, { status: 500, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+        }
+        return handled;
+      });
+    }
     catch (error) {
       await releaseConcurrencyLease(decision, options);
       if (decision.reportOutcome) {

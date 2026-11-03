@@ -162,6 +162,20 @@ test('ZIP extraction verifies IEEE CRC-32, local headers and data descriptors', 
   assert.equal(inspectZipBuffer(alteredDescriptor).reason, 'ZIP_DATA_DESCRIPTOR_MISMATCH');
 });
 
+test('ZIP rejects distinct central-directory names that alias one local record', () => {
+  const archive = makeZip([{ name: 'first.txt', data: 'one' }, { name: 'second.txt', data: 'two' }]);
+  const eocd = archive.length - 22;
+  const centralOffset = archive.readUInt32LE(eocd + 16);
+  const firstNameLength = archive.readUInt16LE(centralOffset + 28);
+  const firstExtraLength = archive.readUInt16LE(centralOffset + 30);
+  const firstCommentLength = archive.readUInt16LE(centralOffset + 32);
+  const secondCentral = centralOffset + 46 + firstNameLength + firstExtraLength + firstCommentLength;
+  archive.writeUInt32LE(0, secondCentral + 42);
+  const inspected = inspectZipBuffer(archive);
+  assert.equal(inspected.safe, false);
+  assert.equal(inspected.reason, 'ZIP_LOCAL_RECORD_ALIAS');
+});
+
 test('positive route contract rejects unlisted methods, query keys, duplicate keys and invalid schemas', () => {
   const contract = compilePositiveRouteContract({ methods: ['POST'], contentTypes: ['application/json'], maxBytes: 100, allowedQueryKeys: ['mode'], bodyRequired: true, bodySchema: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1 } }, additionalProperties: false }, paramPatterns: { id: '[0-9]+' } });
   assert.equal(contract.check({ method: 'POST', url: '/x?mode=a', headers: { 'content-type': 'application/json' }, body: { name: 'x' }, params: { id: '12' } }).allowed, true);

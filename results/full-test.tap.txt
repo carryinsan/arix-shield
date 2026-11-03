@@ -1,871 +1,1183 @@
+
+> arixshield@1.4.4 test
+> node --test test/*.test.js
+
 TAP version 13
+# Subtest: PostgreSQL facade binds tenant/user context inside every transaction and keeps raw Pool methods private
+ok 1 - PostgreSQL facade binds tenant/user context inside every transaction and keeps raw Pool methods private
+  ---
+  duration_ms: 2.97082
+  type: 'test'
+  ...
+# Subtest: PostgreSQL scoped adapter blocks tenant-GUC mutation, control commands, and stacked statements
+ok 2 - PostgreSQL scoped adapter blocks tenant-GUC mutation, control commands, and stacked statements
+  ---
+  duration_ms: 0.421438
+  type: 'test'
+  ...
+# Subtest: process egress guard replaces only the configured fetch target with the safe transport
+ok 3 - process egress guard replaces only the configured fetch target with the safe transport
+  ---
+  duration_ms: 5.552439
+  type: 'test'
+  ...
+# Subtest: Linux attestation distinguishes a hardened non-root process from missing controls
+ok 4 - Linux attestation distinguishes a hardened non-root process from missing controls
+  ---
+  duration_ms: 0.425905
+  type: 'test'
+  ...
+# Subtest: gateway exposes configured process-local connection ceilings and no false global-DDoS claim
+ok 5 - gateway exposes configured process-local connection ceilings and no false global-DDoS claim
+  ---
+  duration_ms: 1.618521
+  type: 'test'
+  ...
+# Subtest: RLS migration generator is transactionally locked and refuses superuser/BYPASSRLS execution
+ok 6 - RLS migration generator is transactionally locked and refuses superuser/BYPASSRLS execution
+  ---
+  duration_ms: 40.213436
+  type: 'test'
+  ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: adversarial lab blocks all 2,500 deterministic grammar/encoding/boundary mutations
-ok 1 - adversarial lab blocks all 2,500 deterministic grammar/encoding/boundary mutations
+ok 7 - adversarial lab blocks all 2,500 deterministic grammar/encoding/boundary mutations
   ---
-  duration_ms: 568.351025
+  duration_ms: 470.60236
   type: 'test'
   ...
 # Subtest: adversarial lab keeps false-positive rate below 0.1% on 2,500 benign multilingual inputs
-ok 2 - adversarial lab keeps false-positive rate below 0.1% on 2,500 benign multilingual inputs
+ok 8 - adversarial lab keeps false-positive rate below 0.1% on 2,500 benign multilingual inputs
   ---
-  duration_ms: 142.650258
+  duration_ms: 145.640404
   type: 'test'
   ...
 # Subtest: BOLA/BFLA matrix: five actor classes × four methods × four ID placements
-ok 3 - BOLA/BFLA matrix: five actor classes × four methods × four ID placements
+ok 9 - BOLA/BFLA matrix: five actor classes × four methods × four ID placements
   ---
-  duration_ms: 6.600593
+  duration_ms: 5.848839
   type: 'test'
   ...
 # Subtest: 100-way quota leases and DPoP replay/outage chaos fail closed under concurrent load
-ok 4 - 100-way quota leases and DPoP replay/outage chaos fail closed under concurrent load
+ok 10 - 100-way quota leases and DPoP replay/outage chaos fail closed under concurrent load
   ---
-  duration_ms: 91.544988
+  duration_ms: 80.041046
   type: 'test'
   ...
 # Subtest: ASVS verifier enumerates requirements and leaves unmapped controls unassessed
-ok 5 - ASVS verifier enumerates requirements and leaves unmapped controls unassessed
+ok 11 - ASVS verifier enumerates requirements and leaves unmapped controls unassessed
   ---
-  duration_ms: 42.984715
+  duration_ms: 38.043318
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: recover-mfa consumes one recovery code, resets factors, revokes credentials and issues a new session
-ok 6 - recover-mfa consumes one recovery code, resets factors, revokes credentials and issues a new session
+ok 12 - recover-mfa consumes one recovery code, resets factors, revokes credentials and issues a new session
   ---
-  duration_ms: 863.381441
+  duration_ms: 699.444876
+  type: 'test'
+  ...
+# Subtest: one high-confidence automation signal exceeds the default browser-clearance risk ceiling
+ok 13 - one high-confidence automation signal exceeds the default browser-clearance risk ceiling
+  ---
+  duration_ms: 0.595312
+  type: 'test'
+  ...
+# Subtest: isolated weak browser signals remain zero-risk while correlated signals are challenged
+ok 14 - isolated weak browser signals remain zero-risk while correlated signals are challenged
+  ---
+  duration_ms: 0.148655
   type: 'test'
   ...
 # Subtest: browser farm only permits localhost, loopback, and reserved .test origins
-ok 7 - browser farm only permits localhost, loopback, and reserved .test origins
+ok 15 - browser farm only permits localhost, loopback, and reserved .test origins
   ---
-  duration_ms: 1.20019
+  duration_ms: 1.193347
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: 1,000 concurrent quota attempts never exceed the local adapter budget
-ok 8 - 1,000 concurrent quota attempts never exceed the local adapter budget
+ok 16 - 1,000 concurrent quota attempts never exceed the local adapter budget
   ---
-  duration_ms: 12.860074
+  duration_ms: 9.414388
   type: 'test'
   ...
 # Subtest: 1,000 concurrent lease requests never exceed a 23-lease cap
-ok 9 - 1,000 concurrent lease requests never exceed a 23-lease cap
+ok 17 - 1,000 concurrent lease requests never exceed a 23-lease cap
   ---
-  duration_ms: 10.629505
+  duration_ms: 7.88334
   type: 'test'
   ...
 # Subtest: injected DNS, timeout, reset, 429 and truncated-body failures are treated as explicit fault states
-ok 10 - injected DNS, timeout, reset, 429 and truncated-body failures are treated as explicit fault states
+ok 18 - injected DNS, timeout, reset, 429 and truncated-body failures are treated as explicit fault states
   ---
-  duration_ms: 3.663264
+  duration_ms: 2.839651
   type: 'test'
   ...
 # Subtest: slow backend operations trip the circuit and abort cooperative work
-ok 11 - slow backend operations trip the circuit and abort cooperative work
+ok 19 - slow backend operations trip the circuit and abort cooperative work
   ---
-  duration_ms: 51.42945
+  duration_ms: 51.917621
   type: 'test'
   ...
 # Subtest: browser clearance JWE encrypts and decrypts with configured RSA-OAEP-256/A256GCM keys
-ok 12 - browser clearance JWE encrypts and decrypts with configured RSA-OAEP-256/A256GCM keys
+ok 20 - browser clearance JWE encrypts and decrypts with configured RSA-OAEP-256/A256GCM keys
   ---
-  duration_ms: 133.060576
+  duration_ms: 131.555357
   type: 'test'
   ...
 # Subtest: clearance JWK publication and JWE decryption reject a mismatched configured key identifier
-ok 13 - clearance JWK publication and JWE decryption reject a mismatched configured key identifier
+ok 21 - clearance JWK publication and JWE decryption reject a mismatched configured key identifier
   ---
-  duration_ms: 0.540164
+  duration_ms: 0.611616
   type: 'test'
   ...
 # Subtest: request DPoP binds the exact raw body bytes, URL, method, thumbprint and clearance nonce
-ok 14 - request DPoP binds the exact raw body bytes, URL, method, thumbprint and clearance nonce
+ok 22 - request DPoP binds the exact raw body bytes, URL, method, thumbprint and clearance nonce
   ---
-  duration_ms: 6.137065
+  duration_ms: 6.49036
   type: 'test'
   ...
 # Subtest: DPoP validates ES256 request binding and rejects replayed JTIs
-ok 15 - DPoP validates ES256 request binding and rejects replayed JTIs
+ok 23 - DPoP validates ES256 request binding and rejects replayed JTIs
   ---
-  duration_ms: 2.635255
+  duration_ms: 2.7926
   type: 'test'
   ...
 # Subtest: clearance continuity survives Wi-Fi/mobile IP and JA4 changes when the DPoP key remains valid
-ok 16 - clearance continuity survives Wi-Fi/mobile IP and JA4 changes when the DPoP key remains valid
+ok 24 - clearance continuity survives Wi-Fi/mobile IP and JA4 changes when the DPoP key remains valid
   ---
-  duration_ms: 22.003423
+  duration_ms: 16.951684
   type: 'test'
   ...
 # Subtest: password KDF writes bounded scrypt records and verifies legacy PBKDF2 records
-ok 17 - password KDF writes bounded scrypt records and verifies legacy PBKDF2 records
+ok 25 - password KDF writes bounded scrypt records and verifies legacy PBKDF2 records
   ---
-  duration_ms: 1253.718822
+  duration_ms: 1084.583286
+  type: 'test'
+  ...
+# [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
+# Subtest: user and project records are encrypted at rest and transparently decrypted
+ok 26 - user and project records are encrypted at rest and transparently decrypted
+  ---
+  duration_ms: 5.506371
+  type: 'test'
+  ...
+# Subtest: legacy plaintext customer records migrate atomically on first read
+ok 27 - legacy plaintext customer records migrate atomically on first read
+  ---
+  duration_ms: 1.534345
+  type: 'test'
+  ...
+# [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
+# Subtest: edge gateway signs exact raw requests and origin adapter verifies and consumes proof
+ok 28 - edge gateway signs exact raw requests and origin adapter verifies and consumes proof
+  ---
+  duration_ms: 43.749622
+  type: 'test'
+  ...
+# Subtest: origin adapter fails closed for direct requests and rejects a replayed edge proof
+ok 29 - origin adapter fails closed for direct requests and rejects a replayed edge proof
+  ---
+  duration_ms: 14.691806
+  type: 'test'
+  ...
+# Subtest: edge gateway refuses non-loopback plaintext upstreams and unsafe URL configuration
+ok 30 - edge gateway refuses non-loopback plaintext upstreams and unsafe URL configuration
+  ---
+  duration_ms: 0.716856
+  type: 'test'
+  ...
+# Subtest: edge gateway enforces a hard TCP connection cap and validates its configuration
+ok 31 - edge gateway enforces a hard TCP connection cap and validates its configuration
+  ---
+  duration_ms: 0.442891
+  type: 'test'
+  ...
+# Subtest: edge gateway refuses required inbound mTLS without an explicit client CA
+ok 32 - edge gateway refuses required inbound mTLS without an explicit client CA
+  ---
+  duration_ms: 9.861549
+  type: 'test'
+  ...
+# Subtest: egress preload is inert unless ARIX_PROCESS_EGRESS_FIREWALL=true
+ok 33 - egress preload is inert unless ARIX_PROCESS_EGRESS_FIREWALL=true
+  ---
+  duration_ms: 39.832749
+  type: 'test'
+  ...
+# Subtest: egress preload installs and restores only when explicitly enabled
+ok 34 - egress preload installs and restores only when explicitly enabled
+  ---
+  duration_ms: 36.963523
+  type: 'test'
+  ...
+# Subtest: Node SDK import installs the global fetch guard only when explicitly enabled
+ok 35 - Node SDK import installs the global fetch guard only when explicitly enabled
+  ---
+  duration_ms: 100.064559
+  type: 'test'
+  ...
+# Subtest: Node response receipt gate atomically blocks unscoped JSON and permits scoped JSON
+ok 36 - Node response receipt gate atomically blocks unscoped JSON and permits scoped JSON
+  ---
+  duration_ms: 36.220708
+  type: 'test'
+  ...
+# Subtest: edge clearance tickets bind origin, path and method and reject tampering
+ok 37 - edge clearance tickets bind origin, path and method and reject tampering
+  ---
+  duration_ms: 1.600655
+  type: 'test'
+  ...
+# Subtest: PostgreSQL tenant transaction sets transaction-local scope and records request receipt only after commit
+ok 38 - PostgreSQL tenant transaction sets transaction-local scope and records request receipt only after commit
+  ---
+  duration_ms: 0.624907
+  type: 'test'
+  ...
+# Subtest: PostgreSQL tenant transaction rolls back and does not issue a receipt on failure
+ok 39 - PostgreSQL tenant transaction rolls back and does not issue a receipt on failure
+  ---
+  duration_ms: 0.842957
+  type: 'test'
+  ...
+# Subtest: RLS verifier requires FORCE RLS and a non-bypass runtime role
+ok 40 - RLS verifier requires FORCE RLS and a non-bypass runtime role
+  ---
+  duration_ms: 0.447278
+  type: 'test'
+  ...
+# Subtest: MySQL tenant session variables are cleared before a pooled connection is released
+ok 41 - MySQL tenant session variables are cleared before a pooled connection is released
+  ---
+  duration_ms: 0.570564
+  type: 'test'
+  ...
+# Subtest: public request-context API does not expose scoped-receipt issuance
+ok 42 - public request-context API does not expose scoped-receipt issuance
+  ---
+  duration_ms: 0.247605
+  type: 'test'
+  ...
+# Subtest: SQLite tenant transaction refuses to pretend native RLS exists
+ok 43 - SQLite tenant transaction refuses to pretend native RLS exists
+  ---
+  duration_ms: 0.297661
+  type: 'test'
+  ...
+# Subtest: UID egress rules validate allow CIDRs and block private/reserved destinations
+ok 44 - UID egress rules validate allow CIDRs and block private/reserved destinations
+  ---
+  duration_ms: 1.844064
+  type: 'test'
+  ...
+# Subtest: global http/https agents are opt-in, block unapproved HTTP and restore cleanly
+ok 45 - global http/https agents are opt-in, block unapproved HTTP and restore cleanly
+  ---
+  duration_ms: 0.747713
+  type: 'test'
+  ...
+# Subtest: gateway requires exact SNI configuration for a production TLS listener and CA for mTLS
+ok 46 - gateway requires exact SNI configuration for a production TLS listener and CA for mTLS
+  ---
+  duration_ms: 1.4196
+  type: 'test'
+  ...
+# Subtest: gateway contracts header and keep-alive timeouts under socket pressure, then restores them
+ok 47 - gateway contracts header and keep-alive timeouts under socket pressure, then restores them
+  ---
+  duration_ms: 89.300534
+  type: 'test'
+  ...
+# Subtest: replicated state server persists commands to WAL and recovers after restart
+ok 48 - replicated state server persists commands to WAL and recovers after restart
+  ---
+  duration_ms: 29.40298
+  type: 'test'
+  ...
+# Subtest: three-node state topology requires quorum and applies committed writes on replicas
+ok 49 - three-node state topology requires quorum and applies committed writes on replicas
+  ---
+  duration_ms: 41.408827
   type: 'test'
   ...
 # Subtest: client rate keys ignore blank and spoofed ingress headers, then use a validated peer IP
-ok 18 - client rate keys ignore blank and spoofed ingress headers, then use a validated peer IP
+ok 50 - client rate keys ignore blank and spoofed ingress headers, then use a validated peer IP
   ---
-  duration_ms: 1.364328
+  duration_ms: 1.393601
   type: 'test'
   ...
 # Subtest: same-origin validation ignores forwarded-host and compares the actual Host authority
-ok 19 - same-origin validation ignores forwarded-host and compares the actual Host authority
+ok 51 - same-origin validation ignores forwarded-host and compares the actual Host authority
   ---
-  duration_ms: 0.383488
+  duration_ms: 0.445775
   type: 'test'
   ...
 # Subtest: path normalization rejects multi-layer encoded separators and encoded dot segments
-ok 20 - path normalization rejects multi-layer encoded separators and encoded dot segments
+ok 52 - path normalization rejects multi-layer encoded separators and encoded dot segments
   ---
-  duration_ms: 0.434495
+  duration_ms: 0.480718
   type: 'test'
   ...
 # Subtest: session cookies enforce the RFC-sized name/value budget and reject line breaks
-ok 21 - session cookies enforce the RFC-sized name/value budget and reject line breaks
+ok 53 - session cookies enforce the RFC-sized name/value budget and reject line breaks
   ---
-  duration_ms: 0.804343
+  duration_ms: 0.861085
   type: 'test'
   ...
 # Subtest: WAF rejects CRLF header injection and standalone Transfer-Encoding on HTTP/2
-ok 22 - WAF rejects CRLF header injection and standalone Transfer-Encoding on HTTP/2
+ok 54 - WAF rejects CRLF header injection and standalone Transfer-Encoding on HTTP/2
   ---
-  duration_ms: 25.549731
+  duration_ms: 22.849784
   type: 'test'
   ...
 # Subtest: password policy checks exact common roots after predictable numeric and punctuation suffixes
-ok 23 - password policy checks exact common roots after predictable numeric and punctuation suffixes
+ok 55 - password policy checks exact common roots after predictable numeric and punctuation suffixes
   ---
-  duration_ms: 0.580035
+  duration_ms: 0.564105
   type: 'test'
   ...
 # Subtest: password policy rejects common and context-derived passwords without calling breach lookup
-ok 24 - password policy rejects common and context-derived passwords without calling breach lookup
+ok 56 - password policy rejects common and context-derived passwords without calling breach lookup
   ---
-  duration_ms: 0.371139
+  duration_ms: 0.293865
   type: 'test'
   ...
 # Subtest: password policy calls the breach checker for otherwise acceptable passwords
-ok 25 - password policy calls the breach checker for otherwise acceptable passwords
+ok 57 - password policy calls the breach checker for otherwise acceptable passwords
   ---
-  duration_ms: 0.374445
+  duration_ms: 0.339965
   type: 'test'
   ...
 # Subtest: Pwned Passwords range lookup discloses only a SHA-1 prefix and matches suffix counts
-ok 26 - Pwned Passwords range lookup discloses only a SHA-1 prefix and matches suffix counts
+ok 58 - Pwned Passwords range lookup discloses only a SHA-1 prefix and matches suffix counts
   ---
-  duration_ms: 0.807478
+  duration_ms: 0.746881
   type: 'test'
   ...
 # Subtest: offline password policy survives optional HIBP outage without converting to 503
-ok 27 - offline password policy survives optional HIBP outage without converting to 503
+ok 59 - offline password policy survives optional HIBP outage without converting to 503
   ---
-  duration_ms: 1.06034
+  duration_ms: 1.290475
   type: 'test'
   ...
 # Subtest: safe-fetch public address policy rejects special-purpose and non-global IPv6 ranges
-ok 28 - safe-fetch public address policy rejects special-purpose and non-global IPv6 ranges
+ok 60 - safe-fetch public address policy rejects special-purpose and non-global IPv6 ranges
   ---
-  duration_ms: 24.894504
+  duration_ms: 23.918547
   type: 'test'
   ...
 # Subtest: identity sanitizer removes a trailing client IP without coupling identity to network handoffs
-ok 29 - identity sanitizer removes a trailing client IP without coupling identity to network handoffs
+ok 61 - identity sanitizer removes a trailing client IP without coupling identity to network handoffs
   ---
-  duration_ms: 2.687573
+  duration_ms: 2.29068
   type: 'test'
   ...
 # Subtest: Prisma wrapper fails closed without ALS scope and injects tenant+owner predicates with scope
-ok 30 - Prisma wrapper fails closed without ALS scope and injects tenant+owner predicates with scope
+ok 62 - Prisma wrapper fails closed without ALS scope and injects tenant+owner predicates with scope
   ---
-  duration_ms: 3.178974
+  duration_ms: 5.428098
   type: 'test'
   ...
 # Subtest: Prisma wrapper rejects foreign-scope writes and unsupported nested writes
-ok 31 - Prisma wrapper rejects foreign-scope writes and unsupported nested writes
+ok 63 - Prisma wrapper rejects foreign-scope writes and unsupported nested writes
   ---
-  duration_ms: 0.458571
+  duration_ms: 0.384242
   type: 'test'
   ...
 # Subtest: dashboard uses a masked native dialog for security re-authentication
-ok 32 - dashboard uses a masked native dialog for security re-authentication
+ok 64 - dashboard uses a masked native dialog for security re-authentication
   ---
-  duration_ms: 6.647816
+  duration_ms: 4.295787
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: rotated session replay revokes the replacement session family
-ok 33 - rotated session replay revokes the replacement session family
+ok 65 - rotated session replay revokes the replacement session family
   ---
-  duration_ms: 20.471342
+  duration_ms: 12.069633
   type: 'test'
   ...
 # Subtest: Redis REST configuration rejects insecure or ambiguous endpoint URLs
-ok 34 - Redis REST configuration rejects insecure or ambiguous endpoint URLs
+ok 66 - Redis REST configuration rejects insecure or ambiguous endpoint URLs
   ---
-  duration_ms: 0.629209
+  duration_ms: 0.663134
   type: 'test'
   ...
 # Subtest: safe-fetch validates total timeout and redirect limits before network access
-ok 35 - safe-fetch validates total timeout and redirect limits before network access
+ok 67 - safe-fetch validates total timeout and redirect limits before network access
   ---
-  duration_ms: 1.082973
+  duration_ms: 0.511345
   type: 'test'
   ...
 # Subtest: runtime integrity verifies the complete API source tree against the manifest
-ok 36 - runtime integrity verifies the complete API source tree against the manifest
+ok 68 - runtime integrity verifies the complete API source tree against the manifest
   ---
-  duration_ms: 28.079196
+  duration_ms: 28.637981
   type: 'test'
   ...
 # Subtest: partial or malformed Redis credentials never trigger process-local fallback
-ok 37 - partial or malformed Redis credentials never trigger process-local fallback
+ok 69 - partial or malformed Redis credentials never trigger process-local fallback
   ---
-  duration_ms: 0.580886
+  duration_ms: 0.753682
+  type: 'test'
+  ...
+# Subtest: Linux host attestation accepts a non-root, no-new-privileges, zero-capability process
+ok 70 - Linux host attestation accepts a non-root, no-new-privileges, zero-capability process
+  ---
+  duration_ms: 1.305027
+  type: 'test'
+  ...
+# Subtest: Linux host attestation reports each missing host hardening control
+ok 71 - Linux host attestation reports each missing host hardening control
+  ---
+  duration_ms: 1.169893
+  type: 'test'
+  ...
+# Subtest: Linux host attestation fails closed when proc status cannot be read
+ok 72 - Linux host attestation fails closed when proc status cannot be read
+  ---
+  duration_ms: 0.198411
   type: 'test'
   ...
 # Subtest: HTTP parser differential corpus is rejected or explicitly surfaced
-ok 38 - HTTP parser differential corpus is rejected or explicitly surfaced
+ok 73 - HTTP parser differential corpus is rejected or explicitly surfaced
   ---
-  duration_ms: 31.017879
+  duration_ms: 22.671193
   type: 'test'
   ...
 # Subtest: canonicalization is bounded and flags still-changing nested encodings
-ok 39 - canonicalization is bounded and flags still-changing nested encodings
+ok 74 - canonicalization is bounded and flags still-changing nested encodings
   ---
-  duration_ms: 0.147413
+  duration_ms: 0.133843
   type: 'test'
   ...
 # Subtest: documented HTTP syntax remains parseable without creating contradictory framing
-ok 40 - documented HTTP syntax remains parseable without creating contradictory framing
+ok 75 - documented HTTP syntax remains parseable without creating contradictory framing
   ---
-  duration_ms: 0.933698
+  duration_ms: 0.649344
   type: 'test'
   ...
 # Subtest: 16-bit XOR filter compiles deterministically and detects leetspeak-normalized seed passwords
-ok 41 - 16-bit XOR filter compiles deterministically and detects leetspeak-normalized seed passwords
+ok 76 - 16-bit XOR filter compiles deterministically and detects leetspeak-normalized seed passwords
   ---
-  duration_ms: 2.903529
+  duration_ms: 5.029889
   type: 'test'
   ...
 # Subtest: identity risk returns explainable allow, step-up and challenge scores
-ok 42 - identity risk returns explainable allow, step-up and challenge scores
+ok 77 - identity risk returns explainable allow, step-up and challenge scores
   ---
-  duration_ms: 0.307483
+  duration_ms: 0.3498
   type: 'test'
   ...
 # Subtest: MFA recovery codes are 128-bit salted digests and consumed atomically
-ok 43 - MFA recovery codes are 128-bit salted digests and consumed atomically
+ok 78 - MFA recovery codes are 128-bit salted digests and consumed atomically
   ---
-  duration_ms: 1.573233
+  duration_ms: 1.714608
   type: 'test'
   ...
 # Subtest: bot intelligence computes bounded route and timing features and blinded indicators
-ok 44 - bot intelligence computes bounded route and timing features and blinded indicators
+ok 79 - bot intelligence computes bounded route and timing features and blinded indicators
   ---
-  duration_ms: 1.386912
+  duration_ms: 1.046275
   type: 'test'
   ...
 # Subtest: KMS purpose derivation, tenant envelope wrapping and AES-GCM data scope are enforced
-ok 45 - KMS purpose derivation, tenant envelope wrapping and AES-GCM data scope are enforced
+ok 80 - KMS purpose derivation, tenant envelope wrapping and AES-GCM data scope are enforced
   ---
-  duration_ms: 2.460871
+  duration_ms: 2.236979
   type: 'test'
   ...
 # Subtest: Ed25519 origin proof binds timestamp, method, URL, client IP and raw body
-ok 46 - Ed25519 origin proof binds timestamp, method, URL, client IP and raw body
+ok 81 - Ed25519 origin proof binds timestamp, method, URL, client IP and raw body
   ---
-  duration_ms: 2.71888
+  duration_ms: 2.168525
   type: 'test'
   ...
 # Subtest: file security checks image dimensions, ZIP traversal/symlinks and PDF active content
-ok 47 - file security checks image dimensions, ZIP traversal/symlinks and PDF active content
+ok 82 - file security checks image dimensions, ZIP traversal/symlinks and PDF active content
   ---
-  duration_ms: 2.257204
+  duration_ms: 4.320174
   type: 'test'
   ...
 # Subtest: ZIP extraction verifies IEEE CRC-32, local headers and data descriptors
-ok 48 - ZIP extraction verifies IEEE CRC-32, local headers and data descriptors
+ok 83 - ZIP extraction verifies IEEE CRC-32, local headers and data descriptors
   ---
-  duration_ms: 0.877984
+  duration_ms: 1.383135
   type: 'test'
   ...
 # Subtest: positive route contract rejects unlisted methods, query keys, duplicate keys and invalid schemas
-ok 49 - positive route contract rejects unlisted methods, query keys, duplicate keys and invalid schemas
+ok 84 - positive route contract rejects unlisted methods, query keys, duplicate keys and invalid schemas
   ---
-  duration_ms: 1.302484
+  duration_ms: 1.42587
   type: 'test'
   ...
 # Subtest: MCP firewall applies tool allowlist, role/schema checks and single-use approval binding
-ok 50 - MCP firewall applies tool allowlist, role/schema checks and single-use approval binding
+ok 85 - MCP firewall applies tool allowlist, role/schema checks and single-use approval binding
   ---
-  duration_ms: 1.083815
+  duration_ms: 2.229137
   type: 'test'
   ...
 # Subtest: config compiler rejects unsafe mutation policy and dual approval demands another custodian
-ok 51 - config compiler rejects unsafe mutation policy and dual approval demands another custodian
+ok 86 - config compiler rejects unsafe mutation policy and dual approval demands another custodian
   ---
-  duration_ms: 1.369265
+  duration_ms: 1.792115
   type: 'test'
   ...
 # Subtest: signed threat feed manifests and SimHash campaign matching verify tamper and distance
-ok 52 - signed threat feed manifests and SimHash campaign matching verify tamper and distance
+ok 87 - signed threat feed manifests and SimHash campaign matching verify tamper and distance
   ---
-  duration_ms: 1.918984
+  duration_ms: 1.225777
   type: 'test'
   ...
 # Subtest: DRR scheduler and runtime guard give bounded deterministic behavior
-ok 53 - DRR scheduler and runtime guard give bounded deterministic behavior
+ok 88 - DRR scheduler and runtime guard give bounded deterministic behavior
   ---
-  duration_ms: 0.924474
+  duration_ms: 0.905071
   type: 'test'
   ...
 # Subtest: SOC engine refuses IP/subnet/ASN auto-containment and supports scoped rollback tokens
-ok 54 - SOC engine refuses IP/subnet/ASN auto-containment and supports scoped rollback tokens
+ok 89 - SOC engine refuses IP/subnet/ASN auto-containment and supports scoped rollback tokens
   ---
-  duration_ms: 1.244787
+  duration_ms: 0.95688
   type: 'test'
   ...
 # Subtest: encrypted signed DR backup rejects changed payload and wrong tenant
-ok 55 - encrypted signed DR backup rejects changed payload and wrong tenant
+ok 90 - encrypted signed DR backup rejects changed payload and wrong tenant
   ---
-  duration_ms: 2.511358
+  duration_ms: 1.424418
   type: 'test'
   ...
 # Subtest: audit ratchet appends atomically and verifies signed sequence continuity
-ok 56 - audit ratchet appends atomically and verifies signed sequence continuity
+ok 91 - audit ratchet appends atomically and verifies signed sequence continuity
   ---
-  duration_ms: 1.579101
+  duration_ms: 1.154138
   type: 'test'
   ...
 # Subtest: WAF catches targeted LDAP, SSTI and unsafe-deserialization signatures
-ok 57 - WAF catches targeted LDAP, SSTI and unsafe-deserialization signatures
+ok 92 - WAF catches targeted LDAP, SSTI and unsafe-deserialization signatures
   ---
-  duration_ms: 48.612897
+  duration_ms: 21.033502
   type: 'test'
   ...
 # Subtest: offline compiler CLIs create bounded XOR filters, default-deny route maps and PostgreSQL RLS SQL
-ok 58 - offline compiler CLIs create bounded XOR filters, default-deny route maps and PostgreSQL RLS SQL
+ok 93 - offline compiler CLIs create bounded XOR filters, default-deny route maps and PostgreSQL RLS SQL
   ---
-  duration_ms: 137.276794
+  duration_ms: 119.241149
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner applies restrictive tenant policies to only the explicit allowlist
+ok 94 - PostgreSQL RLS provisioner applies restrictive tenant policies to only the explicit allowlist
+  ---
+  duration_ms: 1.63742
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner is idempotent for an exact restrictive policy
+ok 95 - PostgreSQL RLS provisioner is idempotent for an exact restrictive policy
+  ---
+  duration_ms: 0.486207
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner rejects privileged roles and rolls back
+ok 96 - PostgreSQL RLS provisioner rejects privileged roles and rolls back
+  ---
+  duration_ms: 1.095089
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner rejects unsafe identifiers before issuing SQL
+ok 97 - PostgreSQL RLS provisioner rejects unsafe identifiers before issuing SQL
+  ---
+  duration_ms: 0.201235
+  type: 'test'
+  ...
+# Subtest: tenant transaction binds trusted AsyncLocalStorage identity locally and commits/releases
+ok 98 - tenant transaction binds trusted AsyncLocalStorage identity locally and commits/releases
+  ---
+  duration_ms: 1.074448
+  type: 'test'
+  ...
+# Subtest: tenant transaction refuses absent context and rolls back callback failures
+ok 99 - tenant transaction refuses absent context and rolls back callback failures
+  ---
+  duration_ms: 0.42221
+  type: 'test'
+  ...
+# Subtest: tenant transaction rejects a runtime database role that bypasses RLS
+ok 100 - tenant transaction rejects a runtime database role that bypasses RLS
+  ---
+  duration_ms: 0.263048
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner stops on a conflicting pre-existing policy
+ok 101 - PostgreSQL RLS provisioner stops on a conflicting pre-existing policy
+  ---
+  duration_ms: 0.317871
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner fails closed when the allowlisted tenant column is absent
+ok 102 - PostgreSQL RLS provisioner fails closed when the allowlisted tenant column is absent
+  ---
+  duration_ms: 0.398804
+  type: 'test'
+  ...
+# Subtest: tenant transaction blocks callback SQL from altering the RLS context or transaction boundary
+ok 103 - tenant transaction blocks callback SQL from altering the RLS context or transaction boundary
+  ---
+  duration_ms: 0.71941
+  type: 'test'
+  ...
+# Subtest: PostgreSQL RLS provisioner rejects a matching expression restricted to non-PUBLIC roles
+ok 104 - PostgreSQL RLS provisioner rejects a matching expression restricted to non-PUBLIC roles
+  ---
+  duration_ms: 0.348708
+  type: 'test'
+  ...
+# Subtest: process fetch egress guard routes URL fetches through the injected safe transport and restores cleanly
+ok 105 - process fetch egress guard routes URL fetches through the injected safe transport and restores cleanly
+  ---
+  duration_ms: 19.869268
+  type: 'test'
+  ...
+# Subtest: process fetch egress guard supports Request inputs and enforces method policy
+ok 106 - process fetch egress guard supports Request inputs and enforces method policy
+  ---
+  duration_ms: 5.293358
+  type: 'test'
+  ...
+# Subtest: process fetch egress guard refuses oversized request streams before invoking transport
+ok 107 - process fetch egress guard refuses oversized request streams before invoking transport
+  ---
+  duration_ms: 2.385223
+  type: 'test'
+  ...
+# Subtest: process fetch egress guard configuration fails closed
+ok 108 - process fetch egress guard configuration fails closed
+  ---
+  duration_ms: 0.44271
+  type: 'test'
+  ...
+# Subtest: default process fetch guard blocks loopback and cleartext HTTP destinations
+ok 109 - default process fetch guard blocks loopback and cleartext HTTP destinations
+  ---
+  duration_ms: 1.021277
   type: 'test'
   ...
 # Subtest: 25 runtime invariant probes reject representative cross-domain abuse patterns
     # Subtest: SQL injection boolean grammar
     ok 1 - SQL injection boolean grammar
       ---
-      duration_ms: 26.879336
+      duration_ms: 14.991499
       type: 'test'
       ...
     # Subtest: XSS script marker
     ok 2 - XSS script marker
       ---
-      duration_ms: 2.76486
+      duration_ms: 0.757467
       type: 'test'
       ...
     # Subtest: NoSQL operator object key
     ok 3 - NoSQL operator object key
       ---
-      duration_ms: 1.244988
+      duration_ms: 0.59452
       type: 'test'
       ...
     # Subtest: SSRF loopback URL
     ok 4 - SSRF loopback URL
       ---
-      duration_ms: 0.309697
+      duration_ms: 0.242578
       type: 'test'
       ...
     # Subtest: SSTI template expression
     ok 5 - SSTI template expression
       ---
-      duration_ms: 0.596179
+      duration_ms: 0.743787
       type: 'test'
       ...
     # Subtest: LDAP filter injection
     ok 6 - LDAP filter injection
       ---
-      duration_ms: 0.59707
+      duration_ms: 0.347226
       type: 'test'
       ...
     # Subtest: XXE DTD payload
     ok 7 - XXE DTD payload
       ---
-      duration_ms: 0.401846
+      duration_ms: 0.365914
       type: 'test'
       ...
     # Subtest: multipart image magic mismatch
     ok 8 - multipart image magic mismatch
       ---
-      duration_ms: 1.500573
+      duration_ms: 0.959564
       type: 'test'
       ...
     # Subtest: binary PDF signature mismatch
     ok 9 - binary PDF signature mismatch
       ---
-      duration_ms: 0.471351
+      duration_ms: 0.43609
       type: 'test'
       ...
     # Subtest: HTTP/1 CL-TE ambiguity
     ok 10 - HTTP/1 CL-TE ambiguity
       ---
-      duration_ms: 0.339472
+      duration_ms: 0.299043
       type: 'test'
       ...
     # Subtest: HTTP/2 connection-specific header
     ok 11 - HTTP/2 connection-specific header
       ---
-      duration_ms: 0.331861
+      duration_ms: 0.347677
       type: 'test'
       ...
     # Subtest: HTTP header CRLF injection
     ok 12 - HTTP header CRLF injection
       ---
-      duration_ms: 0.269726
+      duration_ms: 0.321527
       type: 'test'
       ...
     # Subtest: duplicate query parameter pollution
     ok 13 - duplicate query parameter pollution
       ---
-      duration_ms: 0.385271
+      duration_ms: 0.225241
       type: 'test'
       ...
     # Subtest: duplicate raw JSON key
     ok 14 - duplicate raw JSON key
       ---
-      duration_ms: 1.354733
+      duration_ms: 0.474359
       type: 'test'
       ...
     # Subtest: prototype pollution key
     ok 15 - prototype pollution key
       ---
-      duration_ms: 0.23887
+      duration_ms: 0.297581
       type: 'test'
       ...
     # Subtest: excessive nested encoding
     ok 16 - excessive nested encoding
       ---
-      duration_ms: 0.319031
+      duration_ms: 0.295337
       type: 'test'
       ...
     # Subtest: GraphQL query depth limit
     ok 17 - GraphQL query depth limit
       ---
-      duration_ms: 0.874489
+      duration_ms: 0.499817
       type: 'test'
       ...
     # Subtest: pixel-flood dimensions
     ok 18 - pixel-flood dimensions
       ---
-      duration_ms: 0.710321
+      duration_ms: 0.274396
       type: 'test'
       ...
     # Subtest: ZIP expansion ratio
     ok 19 - ZIP expansion ratio
       ---
-      duration_ms: 1.244236
+      duration_ms: 0.648272
       type: 'test'
       ...
     # Subtest: authorization denies anonymous actor
     ok 20 - authorization denies anonymous actor
       ---
-      duration_ms: 0.66961
+      duration_ms: 0.545597
       type: 'test'
       ...
     # Subtest: authorization rejects foreign tenant context
     ok 21 - authorization rejects foreign tenant context
       ---
-      duration_ms: 0.215124
+      duration_ms: 0.206563
       type: 'test'
       ...
     # Subtest: write field allowlist strips privilege escalation
     ok 22 - write field allowlist strips privilege escalation
       ---
-      duration_ms: 1.427483
+      duration_ms: 0.278121
       type: 'test'
       ...
     # Subtest: KMS rejects cross-tenant ciphertext
     ok 23 - KMS rejects cross-tenant ciphertext
       ---
-      duration_ms: 1.015812
+      duration_ms: 1.093516
       type: 'test'
       ...
     # Subtest: MCP rejects unknown tools
     ok 24 - MCP rejects unknown tools
       ---
-      duration_ms: 0.398371
+      duration_ms: 0.258261
       type: 'test'
       ...
     # Subtest: human approval binds tenant/user/args and is single-use
     ok 25 - human approval binds tenant/user/args and is single-use
       ---
-      duration_ms: 0.882962
+      duration_ms: 0.819191
       type: 'test'
       ...
     1..25
-ok 59 - 25 runtime invariant probes reject representative cross-domain abuse patterns
+ok 110 - 25 runtime invariant probes reject representative cross-domain abuse patterns
   ---
-  duration_ms: 48.772162
+  duration_ms: 29.586809
   type: 'test'
   ...
 # Subtest: Node and Next adapters reject an ownership pre-check before invoking the route handler
-ok 60 - Node and Next adapters reject an ownership pre-check before invoking the route handler
+ok 111 - Node and Next adapters reject an ownership pre-check before invoking the route handler
   ---
-  duration_ms: 52.07897
+  duration_ms: 34.88846
   type: 'test'
   ...
 # Subtest: authorization matrix denies before route execution and enforces tenant and role constraints
-ok 61 - authorization matrix denies before route execution and enforces tenant and role constraints
+ok 112 - authorization matrix denies before route execution and enforces tenant and role constraints
   ---
-  duration_ms: 0.80858
+  duration_ms: 0.424102
   type: 'test'
   ...
 # Subtest: mutation tripwire requires tenant isolation and a passing pre-handler ownership check
-ok 62 - mutation tripwire requires tenant isolation and a passing pre-handler ownership check
+ok 113 - mutation tripwire requires tenant isolation and a passing pre-handler ownership check
   ---
-  duration_ms: 0.440284
+  duration_ms: 0.360766
   type: 'test'
   ...
 # Subtest: BOPLA strips forbidden write properties and restricted output fields
-ok 63 - BOPLA strips forbidden write properties and restricted output fields
+ok 114 - BOPLA strips forbidden write properties and restricted output fields
   ---
-  duration_ms: 1.343897
+  duration_ms: 1.002229
   type: 'test'
   ...
 # Subtest: scopeQuery injects both tenant and owner predicates without accepting raw SQL
-ok 64 - scopeQuery injects both tenant and owner predicates without accepting raw SQL
+ok 115 - scopeQuery injects both tenant and owner predicates without accepting raw SQL
   ---
-  duration_ms: 0.674307
+  duration_ms: 0.553618
   type: 'test'
   ...
 # Subtest: tenant/user/mode-bound capabilities cover resource IDs in path, query and JSON body
-ok 65 - tenant/user/mode-bound capabilities cover resource IDs in path, query and JSON body
+ok 116 - tenant/user/mode-bound capabilities cover resource IDs in path, query and JSON body
   ---
-  duration_ms: 2.243604
+  duration_ms: 1.590629
   type: 'test'
   ...
 # Subtest: path canonicalization rejects encoded separators and resolves dot segments consistently
-ok 66 - path canonicalization rejects encoded separators and resolves dot segments consistently
+ok 117 - path canonicalization rejects encoded separators and resolves dot segments consistently
   ---
-  duration_ms: 0.236477
+  duration_ms: 0.2043
   type: 'test'
   ...
 # Subtest: WAF normalizes NFKC, detects duplicate JSON/query keys and request-smuggling headers
-ok 67 - WAF normalizes NFKC, detects duplicate JSON/query keys and request-smuggling headers
+ok 118 - WAF normalizes NFKC, detects duplicate JSON/query keys and request-smuggling headers
   ---
-  duration_ms: 9.474269
+  duration_ms: 5.751723
   type: 'test'
   ...
 # Subtest: WAF enforces GraphQL depth, aliases, production introspection, XML XXE and upload magic bytes
-ok 68 - WAF enforces GraphQL depth, aliases, production introspection, XML XXE and upload magic bytes
+ok 119 - WAF enforces GraphQL depth, aliases, production introspection, XML XXE and upload magic bytes
   ---
-  duration_ms: 3.313187
+  duration_ms: 2.504714
   type: 'test'
   ...
 # Subtest: OpenAPI validation covers path, query, headers, and request body
-ok 69 - OpenAPI validation covers path, query, headers, and request body
+ok 120 - OpenAPI validation covers path, query, headers, and request body
   ---
-  duration_ms: 3.012853
+  duration_ms: 2.416882
   type: 'test'
   ...
 # Subtest: OpenAPI JSON Schema composition validates allOf, anyOf and oneOf
-ok 70 - OpenAPI JSON Schema composition validates allOf, anyOf and oneOf
+ok 121 - OpenAPI JSON Schema composition validates allOf, anyOf and oneOf
   ---
-  duration_ms: 0.422627
+  duration_ms: 0.208146
   type: 'test'
   ...
 # Subtest: four dimensional quota helper returns actor, subnet, tenant, and route buckets
-ok 71 - four dimensional quota helper returns actor, subnet, tenant, and route buckets
+ok 122 - four dimensional quota helper returns actor, subnet, tenant, and route buckets
   ---
-  duration_ms: 0.463929
+  duration_ms: 0.170939
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: signed workflow breadcrumbs enforce tenant/user binding, ordered steps and single-use replay protection
-ok 72 - signed workflow breadcrumbs enforce tenant/user binding, ordered steps and single-use replay protection
+ok 123 - signed workflow breadcrumbs enforce tenant/user binding, ordered steps and single-use replay protection
   ---
-  duration_ms: 17.409796
+  duration_ms: 9.414391
   type: 'test'
   ...
 # Subtest: multi-dimensional quota denies when any bucket is exhausted and leases concurrency atomically
-ok 73 - multi-dimensional quota denies when any bucket is exhausted and leases concurrency atomically
+ok 124 - multi-dimensional quota denies when any bucket is exhausted and leases concurrency atomically
   ---
-  duration_ms: 1.132047
+  duration_ms: 0.936229
   type: 'test'
   ...
 # Subtest: account failure counter increments with an atomic expiry window
-ok 74 - account failure counter increments with an atomic expiry window
+ok 125 - account failure counter increments with an atomic expiry window
   ---
-  duration_ms: 0.655348
+  duration_ms: 0.437693
   type: 'test'
   ...
 # Subtest: account retry deadline only moves forward under concurrent failure updates
-ok 75 - account retry deadline only moves forward under concurrent failure updates
+ok 126 - account retry deadline only moves forward under concurrent failure updates
   ---
-  duration_ms: 0.375767
+  duration_ms: 0.347577
   type: 'test'
   ...
 # Subtest: GETDEL atomically consumes JSON challenges in the local adapter
-ok 76 - GETDEL atomically consumes JSON challenges in the local adapter
+ok 127 - GETDEL atomically consumes JSON challenges in the local adapter
   ---
-  duration_ms: 0.345751
+  duration_ms: 0.205291
   type: 'test'
   ...
 # Subtest: circuit breaker opens after three failures and allows one half-open recovery probe
-ok 77 - circuit breaker opens after three failures and allows one half-open recovery probe
+ok 128 - circuit breaker opens after three failures and allows one half-open recovery probe
   ---
-  duration_ms: 71.826035
+  duration_ms: 72.142213
   type: 'test'
   ...
 # Subtest: safe fetch rejects non-HTTPS and private, loopback, decimal and mapped destinations before network access
-ok 78 - safe fetch rejects non-HTTPS and private, loopback, decimal and mapped destinations before network access
+ok 129 - safe fetch rejects non-HTTPS and private, loopback, decimal and mapped destinations before network access
   ---
-  duration_ms: 8.734743
+  duration_ms: 6.624635
   type: 'test'
   ...
 # Subtest: TOTP encrypts secrets and verifies RFC 6238 SHA-1 six-digit vectors
-ok 79 - TOTP encrypts secrets and verifies RFC 6238 SHA-1 six-digit vectors
+ok 130 - TOTP encrypts secrets and verifies RFC 6238 SHA-1 six-digit vectors
   ---
-  duration_ms: 1.718822
+  duration_ms: 1.310125
   type: 'test'
   ...
 # Subtest: WebAuthn parser rejects malformed credentials and non-canonical base64url
-ok 80 - WebAuthn parser rejects malformed credentials and non-canonical base64url
+ok 131 - WebAuthn parser rejects malformed credentials and non-canonical base64url
   ---
-  duration_ms: 0.476058
+  duration_ms: 0.297952
   type: 'test'
   ...
 # Subtest: CIDR matching supports IPv4 and IPv6 prefixes
-ok 81 - CIDR matching supports IPv4 and IPv6 prefixes
+ok 132 - CIDR matching supports IPv4 and IPv6 prefixes
   ---
-  duration_ms: 7.602655
+  duration_ms: 5.622247
   type: 'test'
   ...
 # Subtest: binary prefix trie returns membership for both address families
-ok 82 - binary prefix trie returns membership for both address families
+ok 133 - binary prefix trie returns membership for both address families
   ---
-  duration_ms: 0.536239
+  duration_ms: 0.489883
   type: 'test'
   ...
 # Subtest: WAF does not misclassify unrelated sequential resource IDs as BOLA
-ok 83 - WAF does not misclassify unrelated sequential resource IDs as BOLA
+ok 134 - WAF does not misclassify unrelated sequential resource IDs as BOLA
   ---
-  duration_ms: 17.568865
+  duration_ms: 16.80763
   type: 'test'
   ...
 # Subtest: opaque credentials and rich-text SQL/Markdown do not trigger SQL heuristics, while XSS remains enforceable
-ok 84 - opaque credentials and rich-text SQL/Markdown do not trigger SQL heuristics, while XSS remains enforceable
+ok 135 - opaque credentials and rich-text SQL/Markdown do not trigger SQL heuristics, while XSS remains enforceable
   ---
-  duration_ms: 1.539281
+  duration_ms: 1.475696
   type: 'test'
   ...
 # Subtest: WAF detects representative SSRF and SQLi payloads
-ok 85 - WAF detects representative SSRF and SQLi payloads
+ok 136 - WAF detects representative SSRF and SQLi payloads
   ---
-  duration_ms: 0.699425
+  duration_ms: 0.901385
   type: 'test'
   ...
 # Subtest: JSON schema validator enforces required fields, bounds and additionalProperties
-ok 86 - JSON schema validator enforces required fields, bounds and additionalProperties
+ok 137 - JSON schema validator enforces required fields, bounds and additionalProperties
   ---
-  duration_ms: 0.538733
+  duration_ms: 0.404843
   type: 'test'
   ...
 # Subtest: parsed OpenAPI operations resolve local references and Zod-like safeParse schemas
-ok 87 - parsed OpenAPI operations resolve local references and Zod-like safeParse schemas
+ok 138 - parsed OpenAPI operations resolve local references and Zod-like safeParse schemas
   ---
-  duration_ms: 1.427383
+  duration_ms: 0.850148
   type: 'test'
   ...
 # Subtest: DLP redacts common provider secrets, email, SSN and valid Luhn cards
-ok 88 - DLP redacts common provider secrets, email, SSN and valid Luhn cards
+ok 139 - DLP redacts common provider secrets, email, SSN and valid Luhn cards
   ---
-  duration_ms: 0.486403
+  duration_ms: 0.452996
   type: 'test'
   ...
 # Subtest: Merkle roots are deterministic and validate leaf hashes
-ok 89 - Merkle roots are deterministic and validate leaf hashes
+ok 140 - Merkle roots are deterministic and validate leaf hashes
   ---
-  duration_ms: 1.396316
+  duration_ms: 0.849927
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
 # Subtest: BOLA detection aggregates distinct denied IDs across a session window
-ok 90 - BOLA detection aggregates distinct denied IDs across a session window
+ok 141 - BOLA detection aggregates distinct denied IDs across a session window
   ---
-  duration_ms: 25.845948
+  duration_ms: 16.915494
   type: 'test'
   ...
 # Subtest: configured provider CIDR allowlisting only trusts an explicit operator entry
-ok 91 - configured provider CIDR allowlisting only trusts an explicit operator entry
+ok 142 - configured provider CIDR allowlisting only trusts an explicit operator entry
   ---
-  duration_ms: 0.805565
+  duration_ms: 0.423822
   type: 'test'
   ...
 # Subtest: WAF requires an explicit content type for a non-empty body and rejects malformed JSON media
-ok 92 - WAF requires an explicit content type for a non-empty body and rejects malformed JSON media
+ok 143 - WAF requires an explicit content type for a non-empty body and rejects malformed JSON media
   ---
-  duration_ms: 1.376606
+  duration_ms: 1.012404
   type: 'test'
   ...
 # Subtest: Next.js request DLP rewrites the handler request body when explicitly enabled
-ok 93 - Next.js request DLP rewrites the handler request body when explicitly enabled
+ok 144 - Next.js request DLP rewrites the handler request body when explicitly enabled
   ---
-  duration_ms: 20.167494
+  duration_ms: 20.274303
   type: 'test'
   ...
 # Subtest: Next.js adapter rejects bodies over the configured byte cap before invoking the route
-ok 94 - Next.js adapter rejects bodies over the configured byte cap before invoking the route
+ok 145 - Next.js adapter rejects bodies over the configured byte cap before invoking the route
   ---
-  duration_ms: 1.35933
+  duration_ms: 1.53161
   type: 'test'
   ...
 # Subtest: Next.js adapter scans an explicitly permitted larger JSON body instead of truncating at 32 KiB
-ok 95 - Next.js adapter scans an explicitly permitted larger JSON body instead of truncating at 32 KiB
+ok 146 - Next.js adapter scans an explicitly permitted larger JSON body instead of truncating at 32 KiB
   ---
-  duration_ms: 6.510168
+  duration_ms: 5.542165
   type: 'test'
   ...
 # Subtest: OpenAPI route matcher recognizes documented templates and flags unlisted paths
-ok 96 - OpenAPI route matcher recognizes documented templates and flags unlisted paths
+ok 147 - OpenAPI route matcher recognizes documented templates and flags unlisted paths
   ---
-  duration_ms: 0.354004
+  duration_ms: 0.540919
   type: 'test'
   ...
 # Subtest: JSON schema supports enum, formats, nested additionalProperties and unique arrays
-ok 97 - JSON schema supports enum, formats, nested additionalProperties and unique arrays
+ok 148 - JSON schema supports enum, formats, nested additionalProperties and unique arrays
   ---
-  duration_ms: 0.459163
+  duration_ms: 0.405544
   type: 'test'
   ...
 # Subtest: honeypot bans are actor-scoped and never hard-ban a shared source IP
-ok 98 - honeypot bans are actor-scoped and never hard-ban a shared source IP
+ok 149 - honeypot bans are actor-scoped and never hard-ban a shared source IP
   ---
-  duration_ms: 5.299843
+  duration_ms: 3.332638
   type: 'test'
   ...
 # Subtest: anonymous honeypot hits do not collapse unrelated visitors behind a shared IP
-ok 99 - anonymous honeypot hits do not collapse unrelated visitors behind a shared IP
+ok 150 - anonymous honeypot hits do not collapse unrelated visitors behind a shared IP
   ---
-  duration_ms: 1.238909
+  duration_ms: 3.23484
   type: 'test'
   ...
 # Subtest: ephemeral anonymous request identities do not create ineffective persistent honeypot bans
-ok 100 - ephemeral anonymous request identities do not create ineffective persistent honeypot bans
+ok 151 - ephemeral anonymous request identities do not create ineffective persistent honeypot bans
   ---
-  duration_ms: 0.144969
+  duration_ms: 0.201325
   type: 'test'
   ...
 # [ArixShield] ARIX_MASTER_SECRET is not set; a temporary process-only development secret was generated.
 # Subtest: watermark markers are stable per session and attribution decodes
-ok 101 - watermark markers are stable per session and attribution decodes
+ok 152 - watermark markers are stable per session and attribution decodes
   ---
-  duration_ms: 5.953468
+  duration_ms: 6.025748
   type: 'test'
   ...
 # Subtest: watermarking touches safe display text but preserves IDs, emails and credentials
-ok 102 - watermarking touches safe display text but preserves IDs, emails and credentials
+ok 153 - watermarking touches safe display text but preserves IDs, emails and credentials
   ---
-  duration_ms: 4.158741
+  duration_ms: 1.64353
   type: 'test'
   ...
 # Subtest: WAF canonicalizes nested encodings and removes SQL comments before grammar tokenization
-ok 103 - WAF canonicalizes nested encodings and removes SQL comments before grammar tokenization
+ok 154 - WAF canonicalizes nested encodings and removes SQL comments before grammar tokenization
   ---
-  duration_ms: 0.553494
+  duration_ms: 0.504625
   type: 'test'
   ...
 # Subtest: WAF scans beyond the standard cutoff when a route explicitly allows a larger payload
-ok 104 - WAF scans beyond the standard cutoff when a route explicitly allows a larger payload
+ok 155 - WAF scans beyond the standard cutoff when a route explicitly allows a larger payload
   ---
-  duration_ms: 15.236819
+  duration_ms: 9.943272
   type: 'test'
   ...
 # Subtest: WAF rejects NoSQL operator and prototype-pollution object keys structurally
-ok 105 - WAF rejects NoSQL operator and prototype-pollution object keys structurally
+ok 156 - WAF rejects NoSQL operator and prototype-pollution object keys structurally
   ---
-  duration_ms: 0.495297
+  duration_ms: 0.412275
   type: 'test'
   ...
 # Subtest: HMAC capability IDs bind to the authenticated subject and reject unsealed or foreign IDs
-ok 106 - HMAC capability IDs bind to the authenticated subject and reject unsealed or foreign IDs
+ok 157 - HMAC capability IDs bind to the authenticated subject and reject unsealed or foreign IDs
   ---
-  duration_ms: 3.126565
+  duration_ms: 2.280615
   type: 'test'
   ...
 # Subtest: verified HMAC capability request reports a seal and may skip BOLA velocity
-ok 107 - verified HMAC capability request reports a seal and may skip BOLA velocity
+ok 158 - verified HMAC capability request reports a seal and may skip BOLA velocity
   ---
-  duration_ms: 0.255796
+  duration_ms: 0.272072
   type: 'test'
   ...
 # Subtest: BOLA detector watches successful sequential IDs as well as denied IDs
-ok 108 - BOLA detector watches successful sequential IDs as well as denied IDs
+ok 159 - BOLA detector watches successful sequential IDs as well as denied IDs
   ---
-  duration_ms: 3.605678
+  duration_ms: 2.798018
   type: 'test'
   ...
 # Subtest: ban snapshot index helpers read active values and remove stale set members
-ok 109 - ban snapshot index helpers read active values and remove stale set members
+ok 160 - ban snapshot index helpers read active values and remove stale set members
   ---
-  duration_ms: 0.442167
+  duration_ms: 0.500137
   type: 'test'
   ...
 # Subtest: chameleon canaries preserve numeric ID schema and register exposed identifiers for attribution
-ok 110 - chameleon canaries preserve numeric ID schema and register exposed identifiers for attribution
+ok 161 - chameleon canaries preserve numeric ID schema and register exposed identifiers for attribution
   ---
-  duration_ms: 3.241679
+  duration_ms: 2.407717
   type: 'test'
   ...
 # Subtest: chameleon canaries preserve UUID field shape and reject rows without stable identifiers
-ok 111 - chameleon canaries preserve UUID field shape and reject rows without stable identifiers
+ok 162 - chameleon canaries preserve UUID field shape and reject rows without stable identifiers
   ---
-  duration_ms: 1.614786
+  duration_ms: 1.107697
   type: 'test'
   ...
 # Subtest: real-time audit HMAC chain is sequential and snapshot-verifiable
-ok 112 - real-time audit HMAC chain is sequential and snapshot-verifiable
+ok 163 - real-time audit HMAC chain is sequential and snapshot-verifiable
   ---
-  duration_ms: 0.813717
+  duration_ms: 0.908206
   type: 'test'
   ...
 # Subtest: cross-endpoint correlation challenges the subnet and backs off an actor at the 65-point threshold
-ok 113 - cross-endpoint correlation challenges the subnet and backs off an actor at the 65-point threshold
+ok 164 - cross-endpoint correlation challenges the subnet and backs off an actor at the 65-point threshold
   ---
-  duration_ms: 3.943617
+  duration_ms: 1.950545
   type: 'test'
   ...
 # Subtest: threat-feed confidence halves after 24 hours and stale-feed status is exposed
-ok 114 - threat-feed confidence halves after 24 hours and stale-feed status is exposed
+ok 165 - threat-feed confidence halves after 24 hours and stale-feed status is exposed
   ---
-  duration_ms: 0.913367
+  duration_ms: 0.827113
   type: 'test'
   ...
 # [ArixShield] ARIX_MASTER_SECRET is not set; a temporary process-only development secret was generated.
 # Subtest: 500 tenant-scoped database queries preserve non-overridable tenant and owner predicates
-ok 115 - 500 tenant-scoped database queries preserve non-overridable tenant and owner predicates
+ok 166 - 500 tenant-scoped database queries preserve non-overridable tenant and owner predicates
   ---
-  duration_ms: 10.572995
+  duration_ms: 8.516971
   type: 'test'
   ...
 # Subtest: authenticated owner/peer/foreign-admin/roleless/anonymous workflows fail closed across methods
-ok 116 - authenticated owner/peer/foreign-admin/roleless/anonymous workflows fail closed across methods
+ok 167 - authenticated owner/peer/foreign-admin/roleless/anonymous workflows fail closed across methods
   ---
-  duration_ms: 70.561112
+  duration_ms: 33.545451
   type: 'test'
   ...
 # Subtest: read and write field policies prevent property-level escalation and leakage
-ok 117 - read and write field policies prevent property-level escalation and leakage
+ok 168 - read and write field policies prevent property-level escalation and leakage
   ---
-  duration_ms: 0.677782
+  duration_ms: 0.586288
   type: 'test'
   ...
-1..117
-# tests 142
+1..168
+# tests 193
 # suites 0
-# pass 142
+# pass 193
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 4968.246702
+# duration_ms 5173.838585

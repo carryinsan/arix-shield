@@ -218,3 +218,27 @@ const prisma = protectPrismaClient(new PrismaClient(), {
 Adjust the field names (or configure `modelPolicies`) to match the actual Prisma schema. The adapter automatically scopes its supported read, update, delete, create, createMany and upsert operations to the current tenant and user. It rejects raw SQL, nested relation writes, Prisma extensions and unknown client/delegate operations. Unsupported operation errors are deliberate: use a separately reviewed repository method only after proving tenant isolation. This adapter does not intercept an unwrapped client, a different ORM/driver, background jobs or code that runs outside the SDK middleware. Do not derive the ALS context from request-body fields; the user and tenant must already have been authenticated and authorized. Add database-native RLS where supported.
 
 Stable identity values returned by `getIdentity` should not contain IP addresses. The SDK strips a matching trailing client-IP suffix for continuity across network handoffs; it does not make a browser-supplied identity authenticated.
+
+
+## v1.4.3: optional egress guard, PostgreSQL RLS and host hardening
+
+### Node fetch guard
+
+Set `ARIX_PROCESS_EGRESS_FIREWALL=true` before importing the Node SDK to route global `fetch` calls through `arixSafeFetch`. It allows credential-free HTTPS to globally routable addresses on approved ports (443 by default), pins DNS, caps bodies and rejects cross-origin redirects. Test all required external and internal destinations first. It does not intercept `node:http`, `node:https`, raw sockets, other processes or native modules; configure outbound firewall policy separately. The Upstash REST endpoint remains supported when it is public HTTPS and resolves only to public addresses.
+
+### PostgreSQL tenant RLS
+
+Use `provisionPostgresTenantRls(migrationClient, [{ schema: 'public', table: 'orders', tenantColumn: 'tenant_id' }])` from a controlled migration job, with a complete reviewed tenant-table allowlist. It enables and forces RLS, adds a restrictive tenant policy, and verifies the table flags. The migration role must own the listed tables but must not be a superuser or `BYPASSRLS` role. Existing conflicting policies stop the migration. A restrictive policy is combined with the table's existing permissive access policies; where no permissive policy exists, PostgreSQL's default is deny.
+
+Wrap application queries using `withPostgresTenantTransaction(pool, callback)` inside `runWithArixContext()` so the helper sets `arix.tenant_id` and `arix.user_id` transaction-locally from trusted server-side context. The callback must use only its supplied query facade, not a separately imported pool/client. Ensure every tenant-owned table has the restrictive policy and test inserts, reads, updates, deletes, joins, background jobs and admin paths using the actual runtime role. This helper is PostgreSQL-specific and does not intercept unwrapped Prisma/pg/mysql/Mongo clients.
+
+### Edge client mTLS and Linux runtime attestation
+
+For inbound mTLS, configure `EDGE_TLS_CERT_FILE`, `EDGE_TLS_KEY_FILE`, `EDGE_TLS_CLIENT_CA_FILE`, and `EDGE_REQUIRE_CLIENT_CERT=true`. Rotate certificates using an independently managed CA and test every upstream client before enforcement. The `edge/docker-compose.hardened.yml` example enables read-only rootfs, UID/GID 65532, dropped Linux capabilities, `no-new-privileges`, resource limits and required client certificates. The example does not create firewall rules or supply certificates.
+
+`npm run attest:host` reports the current Linux process UID, `NoNewPrivs` and `CapEff`; `npm run attest:host:strict` exits non-zero if any required control is absent. `ARIX_REQUIRE_HARDENED_HOST=true` makes the API runtime integrity check fail closed on missing controls. Do not enable that setting on a serverless provider until a live deployment proves the controls are present. This is not host/kernel attestation and does not verify seccomp, nftables, cloud ingress or database RLS.
+
+
+### Optional host ingress firewall bootstrap
+
+`scripts/bootstrap-host.mjs` previews a dedicated nftables input-chain table and does not mutate the host by default. Set explicit comma-separated `ARIX_BOOTSTRAP_EDGE_CIDRS` and `ARIX_BOOTSTRAP_SSH_CIDRS`, review the preview, confirm out-of-band console access, then run `npm run provision:host -- --apply-firewall` from a trusted administrative session. It restricts only the configured SSH/edge TCP ports; it is not a complete host firewall or outbound egress policy. The apply path uses an idempotent atomic nftables batch and a boot-time systemd unit. Validate the installed nftables version, systemd behavior, CIDRs and recovery path on the target host before production use.

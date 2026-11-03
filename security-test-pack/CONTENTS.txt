@@ -1,6 +1,5 @@
-ArixShield Security Test-Only Pack
+ArixShield v1.4.4 consolidated security-test index
 
-Contains: test/*.test.js, four test-only runners/generators, ASVS evidence map/matrix, and observed run results.
-Does not contain: ArixShield product source, deployment configuration, package files, credentials, production data, or actual customer DB fixtures.
-Overlay this folder onto the matching ArixShield v1.4.1 repository root before execution.
-See README-TEST-PACK.md for exact commands and scope limitations.
+The canonical test suite, test runners, evidence map, and results are stored once
+in the repository root under test/, scripts/, docs/, and results/. This directory
+contains this pointer and README-TEST-PACK.md only; no duplicate test copies.

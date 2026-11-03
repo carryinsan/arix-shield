@@ -1,0 +1,41 @@
+{
+  "release": "ArixShield 1.4.4 consolidated production-oriented candidate",
+  "date": "2026-11-03",
+  "runtime": "Node.js v22.16.0, Linux x64",
+  "tests": {
+    "command": "npm test",
+    "passed": 193,
+    "failed": 0,
+    "skipped": 0,
+    "top_level_tap_tests": 168,
+    "duration_seconds_approx": 5.2
+  },
+  "static_check": {
+    "command": "npm run check",
+    "javascript_modules_syntax_checked": 110,
+    "api_sdk_imports": 66,
+    "third_party_runtime_dependencies_declared": 0,
+    "static_scanner": "passed",
+    "manifest_files": 113,
+    "manifest_root_sha256": "a01a6281d199af84108b29ce36ae36bd47bfe52128846275ba86fb28efab077a"
+  },
+  "production_build_smoke": {
+    "command": "NODE_ENV=production npm run build",
+    "result": "passed",
+    "credentials": "temporary non-deployable values only",
+    "redis": "dummy Upstash-shaped URL/token; test subprocess stripped both values; no live endpoint contacted",
+    "manifest_after_smoke": "regenerated unsigned"
+  },
+  "not_run_or_not_available": [
+    "live customer deployment",
+    "live Redis/PostgreSQL/MySQL",
+    "production TLS/mTLS PKI handshake",
+    "Docker/Podman Compose execution",
+    "signed audit-bundle verification",
+    "strict hardened-host attestation on a production host",
+    "independent SAST/SCA/DAST/penetration test",
+    "formal OWASP ASVS 5.0.0 Level 3 assessment"
+  ],
+  "historical_measurements": "100k lab and endurance reports in results/ are retained historical artifacts and were not rerun for this merge.",
+  "compliance_claim": "none; not certified or asserted compliant with OWASP ASVS 5.0.0 Level 3"
+}

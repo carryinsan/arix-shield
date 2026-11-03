@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { createEdgeGatewayServer } from '../edge/gateway.mjs';
 import { createCompatibleHandler } from '../api/_lib/vercel-handler.js';
@@ -130,4 +133,40 @@ test('edge gateway refuses non-loopback plaintext upstreams and unsafe URL confi
   assert.throws(() => createEdgeGatewayServer({ upstreamUrl: 'http://origin.example.test/', privateKey, allowInsecureUpstream: true }), /HTTPS/);
   assert.throws(() => createEdgeGatewayServer({ upstreamUrl: 'https://user:pass@origin.example.test/', privateKey }), /without credentials/);
   assert.throws(() => createEdgeGatewayServer({ upstreamUrl: 'https://origin.example.test/base-path', privateKey }), /without credentials/);
+});
+
+
+test('edge gateway enforces a hard TCP connection cap and validates its configuration', () => {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const gateway = createEdgeGatewayServer({
+    upstreamUrl: 'http://127.0.0.1:8081/',
+    privateKey,
+    allowInsecureUpstream: true,
+    maxConnections: 7
+  });
+  assert.equal(gateway.maxConnections, 7);
+  gateway.close();
+  assert.throws(() => createEdgeGatewayServer({
+    upstreamUrl: 'http://127.0.0.1:8081/', privateKey, allowInsecureUpstream: true, maxConnections: 0
+  }), /bounded integer/i);
+});
+
+
+test('edge gateway refuses required inbound mTLS without an explicit client CA', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'arix-edge-mtls-'));
+  try {
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const keyPath = join(directory, 'origin-private.pem');
+    await writeFile(keyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }));
+    await assert.rejects(() => import('../edge/gateway.mjs').then(({ startEdgeGateway }) => startEdgeGateway({
+      EDGE_UPSTREAM_URL: 'https://origin.example.test',
+      EDGE_ORIGIN_PRIVATE_KEY_FILE: keyPath,
+      EDGE_TLS_CERT_FILE: join(directory, 'listener-cert.pem'),
+      EDGE_TLS_KEY_FILE: join(directory, 'listener-key.pem'),
+      EDGE_REQUIRE_CLIENT_CERT: 'true',
+      PORT: '0'
+    })), /EDGE_TLS_CLIENT_CA_FILE/i);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

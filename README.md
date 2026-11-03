@@ -50,3 +50,33 @@ Upstash Redis and the existing `ARIX_MASTER_SECRET` are required for real distri
 ## Security posture
 
 This is an application-layer defense SDK, not a network-layer DDoS service. No zero-vulnerability guarantee is made. The package has not been independently verified/certified against OWASP ASVS 5.0.0 Level 3; the build report documents local test results, customer integration obligations and unverified areas. Client-reported browser signals are spoofable risk indicators, and database authorization remains the application's responsibility. The new modules are not all automatically wired into every route, ORM, worker, tool call, or host. The edge gateway is a deployable application reverse proxy, but is not a global DDoS-scrubbing network or a substitute for cloud ingress/firewall services. See `docs/V3-IMPLEMENTATION-STATUS.md` and the security-boundaries document before integrating them.
+
+## Additional v1.4.3 hardening
+
+- The Node edge gateway now has an explicit accepted-connection ceiling (`EDGE_MAX_CONNECTIONS`) in addition to the existing in-flight request/body/time bounds. It supports optional inbound client-certificate verification using an operator-provided CA (`EDGE_REQUIRE_CLIENT_CERT=true`) and retains upstream TLS/mTLS verification.
+- `ARIX_PROCESS_EGRESS_FIREWALL=true` opts the Node SDK into a process-global **fetch-only** guard. It routes `globalThis.fetch` through the DNS-pinned `arixSafeFetch` transport. It does not intercept `node:http`, `node:net`, direct TLS sockets, native modules, child processes, or kernel traffic; use container/host egress rules for those paths.
+- `withPostgresTenantTransaction()` binds transaction-local tenant and user settings from ArixShield AsyncLocalStorage context and refuses privileged/BYPASSRLS runtime roles. `provisionPostgresTenantRls()` provisions only an explicit operator-supplied table allowlist, under a transaction/advisory lock, with restrictive policies and post-apply verification. These are PostgreSQL helpers, not automatic discovery or a universal ORM hook. Run provisioning as a controlled migration and pass all relevant tenant-owned tables.
+- `ARIX_REQUIRE_HARDENED_HOST=true` makes runtime integrity fail closed unless a Linux process is non-root, has `NoNewPrivs: 1`, and has zero effective Linux capabilities. `npm run attest:host` inspects the current process; `npm run attest:host:strict` exits non-zero when the controls are missing. It does not prove kernel, firewall, database, or cloud configuration.
+- `edge/docker-compose.hardened.yml` supplies a non-root, read-only, no-new-privileges, capability-dropped edge deployment with inbound mTLS. The actual firewall, provider DDoS controls, certificate issuance/rotation and trusted proxy CIDRs remain deployment responsibilities.
+
+The Upstash REST integration remains the shared distributed security-state provider. No Redis replacement, Raft cluster, new third-party runtime dependency, or new API key has been introduced.
+
+
+## Consolidated v1.4.4 additions
+
+- Optional `npm run provision:host` previews a CIDR-scoped nftables ingress guard; it requires explicit edge/SSH CIDRs and an explicit `--apply-firewall` to change host state. Review the generated rules and ensure out-of-band console access before applying.
+- `node --import arixshield/register-egress-firewall app.mjs` is an optional preload; it remains disabled unless `ARIX_PROCESS_EGRESS_FIREWALL=true` is set.
+
+This release consolidates the v1.4.3 baseline with selected, separately opt-in controls from the integrated v1.4.2 archive:
+
+- TLS SNI allowlisting, optional inbound mTLS, bounded TCP connections and per-process pressure-based header/keep-alive shedding in `edge/gateway.mjs`.
+- HMAC edge-clearance tickets and an optional Next.js/Vercel middleware pre-shedder (`middleware.js`).
+- Request-scoped data-access receipts, transaction-local PostgreSQL tenant context, guarded MySQL session variables, explicit SQLite adapter requirements, and database RLS verification.
+- Durable incident alert retry/dead-letter handling on the existing Upstash Redis primary. Delivery is at-least-once, so receivers should deduplicate using `outboxId`.
+- Optional egress agent hooks, host firewall rule generation, hardened container examples, and a WAL-backed quorum state service for separately evaluated deployments.
+
+The replicated state service is not a full Redis/Lua replacement and is not enabled by default. The optional edge and runtime controls do not provide volumetric DDoS scrubbing or replace provider firewalls. Read `docs/GROUNDED-HARDENING.md` and `docs/OPERATIONS.md` before enabling them.
+
+## Chat 5 targeted remediation
+
+The `arix-shield-chat5.zip` archive includes targeted fixes and regression coverage for slow-drip request-body deadlines, ZIP local-record aliasing, non-finite JSON numeric values, and large-body inspection latency. See [docs/CHAT5-REMEDIATION.md](docs/CHAT5-REMEDIATION.md) for exact scope and verification limitations. The supplied stress pack's 5 ms p99 measurement is host-sensitive and is reported from the executed run, not assumed from a median.

@@ -1,0 +1,44 @@
+{
+  "release": "1.4.3",
+  "date": "2026-11-03",
+  "runtime": "Node.js 22.16.0",
+  "npmTest": {
+    "tests": 170,
+    "passed": 170,
+    "failed": 0,
+    "topLevelTapTests": 145
+  },
+  "staticCheck": {
+    "syntaxCheckedModules": 112,
+    "importedApiSdkModules": 58,
+    "thirdPartyRuntimeDependencies": 0,
+    "manifestSourceFiles": 115,
+    "passed": true
+  },
+  "mutualTlsSmoke": {
+    "passed": true,
+    "unauthenticatedClientRejected": true,
+    "authenticatedClientAccepted": true,
+    "httpStatus": 200,
+    "scope": "temporary local CA and certificates; not production PKI"
+  },
+  "upstashPreservation": {
+    "apiLibRedisSha256": "c930746b7f945f9bb699d539a094f8f21ccdbbe34cd8b67c0b73ad0b92bd0050",
+    "matchesUploadedV1_4_2Archive": true
+  },
+  "hostAttestationOnBuildContainer": {
+    "passed": false,
+    "uid": 0,
+    "noNewPrivileges": false,
+    "effectiveCapabilitiesZero": false,
+    "expectedReason": "The build container is not configured as a hardened production container."
+  },
+  "limitations": [
+    "No production deployment or customer infrastructure was tested.",
+    "No live PostgreSQL migration or customer table coverage was tested.",
+    "No live Upstash service was contacted.",
+    "The fetch guard does not intercept raw sockets, http(s) clients, native addons, child processes, or kernel egress.",
+    "The edge gateway does not provide volumetric DDoS scrubbing or an upstream network firewall.",
+    "No independent OWASP ASVS 5.0.0 Level 3 assessment or certification was performed."
+  ]
+}

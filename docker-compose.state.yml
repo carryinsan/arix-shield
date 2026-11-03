@@ -1,0 +1,44 @@
+services:
+  arixshield-state:
+    build:
+      context: .
+      dockerfile: Dockerfile.hardened
+    image: arixshield:hardened
+    command: ["node", "state/replicated-state-server.mjs"]
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-profile.json
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.00
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    volumes:
+      - ./state-data:/var/lib/arixshield-state:rw
+    secrets:
+      - state_tls_cert
+      - state_tls_key
+    environment:
+      NODE_ENV: production
+      ARIX_STATE_ROLE: primary
+      ARIX_STATE_DATA_DIR: /var/lib/arixshield-state
+      ARIX_STATE_LISTEN_HOST: 0.0.0.0
+      ARIX_STATE_PORT: "8090"
+      ARIX_STATE_TLS_CERT_FILE: /run/secrets/state-tls-cert.pem
+      ARIX_STATE_TLS_KEY_FILE: /run/secrets/state-tls-key.pem
+      ARIX_MASTER_SECRET: ${ARIX_MASTER_SECRET:?configure ARIX_MASTER_SECRET}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN:?configure UPSTASH_REDIS_REST_TOKEN}
+    expose: ["8090"]
+    networks: [arix-private]
+    profiles: ["state"]
+
+secrets:
+  state_tls_cert:
+    file: ${ARIX_STATE_TLS_CERT_FILE:?configure ARIX_STATE_TLS_CERT_FILE for the optional state profile}
+  state_tls_key:
+    file: ${ARIX_STATE_TLS_KEY_FILE:?configure ARIX_STATE_TLS_KEY_FILE for the optional state profile}

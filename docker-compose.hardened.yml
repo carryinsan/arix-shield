@@ -1,0 +1,55 @@
+services:
+  arixshield-edge:
+    build:
+      context: .
+      dockerfile: Dockerfile.hardened
+    image: arixshield:hardened
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-profile.json
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.50
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      EDGE_UPSTREAM_URL: ${EDGE_UPSTREAM_URL:?configure EDGE_UPSTREAM_URL}
+      EDGE_ORIGIN_PRIVATE_KEY_FILE: /run/secrets/edge-origin-private.pem
+      EDGE_TLS_CERT_FILE: /run/secrets/edge-tls-cert.pem
+      EDGE_TLS_KEY_FILE: /run/secrets/edge-tls-key.pem
+      EDGE_ALLOWED_SNI_HOSTS: ${EDGE_ALLOWED_SNI_HOSTS:?configure EDGE_ALLOWED_SNI_HOSTS}
+      EDGE_REQUIRE_CLIENT_CERTIFICATE: "false"
+      EDGE_TLS_CLIENT_CA_FILE: ""
+      ARIX_REQUIRE_HARDENED_RUNTIME: "true"
+    secrets:
+      - edge_origin_private_key
+      - edge_tls_cert
+      - edge_tls_key
+    healthcheck:
+      test: ["CMD", "node", "edge/healthcheck.mjs"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks: [arix-private]
+
+networks:
+  arix-private:
+    driver: bridge
+
+secrets:
+  edge_origin_private_key:
+    file: ${EDGE_ORIGIN_PRIVATE_KEY_FILE:?configure EDGE_ORIGIN_PRIVATE_KEY_FILE}
+  edge_tls_cert:
+    file: ${EDGE_TLS_CERT_FILE:?configure EDGE_TLS_CERT_FILE}
+  edge_tls_key:
+    file: ${EDGE_TLS_KEY_FILE:?configure EDGE_TLS_KEY_FILE}

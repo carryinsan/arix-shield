@@ -3,7 +3,7 @@ const ABSOLUTE_MAX_BODY_BYTES = 262144;
 const DEFAULT_MAX_LEAF_BYTES = 4096;
 const MAX_NESTING_DEPTH = 24;
 const MAX_NODES = 6000;
-const STREAM_CHUNK_BYTES = 16 * 1024;
+const STREAM_CHUNK_BYTES = 64 * 1024;
 const STREAM_OVERLAP_BYTES = 512;
 
 const NON_SQL_RULES = [
@@ -27,7 +27,36 @@ const SQL_KEYWORDS = new Set([
 const SQL_OPERATORS = new Set(['OR', 'AND', 'NOT', '=', '!=', '<>', '<', '>', '<=', '>=', '||', '&&']);
 const DANGEROUS_FUNCTIONS = new Set(['SLEEP', 'BENCHMARK', 'PG_SLEEP', 'DBMS_LOCK', 'CHAR', 'CHR', 'ASCII', 'EVAL', 'SYSTEM', 'Popen'.toUpperCase(), 'LOAD_FILE', 'INTO_OUTFILE']);
 const BANNED_FINGERPRINTS = new Set(['SONONC', 'SOSOS', 'KKK', 'OFN', 'OKF']);
+function mayContainSqlGrammar(input) {
+  const text = String(input);
+  if (SQL_GRAMMAR_PUNCTUATION.test(text)) return true;
+  SQL_GRAMMAR_WORDS.lastIndex = 0;
+  let match;
+  while ((match = SQL_GRAMMAR_WORDS.exec(text)) !== null) {
+    // Every recognized SQL keyword/function is at most 12 characters. Avoid
+    // allocating a full uppercase copy when an attacker submits a huge
+    // unbroken identifier (common in maximum-body performance probes).
+    if (match[0].length > 16) continue;
+    const token = match[0].toUpperCase();
+    if (SQL_KEYWORDS.has(token) || DANGEROUS_FUNCTIONS.has(token)) return true;
+  }
+  return false;
+}
 const SYMBOLS = new Set(["'", '"', ';', '(', ')', '{', '}', '$', '\\', '`', '<', '>', '=', '|', '&']);
+const SQL_GRAMMAR_PUNCTUATION = /['"`;=]|--|#|\/\*/;
+const SQL_GRAMMAR_WORDS = /[a-z_][a-z0-9_$]*/gi;
+const NON_SQL_CANDIDATE_NEEDLES = Object.freeze({
+  XSS_SCRIPT: ['script', 'javascript', 'on'],
+  XSS_HTML: ['<iframe', '<object', '<embed', '<svg', '<math', '< iframe', '< object', '< embed', '< svg', '< math'],
+  SSRF_METADATA: ['169.254', 'metadata', '100.100'],
+  SSRF_LOCAL: ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'],
+  PATH_TRAVERSAL: ['..', '%2e'],
+  COMMAND_INJECTION: [';', '$(', '`'],
+  PROMPT_INJECTION: ['ignore', 'reveal', 'developer'],
+  LDAP_INJECTION: [')(|', ')(&', ') (|', ') (&', '\\2a', '\\28', '\\29', '\\5c', '\\00', '*)(', '*) ('],
+  SSTI_TEMPLATE: ['{{', '${', '<%', '__class__', '#{'],
+  UNSAFE_DESERIALIZATION: ['ro0ab', '\\xac\\xed', '¬í', 'o:', 'c:', '__reduce__', 'c__builtin__', '_$$nd_func']
+});
 
 const OPAQUE_FIELD_LIMITS = new Map([
   ['password', 256], ['currentpassword', 256], ['newpassword', 256], ['oldpassword', 256],
@@ -41,11 +70,21 @@ function fieldNameFromPath(path) {
   return String(segments.at(-1) || '').toLowerCase();
 }
 
+function matchingNonSqlRuleFindings(input) {
+  const text = String(input);
+  const lower = text.toLowerCase();
+  const findings = [];
+  for (const rule of NON_SQL_RULES) {
+    const needles = NON_SQL_CANDIDATE_NEEDLES[rule.id];
+    if (needles && !needles.some((needle) => lower.includes(needle))) continue;
+    if (rule.pattern.test(text)) findings.push({ id: rule.id, category: rule.category, severity: rule.severity, detail: `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic.` });
+  }
+  return findings;
+}
+
 function scanNonSqlTextInChunks(input) {
-  return scanTextInChunks(input, (chunk) => {
-    const canonical = canonicalizeSecurityText(chunk).value;
-    return NON_SQL_RULES.filter((rule) => rule.pattern.test(canonical)).map((rule) => ({ id: rule.id, category: rule.category, severity: rule.severity, detail: `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic.` }));
-  });
+  // Callers pass canonicalized text already; avoid decoding every chunk again.
+  return scanTextInChunks(input, matchingNonSqlRuleFindings);
 }
 
 function safeStringify(value) {
@@ -78,19 +117,54 @@ function decodeLiteralEscapes(input) {
 }
 
 function normalizeOnePass(input) {
-  let output = decodeLiteralEscapes(input).normalize('NFKC');
-  try { if (/%[0-9a-f]{2}/i.test(output)) output = decodeURIComponent(output.replace(/\+/g, '%2B')); } catch { /* Malformed percent escapes remain visible to inspection. */ }
-  output = decodeHtmlEntities(output);
-  // Preserve the content of MySQL executable comments; remove ordinary comments.
-  output = output.replace(/\/\*!\s*\d*(.*?)\*\//gs, ' $1 ');
-  output = output.replace(/\/\*[\s\S]*?\*\//g, ' ');
-  // Flatten quoted-string concatenation without evaluating the input.
-  for (let i = 0; i < 3; i++) {
-    const next = output.replace(/(['"])([^'"\r\n]{1,128})\1\s*(?:\+|\|\|)\s*(['"])([^'"\r\n]{1,128})\3/g, (_m, _q1, left, _q2, right) => `'${left}${right}'`);
-    if (next === output) break;
-    output = next;
+  let output = input.normalize('NFKC');
+  let needsRenormalize = false;
+
+  // Large ordinary text bodies are common. One quick sentinel scan avoids
+  // several full-buffer includes/regex passes when there is no encoding,
+  // entity, comment, quote-concatenation or delimiter syntax to decode.
+  if (!/[\\%&\/'"`+|]/.test(output)) {
+    if (!/[\s\u0000-\u001f\u007f]/.test(output)) return output;
+    return output.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim();
   }
-  return output.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const hasEscapes = output.includes('\\');
+  const hasPercentEncoding = output.includes('%') && /%[0-9a-f]{2}/i.test(output);
+  const hasEntities = output.includes('&');
+  const hasComments = output.includes('/*');
+  const hasQuotedConcat = (output.includes("'") || output.includes('"')) && (output.includes('+') || output.includes('||'));
+
+  if (hasEscapes) {
+    const decoded = decodeLiteralEscapes(output);
+    if (decoded !== output) needsRenormalize = true;
+    output = decoded;
+  }
+  if (hasPercentEncoding) {
+    const decoded = (() => { try { return decodeURIComponent(output.replace(/\+/g, '%2B')); } catch { return output; } })();
+    if (decoded !== output) needsRenormalize = true;
+    output = decoded;
+  }
+  if (hasEntities) {
+    const decoded = decodeHtmlEntities(output);
+    if (decoded !== output) needsRenormalize = true;
+    output = decoded;
+  }
+  // Preserve the content of MySQL executable comments; remove ordinary comments.
+  if (hasComments || output.includes('/*')) {
+    output = output.replace(/\/\*!\s*\d*(.*?)\*\//gs, ' $1 ');
+    output = output.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  }
+  // Flatten quoted-string concatenation without evaluating the input.
+  if (hasQuotedConcat || ((output.includes("'") || output.includes('"')) && (output.includes('+') || output.includes('||')))) {
+    for (let i = 0; i < 3; i++) {
+      const next = output.replace(/(['"])([^'"\r\n]{1,128})\1\s*(?:\+|\|\|)\s*(['"])([^'"\r\n]{1,128})\3/g, (_m, _q1, left, _q2, right) => `'${left}${right}'`);
+      if (next === output) break;
+      output = next;
+    }
+  }
+  if (needsRenormalize) output = output.normalize('NFKC');
+  if (!/[\s\u0000-\u001f\u007f]/.test(output)) return output;
+  return output.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim();
 }
 
 /** Decode at most three layers. Still-changing input is suspicious, not silently truncated. */
@@ -174,19 +248,23 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
   if (depth > MAX_NESTING_DEPTH) { state.tooDeep = true; return; }
   if (state.nodes > MAX_NODES) { state.tooMany = true; return; }
   if (value === null || typeof value !== 'object') {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      add('JSON_NON_FINITE_NUMBER', 'PROTOCOL', 'high', `Non-finite JSON number detected at ${path.slice(0, 80)}.`);
+      return;
+    }
     const fieldName = fieldNameFromPath(path);
     const opaqueLimit = OPAQUE_FIELD_LIMITS.get(fieldName);
     if (opaqueLimit) {
       if (typeof value !== 'string') add('OPAQUE_FIELD_TYPE', 'PROTOCOL', 'high', `Opaque security field at ${path.slice(0, 70)} must be a string.`);
       else {
-        const bytes = new TextEncoder().encode(value).length;
+        const bytes = Buffer.byteLength(value, 'utf8');
         if (bytes > opaqueLimit) add('OPAQUE_FIELD_SIZE', 'PROTOCOL', 'high', `Opaque security field at ${path.slice(0, 70)} exceeds its ${opaqueLimit}-byte limit.`);
         if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) add('CONTROL_CHARACTERS', 'PROTOCOL', 'medium', `Control characters detected in opaque field at ${path.slice(0, 70)}.`);
       }
       return; // Passwords, tokens, signatures and hashes are opaque data, not SQL grammar.
     }
     if (typeof value === 'string') {
-      const bytes = new TextEncoder().encode(value).length;
+      const bytes = Buffer.byteLength(value, 'utf8');
       const allowedLong = Array.isArray(options.allowedLongFields) && options.allowedLongFields.some((name) => path === name || path.endsWith(`.${name}`));
       if (bytes > options.maxLeafBytes && !allowedLong) add('BODY_LEAF_SIZE', 'PROTOCOL', 'high', `String leaf at ${path.slice(0, 80)} exceeds ${options.maxLeafBytes} bytes.`);
       const canonical = canonicalizeSecurityText(value);
@@ -198,8 +276,8 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
       // A prose/code field is not SQL to be executed: do not treat SQL comment
       // tokens or tutorial grammar as an injection. Non-SQL exploit checks keep
       // their real severity in every field (including rich text).
-      for (const rule of NON_SQL_RULES) if (rule.pattern.test(text)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic at ${path.slice(0, 80)}.`);
-      const scan = richText ? scanNonSqlTextInChunks(text) : scanTextInChunks(text);
+      for (const finding of matchingNonSqlRuleFindings(text)) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 80)}.`);
+      const scan = richText ? scanNonSqlTextInChunks(text) : scanTextInChunks(text, grammarFindings);
       for (const finding of scan) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 60)}.`);
       // Symbol density alone is not an exploit indicator and is never a blocking rule.
       if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) add('CONTROL_CHARACTERS', 'PROTOCOL', 'medium', `Control characters detected at ${path.slice(0, 80)}.`);
@@ -224,6 +302,7 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
 /** Scan a byte/string stream in bounded chunks with overlap so boundary-spanning payloads are not lost. */
 export function scanTextInChunks(input, scan = (chunk) => grammarFindings(canonicalizeSecurityText(chunk).value), options = {}) {
   const text = String(input ?? '');
+  if (scan === grammarFindings && !mayContainSqlGrammar(text)) return [];
   const chunkSize = Math.max(1024, Math.min(64 * 1024, Number(options.chunkBytes) || STREAM_CHUNK_BYTES));
   const overlap = Math.max(64, Math.min(4096, Number(options.overlapBytes) || STREAM_OVERLAP_BYTES));
   const findings = [];
@@ -286,9 +365,23 @@ function scanDuplicateJsonKeys(input) {
     const start = index;
     while (index < source.length && !/[\s,\]}]/.test(source[index])) index++;
     if (start === index) throw new Error('Expected JSON value.');
+    const token = source.slice(start, index);
+    if (token === 'true' || token === 'false' || token === 'null') return;
+    if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(token)) throw new Error('Invalid JSON primitive.');
+    if (!Number.isFinite(Number(token))) throw Object.assign(new Error('Non-finite JSON number.'), { nonFiniteNumber: token });
   };
-  try { parseValue(); whitespace(); if (index !== source.length) return { valid: false, duplicate: false }; return { valid: true, duplicate: false }; }
-  catch (error) { return { valid: false, duplicate: Boolean(error?.duplicateKey), key: error?.duplicateKey || null }; }
+  try {
+    parseValue(); whitespace();
+    if (index !== source.length) return { valid: false, duplicate: false, nonFiniteNumber: null };
+    return { valid: true, duplicate: false, nonFiniteNumber: null };
+  } catch (error) {
+    return {
+      valid: false,
+      duplicate: Boolean(error?.duplicateKey),
+      key: error?.duplicateKey || null,
+      nonFiniteNumber: error?.nonFiniteNumber || null
+    };
+  }
 }
 
 function graphqlLimits(query) {
@@ -445,7 +538,7 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
     add('HTTP2_CONNECTION_SPECIFIC_HEADER', 'PROTOCOL', 'critical', 'HTTP/2 and HTTP/3 requests must not contain connection-specific headers.');
   }
   const bodyText = safeStringify(body);
-  const bytes = rawBody ? (rawBody.byteLength ?? rawBody.length ?? 0) : new TextEncoder().encode(bodyText === 'null' ? '' : bodyText).length;
+  const bytes = rawBody ? (rawBody.byteLength ?? rawBody.length ?? 0) : Buffer.byteLength(bodyText === 'null' ? '' : bodyText, 'utf8');
   const declaredBytes = Number(contentLength) || 0;
   const configuredMax = Math.max(1024, Math.min(ABSOLUTE_MAX_BODY_BYTES, Number(maxBodyBytes) || DEFAULT_MAX_BODY_BYTES));
   if (declaredBytes > configuredMax || bytes > configuredMax) add('BODY_SIZE', 'PROTOCOL', 'high', `Request body exceeds the configured ${configuredMax}-byte inspection limit.`);
@@ -479,9 +572,10 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
   if (rawJson) {
     const duplicateScan = scanDuplicateJsonKeys(rawJson);
     if (duplicateScan.duplicate) add('JSON_DUPLICATE_KEY', 'PROTOCOL', 'high', `Duplicate JSON object key detected${duplicateScan.key ? `: ${duplicateScan.key}` : ''}.`);
-    else if (!duplicateScan.valid) add('JSON_MALFORMED', 'PROTOCOL', 'high', 'Raw JSON could not be parsed consistently.');
+    if (duplicateScan.nonFiniteNumber) add('JSON_NON_FINITE_NUMBER', 'PROTOCOL', 'high', 'JSON numeric value overflows the finite JavaScript number range.');
+    if (!duplicateScan.valid && !duplicateScan.duplicate && !duplicateScan.nonFiniteNumber) add('JSON_MALFORMED', 'PROTOCOL', 'high', 'Raw JSON could not be parsed consistently.');
   }
-  if (body && typeof body === 'object' && !ArrayBuffer.isView(body)) {
+  if (body !== null && (typeof body === 'number' || (typeof body === 'object' && !ArrayBuffer.isView(body)))) {
     const state = { nodes: 0, tooDeep: false, tooMany: false };
     inspectStructure(body, { maxLeafBytes: Math.max(128, Math.min(65536, Number(maxLeafBytes) || DEFAULT_MAX_LEAF_BYTES)), allowedLongFields }, state, '$', 0, add);
     if (state.tooDeep) add('JSON_DEPTH', 'PROTOCOL', 'high', `JSON nesting exceeds ${MAX_NESTING_DEPTH} levels.`);
@@ -490,8 +584,8 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
     if (/\/\*!\s*\d{5,}\s*(?:UNION|SELECT|INSERT|UPDATE|DELETE|DROP|SLEEP)\b/i.test(body)) add('SQLI_VERSIONED_COMMENT', 'SQL_INJECTION', 'high', 'Executable MySQL versioned comment containing SQL instructions detected.');
     const canonical = canonicalizeSecurityText(body);
     if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', 'Repeated encoding did not reach a canonical form.');
-    for (const rule of NON_SQL_RULES) if (rule.pattern.test(canonical.value)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic.`);
-    for (const finding of scanTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, finding.detail);
+    for (const finding of matchingNonSqlRuleFindings(canonical.value)) add(finding.id, finding.category, finding.severity, finding.detail);
+    for (const finding of scanTextInChunks(canonical.value, grammarFindings)) add(finding.id, finding.category, finding.severity, finding.detail);
   }
   if (/\b(?:application\/xml|text\/xml)\b/i.test(contentType)) {
     const xmlText = typeof body === 'string' ? body : rawBody ? (typeof rawBody === 'string' ? rawBody : new TextDecoder('utf-8', { fatal: false }).decode(rawBody)) : rawJson || '';
@@ -517,6 +611,7 @@ export function validateJsonSchema(value, schema, path = '$', depth = 0) {
   const expected = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
   const normalized = actual === 'number' && Number.isInteger(value) && expected.includes('integer') ? 'integer' : actual;
   if (expected.length && !expected.includes(actual) && !expected.includes(normalized)) errors.push(`${path}: expected ${expected.join('|')}, got ${actual}`);
+  if (typeof value === 'number' && !Number.isFinite(value)) errors.push(`${path}: number must be finite`);
   for (const subschema of schema.allOf || []) {
     const result = validateJsonSchema(value, subschema, path, depth + 1);
     errors.push(...result.errors);

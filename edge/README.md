@@ -29,7 +29,8 @@ Gateway environment:
 - `EDGE_TLS_CERT_FILE` and `EDGE_TLS_KEY_FILE`, or a private trusted TLS terminator
 - `EDGE_TRUSTED_PROXY_CIDRS` only when a known load balancer/CDN sits directly in front
 - `EDGE_CLIENT_IP_HEADER` must name the single-IP header written by that trusted proxy (default `x-forwarded-for`; comma-separated chains are rejected)
-- Optional bounds: `EDGE_MAX_BODY_BYTES` (1 MiB default, maximum 10 MiB), `EDGE_MAX_CONCURRENT_REQUESTS` (256 default), `EDGE_MAX_BUFFERED_BYTES` (32 MiB default)
+- Optional bounds: `EDGE_MAX_BODY_BYTES` (1 MiB default, maximum 10 MiB), `EDGE_MAX_CONCURRENT_REQUESTS` (256 default), `EDGE_MAX_CONNECTIONS` (512 default, maximum 8,192), `EDGE_MAX_BUFFERED_BYTES` (32 MiB default)
+- Optional inbound mTLS: set `EDGE_REQUIRE_CLIENT_CERT=true` and provide `EDGE_TLS_CLIENT_CA_FILE` alongside listener TLS certificate/key files. Clients without a certificate chaining to that CA are rejected during the TLS handshake. This is a real certificate-based TLS control; it is not a generated key derived from `ARIX_MASTER_SECRET`.
 
 Origin environment:
 
@@ -46,16 +47,23 @@ The signed proof expires after 30 seconds by default and nonce consumption fails
 node edge/gateway.mjs
 ```
 
-The Dockerfile runs as the unprivileged `node` user. Mount the private key and TLS material as read-only secrets. Add resource limits, a private container network, an upstream egress allowlist, a health check, central logs and an external managed DDoS provider in the deployment platform. The in-memory connection/backpressure limits are per process and are not distributed rate limits.
+The Dockerfile runs as UID/GID 65532. `edge/docker-compose.hardened.yml` demonstrates read-only root filesystem, dropped capabilities, `no-new-privileges`, PID/memory/CPU bounds and mandatory inbound mTLS. Provide the referenced secret file paths before using that Compose file. For file-backed Compose secrets, make the private-key source files readable by UID 65532 only (for example, owner 65532 and mode 0400) on the host; do not assume Compose can rewrite bind-mounted file ownership/mode. Add resource limits, a private container network, an upstream egress allowlist, a health check, central logs and an external managed DDoS provider in the deployment platform. The accepted-connection and in-memory request/backpressure limits are per process and are not distributed rate limits. `server.maxConnections` is a coarse connection admission ceiling, not SYN-cookie protection or a guarantee that no parser work occurs before a socket is dropped.
 
 ## Operational limits
 
 - This proxy buffers each request body before signing it; the configured aggregate buffer cap is enforced to bound memory. Raise limits only after load testing and matching origin limits.
 - It uses Node's strict HTTP/1 parser. The browser/API deployment must use the same effective canonical request-target and body bytes at the origin.
-- It does not implement HTTP/2, WebSockets, arbitrary TCP tunnelling, global rate coordination, managed bot challenges, global scrubbing, or a network firewall.
+- It does not implement HTTP/2, WebSockets, arbitrary TCP tunnelling, global rate coordination, managed bot challenges, global scrubbing, or a network firewall. Do not prepend an application-specific 64-byte SPA frame to ordinary TLS traffic: this gateway uses standard TLS/HTTP and does not inspect ciphertext as a custom authentication protocol.
 - TLS, origin firewalling, DNS, certificate rotation, autoscaling, observability, DDoS scrubbing and multi-region failover must be configured and tested in the actual hosting account.
 
 
 ## Timeout and connection behavior
 
 The upstream deadline is absolute per request, in addition to the idle-socket timeout; a slow-drip response cannot hold a request slot forever. A downstream disconnect aborts the corresponding upstream request. The gateway destroys its keep-alive upstream agent when the listener closes.
+
+
+## Inbound mutual TLS and host deployment
+
+For a private gateway-to-gateway deployment, provision a CA and client certificates using your existing certificate authority. Mount the CA bundle at `EDGE_TLS_CLIENT_CA_FILE`, set `EDGE_REQUIRE_CLIENT_CERT=true`, and ensure every upstream load balancer that connects to this listener presents a certificate chained to that CA. Do not derive X.509 identity/trust material from `ARIX_MASTER_SECRET`; deterministic secret-derived keys do not provide independent certificate issuance, expiry or revocation.
+
+The hardened Compose file intentionally requires inbound mTLS files. It does not create host firewall rules. Bind the published port to a private interface, allow ingress only from the trusted load balancer/CDN ranges, and separately restrict origin ingress to gateway egress. Keep Docker's default seccomp profile enabled unless a workload-tested custom profile exists. Use a managed DDoS provider before this service.

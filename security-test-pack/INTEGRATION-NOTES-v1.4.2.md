@@ -1,5 +1,0 @@
-# Test pack integration notes for ArixShield 1.4.2
-
-The original security test pack is preserved unchanged in this directory. Its tests, verifier and runners were also overlaid into the repository root as described by its README so they can run against the upgraded source. Three additional regression files cover the 1.4.2 integration increment: `test/edge-gateway.test.js`, `test/bot-risk-boundary.test.js` and `test/customer-record-encryption.test.js`. They contain seven focused regression cases. The final integrated suite reports 149 passing tests, 0 failures.
-
-Fresh local runs generated the root `results/100k-lab-results.json`, `results/100k-lab-report.md`, `results/endurance-results.json`, and `results/endurance-report.md`. These are synthetic/in-process lab results and are not production DDoS, live Redis, real-browser-farm or database test evidence. The official ASVS 5.0.0 JSON was not bundled or available to the local container; the verifier remains able to generate a requirement-by-requirement ledger when that official source file is supplied. The repository's ASVS claim therefore remains explicitly unverified.

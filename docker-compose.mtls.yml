@@ -1,0 +1,11 @@
+services:
+  arixshield-edge:
+    environment:
+      EDGE_REQUIRE_CLIENT_CERTIFICATE: "true"
+      EDGE_TLS_CLIENT_CA_FILE: /run/secrets/edge-tls-client-ca.pem
+    secrets:
+      - edge_tls_client_ca
+
+secrets:
+  edge_tls_client_ca:
+    file: ${EDGE_TLS_CLIENT_CA_FILE:?configure EDGE_TLS_CLIENT_CA_FILE with the trusted client CA bundle}

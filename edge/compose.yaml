@@ -1,0 +1,49 @@
+services:
+  arixshield-edge:
+    build:
+      context: ..
+      dockerfile: edge/Dockerfile
+    image: arixshield-edge:1.4.4
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:../seccomp-profile.json
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    ports:
+      - "${EDGE_HOST_BIND_ADDRESS:-127.0.0.1}:${EDGE_HOST_PORT:-443}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      ARIX_REQUIRE_HARDENED_RUNTIME: "true"
+      EDGE_UPSTREAM_URL: ${EDGE_UPSTREAM_URL:?set EDGE_UPSTREAM_URL}
+      EDGE_ALLOWED_SNI_HOSTS: ${EDGE_ALLOWED_SNI_HOSTS:?set EDGE_ALLOWED_SNI_HOSTS}
+      EDGE_ORIGIN_PRIVATE_KEY_FILE: /run/secrets/edge-origin-private.pem
+      EDGE_TLS_CERT_FILE: /run/secrets/edge-tls-cert.pem
+      EDGE_TLS_KEY_FILE: /run/secrets/edge-tls-key.pem
+      EDGE_MAX_CONNECTIONS: "1024"
+      EDGE_MAX_CONCURRENT_REQUESTS: "256"
+    secrets:
+      - edge_origin_private_key
+      - edge_tls_cert
+      - edge_tls_key
+    healthcheck:
+      test: ["CMD", "node", "edge/healthcheck.mjs"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+secrets:
+  edge_origin_private_key:
+    file: ./secrets/edge-origin-private.pem
+  edge_tls_cert:
+    file: ./secrets/edge-tls-cert.pem
+  edge_tls_key:
+    file: ./secrets/edge-tls-key.pem

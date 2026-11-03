@@ -1,0 +1,20 @@
+{
+  "target": "ArixShield",
+  "targetVersion": "1.4.4",
+  "packVersion": "1.0.0",
+  "startedAt": "2026-11-03T10:36:28.756Z",
+  "completedAt": "2026-11-03T10:36:33.675Z",
+  "durationMs": 4919,
+  "node": "v22.16.0",
+  "platform": "linux/x64",
+  "stressRequests": 50000,
+  "raceWorkers": 12,
+  "exitCode": 0,
+  "signal": null,
+  "tests": 30,
+  "passed": 30,
+  "failed": 0,
+  "skipped": 0,
+  "todo": 0,
+  "errors": []
+}

@@ -1,6 +1,10 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { sanitizeArixIdentity } from './identity.js';
-import { runWithArixContext } from './context.js';
+import { runWithArixContext, hasScopedDataReceipt } from './context.js';
+import { installProcessEgressFirewall } from './process-egress-firewall.js';
+
+// Opt in before application handlers start; do not mutate global fetch by default.
+if (process.env.ARIX_PROCESS_EGRESS_FIREWALL === 'true') installProcessEgressFirewall();
 import { isIP } from 'node:net';
 import { inspectRequest, redactSensitiveText } from '../api/_lib/waf-engine.js';
 import { authorizeRequest, filterReadFields, filterWriteFields, normalizeSecurityPath, scopeQuery } from '../api/_lib/authorization.js';
@@ -101,6 +105,121 @@ function getGeoHints(req) {
 }
 function requestHeader(req, name) { return req.headers?.[name] ?? req.headers?.[name.toLowerCase()]; }
 function safeHeaders(headers) { const result = {}; for (const name of ['accept', 'content-type', 'user-agent', 'x-request-id']) if (headers?.[name] !== undefined) result[name] = String(headers[name]).slice(0, 180); return result; }
+
+export function installScopedResponseReceiptGate(res) {
+  if (!res || typeof res.end !== 'function' || res.__arixScopedReceiptGate) return;
+  Object.defineProperty(res, '__arixScopedReceiptGate', { value: true });
+  const originalEnd = res.end;
+  const originalWrite = typeof res.write === 'function' ? res.write : null;
+  const originalWriteHead = typeof res.writeHead === 'function' ? res.writeHead : null;
+  const originalFlushHeaders = typeof res.flushHeaders === 'function' ? res.flushHeaders : null;
+  const queued = [];
+  const maxBufferedBytes = 4 * 1024 * 1024;
+  let bufferedBytes = 0;
+  let pendingHead = null;
+  let flushed = false;
+  let overflow = false;
+
+  const applyPendingHeadersForInspection = (args) => {
+    const extra = typeof args[1] === 'string' ? args[2] : args[1];
+    try {
+      if (Array.isArray(extra)) {
+        for (let index = 0; index + 1 < extra.length; index += 2) res.setHeader?.(String(extra[index]), extra[index + 1]);
+      } else if (extra && typeof extra === 'object') {
+        for (const [name, value] of Object.entries(extra)) res.setHeader?.(name, value);
+      }
+    } catch { /* The original writeHead call remains authoritative at flush time. */ }
+  };
+  const isProtectedJson = () => Number(res.statusCode || 200) === 200
+    && /application\/(?:[a-z0-9.+-]+\+)?json/i.test(String(res.getHeader?.('content-type') || ''));
+  const flushHead = () => {
+    if (flushed || !originalWriteHead) return;
+    flushed = true;
+    if (pendingHead) originalWriteHead.apply(res, pendingHead);
+    else originalWriteHead.call(res, Number(res.statusCode || 200));
+  };
+  const asBuffer = (chunk, encoding) => {
+    if (chunk === undefined || chunk === null) return null;
+    if (Buffer.isBuffer(chunk)) return chunk;
+    if (ArrayBuffer.isView(chunk)) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    return Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : 'utf8');
+  };
+  const queueChunk = (chunk, encoding, callback) => {
+    const bytes = asBuffer(chunk, encoding);
+    if (bytes?.length) {
+      bufferedBytes += bytes.length;
+      if (bufferedBytes > maxBufferedBytes) overflow = true;
+      else queued.push(bytes);
+    }
+    if (typeof callback === 'function') queued.push(callback);
+  };
+  const flushQueued = () => {
+    for (const item of queued) {
+      if (typeof item === 'function') item();
+      else if (item.length) originalWrite?.call(res, item);
+    }
+    queued.length = 0;
+  };
+  const reject = (callback) => {
+    res.statusCode = 500;
+    try { res.removeHeader?.('Content-Length'); res.removeHeader?.('content-length'); } catch { /* Optional framework API. */ }
+    res.setHeader?.('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader?.('Cache-Control', 'no-store, max-age=0');
+    res.setHeader?.('X-Content-Type-Options', 'nosniff');
+    pendingHead = null;
+    flushed = false;
+    flushHead();
+    const body = JSON.stringify({ error: overflow ? 'Scoped Data Response Too Large' : 'Unscoped Data Access Blocked' });
+    queued.length = 0;
+    return originalEnd.call(res, body, callback);
+  };
+
+  if (originalWriteHead) {
+    res.writeHead = function arixScopedDeferredWriteHead(...args) {
+      if (flushed) return originalWriteHead.apply(res, args);
+      pendingHead = args;
+      if (Number(args[0]) > 0) res.statusCode = Number(args[0]);
+      if (typeof args[1] === 'string') res.statusMessage = args[1];
+      applyPendingHeadersForInspection(args);
+      // Headers are intentionally deferred until the first non-JSON write or
+      // end(), so an unscoped JSON status/body can still be replaced atomically.
+      return res;
+    };
+  }
+  if (originalFlushHeaders) {
+    res.flushHeaders = function arixScopedDeferredFlushHeaders() {
+      if (isProtectedJson() && !hasScopedDataReceipt()) return res;
+      flushHead();
+      return originalFlushHeaders.call(res);
+    };
+  }
+  if (originalWrite) {
+    res.write = function arixScopedGuardedWrite(chunk, encoding, callback) {
+      if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+      if (!flushed && isProtectedJson()) {
+        queueChunk(chunk, encoding, callback);
+        return !overflow;
+      }
+      flushHead();
+      flushQueued();
+      return originalWrite.call(res, chunk, encoding, callback);
+    };
+  }
+  res.end = function arixScopedGuardedEnd(chunk, encoding, callback) {
+    if (typeof chunk === 'function') { callback = chunk; chunk = undefined; encoding = undefined; }
+    else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+    if (!flushed && isProtectedJson()) {
+      queueChunk(chunk, encoding, null);
+      if (!hasScopedDataReceipt() || overflow) return reject(callback);
+      flushHead();
+      flushQueued();
+      return originalEnd.call(res, undefined, callback);
+    }
+    flushHead();
+    flushQueued();
+    return originalEnd.call(res, chunk, encoding, callback);
+  };
+}
 
 export function createArixShield(options = {}) {
   const mode = options.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE'; const limit = Math.max(10, Math.min(10000, Number(options.rateLimitPerMinute) || 120)); const endpoint = String(options.endpoint ?? '').replace(/\/$/, ''); const serverKey = options.serverKey;
@@ -354,7 +473,10 @@ export function createArixShield(options = {}) {
       const event = { action: 'record-outcome', actorId: securityActor, userId: securityActor, ip: clientIp, path: pathname, method, status: res.statusCode, latencyMs: Date.now() - started, resourceCapabilityVerified, ...geo, safeHeaders: safeHeaders(req.headers), findings: findings.slice(0, 20) };
       serverAction(endpoint, serverKey, event, 2500).catch((error) => options.onTelemetryError?.(error));
     });
-    return runWithArixContext({ userId: verifiedContextUserId, tenantId, roles, permissions: authz.context?.permissions || [], method, path: pathname }, () => next());
+    return runWithArixContext({ userId: verifiedContextUserId, tenantId, roles, permissions: authz.context?.permissions || [], method, path: pathname }, () => {
+      if (options.requireScopedDataReceipt === true) installScopedResponseReceiptGate(res);
+      return next();
+    });
   };
 }
 
@@ -387,3 +509,6 @@ export { compileOpenApiRequestSchema } from '../api/_lib/schema.js';
 
 export { getArixContext, protectPrismaClient } from './context.js';
 export { runWithArixContext };
+
+export { installProcessEgressFirewall } from './process-egress-firewall.js';
+export { withPostgresTenantTransaction, provisionPostgresTenantRls } from '../api/_lib/postgres-rls.js';

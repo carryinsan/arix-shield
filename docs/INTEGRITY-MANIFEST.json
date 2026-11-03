@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 108,
-  "rootDigest": "c8eaf34564c4ae7eda10170dcb73d6ce5bb75b1fe63343a884c10483e5eeb8f3",
+  "fileCount": 114,
+  "rootDigest": "bf719d2048a47d05d37d6d43e5be966bdbc2b233651ac3eaccacdd7761ff1f2d",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -15,7 +15,7 @@
     },
     {
       "path": "api/_lib/alerts.js",
-      "sha256": "770299de03a450b5d41873a2586abe23257b5951a39e1a1d26f98dc75554fccf"
+      "sha256": "f2494d9c15abcd2946eeefdfe558b209ddc84613c1a5b5997c20c4f54dd69f20"
     },
     {
       "path": "api/_lib/analytics.js",
@@ -58,6 +58,18 @@
       "sha256": "c2767268ba1007cc478a77e4a74987c7209961925251572e30513be55bd8f38d"
     },
     {
+      "path": "api/_lib/db-guard.js",
+      "sha256": "991bd4ec09ce39095a629fce326acc87f51231917c38f116f14c0afa7e9aecd1"
+    },
+    {
+      "path": "api/_lib/db.js",
+      "sha256": "a91ca3508a7b5eaef993ffd1d2904cc030f0cd72412267dab4dbceae4d03c360"
+    },
+    {
+      "path": "api/_lib/deployment-attestation.js",
+      "sha256": "4084cc3a512ce1dc6be3f7ad3a103283b100a9a1962c63a0b8e107f7ca8904fd"
+    },
+    {
       "path": "api/_lib/dr-backup.js",
       "sha256": "8bede1a4de4cdb6641b363d9629a097ad0b0837b68fc1a97a90e5314699f8a39"
     },
@@ -66,8 +78,16 @@
       "sha256": "61e3f2c67f818033c3848cb470d435fc01b88c5c5618cbb952b96680fb55f67e"
     },
     {
+      "path": "api/_lib/edge-clearance.js",
+      "sha256": "aec83a77e2544e7e068d38997c6981f8cae3cd8ef207afe88134068eefd05014"
+    },
+    {
       "path": "api/_lib/file-security.js",
-      "sha256": "4b0e447c6aca20d839e65f424de2f4a280e652227add17946707734c18d42d5e"
+      "sha256": "72e34e05a136f7be6f6219d2b38a06e445ac5f95fa0cbfa05a406ee035d597da"
+    },
+    {
+      "path": "api/_lib/host-attestation.js",
+      "sha256": "8d870b436bc62d07a07a9ff195ae82e6a3349e1f17c37f00782f0f9043918673"
     },
     {
       "path": "api/_lib/http.js",
@@ -79,7 +99,7 @@
     },
     {
       "path": "api/_lib/integrity.js",
-      "sha256": "5f605bea4ac0a8a5e8a416dff861a36c0b5fc7ebc87cdde9fc1af2866fe7a89a"
+      "sha256": "84c7df8af579e6744286235da21e4933803d8059afe6717961cda1b6474e335c"
     },
     {
       "path": "api/_lib/kms.js",
@@ -102,12 +122,16 @@
       "sha256": "5ea6687f6c969e9429e33e643d3e07e8b0ae93b14939966efbe6a3c36ced86ab"
     },
     {
+      "path": "api/_lib/postgres-rls.js",
+      "sha256": "6e65642f095e380848019b8a6d1623fe26a8f54faf3baf1e8ef93e4013cdc733"
+    },
+    {
       "path": "api/_lib/recovery-codes.js",
       "sha256": "534a7c60622c7c086f84f3445935a4547835e7766694d5340441a87ae0248ea6"
     },
     {
       "path": "api/_lib/redis.js",
-      "sha256": "c930746b7f945f9bb699d539a094f8f21ccdbbe34cd8b67c0b73ad0b92bd0050"
+      "sha256": "6b94a163c995688af84becf69e2345c45309c3f3ceb31c5cc1b33e77395c0dfc"
     },
     {
       "path": "api/_lib/reputation.js",
@@ -151,7 +175,7 @@
     },
     {
       "path": "api/_lib/waf-engine.js",
-      "sha256": "c132072afbdc123c51d3f9b61b77e7d5d5c74ee0cad925ede75750aa3fca632b"
+      "sha256": "55f86af9671f8c43cc6bfd40a6285c91b35f234b9010cfbb4c87034dc84239b1"
     },
     {
       "path": "api/_lib/watermark.js",
@@ -171,7 +195,7 @@
     },
     {
       "path": "api/cron/audit-anchor.js",
-      "sha256": "8c56d79cffee204356a3f1ce44658578938e250be0f6b7d45cb502cd8b0c43dd"
+      "sha256": "aad55cb92a6ae0a2b0f3ac3300db49ea139e386d2e7c34506ba03eaea9a69da0"
     },
     {
       "path": "api/cron/threat-feeds.js",
@@ -203,11 +227,15 @@
     },
     {
       "path": "edge/gateway.mjs",
-      "sha256": "d7587b607ea569415df6db786ca1b549944664d6df7712ab90fcb25413582e1e"
+      "sha256": "59a2457400c6c8803201bbe093f68a5ac87c69a2459d35030dd0e13ab5e2cca7"
     },
     {
       "path": "edge/healthcheck.mjs",
       "sha256": "67fb0871418ba75f1e3617268781763527778d727d533679de87192bf3e62b16"
+    },
+    {
+      "path": "middleware.js",
+      "sha256": "22c7e565420ee841538bef980b36ec3aea3fe1e8e4b412175012de2feda1311f"
     },
     {
       "path": "public/app.js",
@@ -238,6 +266,14 @@
       "sha256": "f0fcbf4ab4062b797e7ca0372b15c7e3c831a7d08b4ff5c66703b930d6bd00a9"
     },
     {
+      "path": "scripts/attest-host.mjs",
+      "sha256": "178327788ece5275f7b4c864d5aae9fdb456a2161a2209cd6b9ae6a4141d1a4d"
+    },
+    {
+      "path": "scripts/bootstrap-host.mjs",
+      "sha256": "fb0b4c97386f261ef87e7ff7bd875a532707cef489a71ae3a9488a72e58461ef"
+    },
+    {
       "path": "scripts/build.mjs",
       "sha256": "1561b449da0a118c989bb52893d072d1096cf8de5f0b507c1ef9654030e3f9e3"
     },
@@ -258,12 +294,16 @@
       "sha256": "b6118a5286cb69150365c12ccc6a7fb9bc10f283822c5f65e2456f76a5948452"
     },
     {
+      "path": "scripts/generate-egress-firewall.mjs",
+      "sha256": "01b5965b504fb1117d7f0baa48c24ad54ddf7c8b513d5dde01e5a559e8f52e9c"
+    },
+    {
       "path": "scripts/generate-origin-keys.mjs",
       "sha256": "b8b33a8a4daf5335d1a74f2552e794fc709f3a6872071e5b5800a47368ec8f1b"
     },
     {
       "path": "scripts/generate-rls-policies.mjs",
-      "sha256": "bb9c19081f9ebbdb15bf1a4025fc35af6468ca048d39901b52b908f126a66df5"
+      "sha256": "e0e29ba1cc5e124ff12cf9138fe3b50c27952cd0b70b387793679a1d1138f2b9"
     },
     {
       "path": "scripts/run-100k-lab.mjs",
@@ -282,8 +322,20 @@
       "sha256": "a71b73bac643b2047259261847906484ae26d81f2d3bdf4117e5fe30521f90ca"
     },
     {
+      "path": "sdk/context-internal.js",
+      "sha256": "0b84da15178c467aa7cdeb9423a6aa9e7c25c98dfefbe4a5ea2b25f698338d44"
+    },
+    {
       "path": "sdk/context.js",
-      "sha256": "fef06a60124432ea2c03b8bbdf64d153e26bf1145fac49366f073e831dff338b"
+      "sha256": "4a4f637af4491c8b70711744517c26e5703a05ffa8742605d51c1525c5a9eaa1"
+    },
+    {
+      "path": "sdk/database-guard.js",
+      "sha256": "06a74b9866119516535f7ad2f33e43501b213485b90f2f168adff1ea8a50453c"
+    },
+    {
+      "path": "sdk/egress-agent.js",
+      "sha256": "0a8a50c87b31321c5ff6dddc4d2afdb87bcfeab75b939ea43adee1351be39ab6"
     },
     {
       "path": "sdk/identity.js",
@@ -291,11 +343,19 @@
     },
     {
       "path": "sdk/next.js",
-      "sha256": "23e5816007baf6e08f17067015549e2944eb718ed224b780a8054c5c5dbd8c09"
+      "sha256": "7f736ec3f75185ab5d1aaa6b3001afa71874441fe923982ee0ffdb27d2059d39"
     },
     {
       "path": "sdk/node.js",
-      "sha256": "fc7b3db6cec4736360bde769c7b5b666845438380529f4a68f102ff6f1a57ddf"
+      "sha256": "e07a57662de81d95361394b0a7e67f5dea39566de5f00695a2eea8a20e256f7f"
+    },
+    {
+      "path": "sdk/process-egress-firewall.js",
+      "sha256": "166b4ba62fd719084274d2032a9655b8b706b477fc063c19f324be1077da8359"
+    },
+    {
+      "path": "sdk/register-egress-firewall.js",
+      "sha256": "a19a898bf1773ef3052af015d5d4b700716075e30dc6e0ec7536f7be53a96dd5"
     },
     {
       "path": "sdk/safe-fetch.js",
@@ -306,72 +366,12 @@
       "sha256": "ad62cb3b9bb9a3813fdffe0a595e056307347c4ff990693ebe55ab62023d10f0"
     },
     {
-      "path": "security-test-pack/scripts/asvs-l3-verifier.mjs",
-      "sha256": "f0fcbf4ab4062b797e7ca0372b15c7e3c831a7d08b4ff5c66703b930d6bd00a9"
+      "path": "state/replicated-state-server.mjs",
+      "sha256": "d5a43b6f7297b8891adf9305543e361d28e65e2e3fbe3ca6378952ed4a27aa72"
     },
     {
-      "path": "security-test-pack/scripts/run-100k-lab.mjs",
-      "sha256": "610f42bb3e670eb73729025ba9c05d2ae8e4a6ebc4c77e9fcdbf20f36ce31ff3"
-    },
-    {
-      "path": "security-test-pack/scripts/run-browser-farm.mjs",
-      "sha256": "39c4449ba6cd8e256456e25470c8658876a6d8eafa885f234ba9c3bcdd358dd5"
-    },
-    {
-      "path": "security-test-pack/scripts/run-endurance.mjs",
-      "sha256": "a9b1c34a024747bebd879666d776d44acec88dc9dd1d30adc70a739af57a705c"
-    },
-    {
-      "path": "security-test-pack/test/adversarial-lab.test.js",
-      "sha256": "cf10be37cb83efd20c7676f0ea83f241e679513f88d0bf065a3a862c8ec07cc2"
-    },
-    {
-      "path": "security-test-pack/test/asvs-verifier.test.js",
-      "sha256": "b070c4fa0a7fc26f504477ad0c658fea3956bc8f92ad87d96971cd2c485315e9"
-    },
-    {
-      "path": "security-test-pack/test/auth-recovery.test.js",
-      "sha256": "aa46a405612612fd151b9fe3e8bd31e02a69be9d57ce8c8fc44b7ba4c22d9ff9"
-    },
-    {
-      "path": "security-test-pack/test/browser-farm-safety.test.js",
-      "sha256": "27098b00c2da12a3a6eb96c07ee931ccd32274cfd97b5113cf814a96bfdbf3a3"
-    },
-    {
-      "path": "security-test-pack/test/concurrency-network-chaos.test.js",
-      "sha256": "233b041a52022e0f466f2a5c5d02c86d97f628f05e2d18aae0dd57a7b7254e2d"
-    },
-    {
-      "path": "security-test-pack/test/crypto.test.js",
-      "sha256": "5662b46ab0ae3d7d6634e5141a8133d73729814e7e41a0a6557a05489447dd3d"
-    },
-    {
-      "path": "security-test-pack/test/hardening-regressions.test.js",
-      "sha256": "69ab943772f00029e713c8b21a463c524da53af4ebd518a36cef08d586ede5bd"
-    },
-    {
-      "path": "security-test-pack/test/http-parser-differential.test.js",
-      "sha256": "0c028099d618d25040e50b82c1abcbb7ca92eea0bbe3919e28444b95fb882e81"
-    },
-    {
-      "path": "security-test-pack/test/new-domain-primitives.test.js",
-      "sha256": "90bc46088b4c8998f00f2aa401e310a737e64e5eb091e2737b9f04cb6fd27be0"
-    },
-    {
-      "path": "security-test-pack/test/runtime-invariants-25.test.js",
-      "sha256": "ed40f9ae6b4817a0fb5be7890905c7ac410947d0530a804c7ce83506c0d39e6f"
-    },
-    {
-      "path": "security-test-pack/test/security-upgrades.test.js",
-      "sha256": "b6d9a0f6b0f1bc6baf79c2309821bcf698d25f3a89b36e413c36f47609787252"
-    },
-    {
-      "path": "security-test-pack/test/security.test.js",
-      "sha256": "a8d5a17142600e4582006f72eb05ac4b73b4d07c34f6a71964e965febbaa7c63"
-    },
-    {
-      "path": "security-test-pack/test/tenant-isolation-attack-workflows.test.js",
-      "sha256": "92633a529572f1672da4f70074c6b86b94bf659787d577d88a240fd855f3ca8c"
+      "path": "test/advanced-boundary-hardening.test.js",
+      "sha256": "f6c865172b60bbe62943e37991cf04ad6659deeabccc9a30dd9f6b587aa5254f"
     },
     {
       "path": "test/adversarial-lab.test.js",
@@ -394,6 +394,10 @@
       "sha256": "27098b00c2da12a3a6eb96c07ee931ccd32274cfd97b5113cf814a96bfdbf3a3"
     },
     {
+      "path": "test/chat5-regressions.test.js",
+      "sha256": "589d7751e7373db44cac368517c61aefdcc81fe0b2028fe4b26c3f069513bdc5"
+    },
+    {
       "path": "test/concurrency-network-chaos.test.js",
       "sha256": "233b041a52022e0f466f2a5c5d02c86d97f628f05e2d18aae0dd57a7b7254e2d"
     },
@@ -407,11 +411,23 @@
     },
     {
       "path": "test/edge-gateway.test.js",
-      "sha256": "30dd0c03ffb1c99eb4c98daed4537b2f57f33eb5a169a6a9bd6b36b903e5c12f"
+      "sha256": "6b02bbe741f2e16a4747d5fb3cf406d93ca12fd5ae1d6c3f6804e687f34917e2"
+    },
+    {
+      "path": "test/egress-preload.test.js",
+      "sha256": "0a71be604979a6988fca07e05bfbe4fa5862579ff39ffe404696217ef37e1868"
+    },
+    {
+      "path": "test/grounded-hardening.test.js",
+      "sha256": "c33d119bc38742ce83afa69154b2bdd27c202634be1025843b93dfbcde8e6b47"
     },
     {
       "path": "test/hardening-regressions.test.js",
       "sha256": "69ab943772f00029e713c8b21a463c524da53af4ebd518a36cef08d586ede5bd"
+    },
+    {
+      "path": "test/host-attestation.test.js",
+      "sha256": "134877181c078363244a2a920649a015a6148ca0b63804f2512c9097accf3e9f"
     },
     {
       "path": "test/http-parser-differential.test.js",
@@ -419,7 +435,15 @@
     },
     {
       "path": "test/new-domain-primitives.test.js",
-      "sha256": "90bc46088b4c8998f00f2aa401e310a737e64e5eb091e2737b9f04cb6fd27be0"
+      "sha256": "6e498bf9d269024973578f268ac8f5729b34fde6782ec9e04e794bcbeb00c7e0"
+    },
+    {
+      "path": "test/postgres-rls.test.js",
+      "sha256": "85133692404ae2ac8cd9cfe972263f489e07fd38852bba640a8c04d8fabcbf5b"
+    },
+    {
+      "path": "test/process-egress-firewall.test.js",
+      "sha256": "82bd92539f84ac98025a9912a9414ac78208620c80d47174cee676499f44c6cc"
     },
     {
       "path": "test/runtime-invariants-25.test.js",

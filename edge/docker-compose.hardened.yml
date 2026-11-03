@@ -1,0 +1,64 @@
+services:
+  arixshield-edge:
+    build:
+      context: ..
+      dockerfile: edge/Dockerfile
+    image: arixshield-edge:1.4.3
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2.0
+    ports:
+      - "${EDGE_HOST_BIND_ADDRESS:-127.0.0.1}:${EDGE_HOST_PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      EDGE_LISTEN_HOST: 0.0.0.0
+      EDGE_UPSTREAM_URL: ${EDGE_UPSTREAM_URL:?Set EDGE_UPSTREAM_URL}
+      EDGE_ORIGIN_PRIVATE_KEY_FILE: /run/secrets/edge-origin-private.pem
+      EDGE_TLS_CERT_FILE: /run/secrets/edge-listener-cert.pem
+      EDGE_TLS_KEY_FILE: /run/secrets/edge-listener-key.pem
+      EDGE_TLS_CLIENT_CA_FILE: /run/secrets/edge-client-ca.pem
+      EDGE_REQUIRE_CLIENT_CERT: "true"
+      EDGE_TRUSTED_PROXY_CIDRS: ${EDGE_TRUSTED_PROXY_CIDRS:-}
+      EDGE_CLIENT_IP_HEADER: ${EDGE_CLIENT_IP_HEADER:-x-forwarded-for}
+      EDGE_MAX_CONNECTIONS: ${EDGE_MAX_CONNECTIONS:-512}
+      EDGE_MAX_CONCURRENT_REQUESTS: ${EDGE_MAX_CONCURRENT_REQUESTS:-256}
+      EDGE_MAX_BODY_BYTES: ${EDGE_MAX_BODY_BYTES:-1048576}
+      EDGE_MAX_BUFFERED_BYTES: ${EDGE_MAX_BUFFERED_BYTES:-33554432}
+      EDGE_REQUEST_TIMEOUT_MS: ${EDGE_REQUEST_TIMEOUT_MS:-15000}
+      EDGE_UPSTREAM_TIMEOUT_MS: ${EDGE_UPSTREAM_TIMEOUT_MS:-15000}
+    secrets:
+      - source: edge-origin-private
+        target: edge-origin-private.pem
+      - source: edge-listener-cert
+        target: edge-listener-cert.pem
+      - source: edge-listener-key
+        target: edge-listener-key.pem
+      - source: edge-client-ca
+        target: edge-client-ca.pem
+    healthcheck:
+      test: ["CMD", "node", "edge/healthcheck.mjs"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+secrets:
+  edge-origin-private:
+    file: ${EDGE_ORIGIN_PRIVATE_KEY_PATH:?Set EDGE_ORIGIN_PRIVATE_KEY_PATH}
+  edge-listener-cert:
+    file: ${EDGE_TLS_CERT_PATH:?Set EDGE_TLS_CERT_PATH}
+  edge-listener-key:
+    file: ${EDGE_TLS_KEY_PATH:?Set EDGE_TLS_KEY_PATH}
+  edge-client-ca:
+    file: ${EDGE_TLS_CLIENT_CA_PATH:?Set EDGE_TLS_CLIENT_CA_PATH}

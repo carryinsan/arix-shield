@@ -561,7 +561,12 @@ export async function recordProjectEvent(projectId, event, { threat = false, cou
         }
         if (typeof project?.policy?.alertWebhookUrl === 'string' && project.policy.alertWebhookUrl) {
           const { dispatchIncidentAlert } = await import('./alerts.js');
-          await dispatchIncidentAlert(project.policy.alertWebhookUrl, { projectId: String(projectId), event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
+          try {
+            await dispatchIncidentAlert(project.policy.alertWebhookUrl, { projectId: String(projectId), event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
+          } catch (alertError) {
+            await enqueueIncidentAlert(projectId, { event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
+            throw alertError;
+          }
         }
       } catch (error) {
         console.warn('[ArixShield] Incident alert/containment workflow did not complete:', String(error?.message || error).slice(0, 180));
@@ -597,6 +602,62 @@ export async function getProjectDashboardSnapshot(projectId) {
     metrics: { totalRequests: Number(total || 0), blockedAttacks: Number(blocked || 0), trappedHackers: Number(trapped || 0), tarpitSecondsBurned: Number(tarpit || 0), activeVisitors: null }
   };
 }
+
+export async function enqueueIncidentAlert(projectId, incident) {
+  const id = String(projectId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new TypeError('A valid project ID is required for the alert outbox.');
+  const payload = JSON.stringify({ id: randomUUID(), createdAt: new Date().toISOString(), attempts: 0, incident });
+  const key = `arix:outbox:alerts:${id}`;
+  await pipeline([['LPUSH', key, payload], ['LTRIM', key, '0', '999'], ['SADD', 'arix:outbox:projects', id]]);
+  return true;
+}
+
+export async function acquireIncidentAlertLease(projectId, ttlSeconds = 300) {
+  const id = String(projectId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new TypeError('A valid project ID is required for the alert outbox lease.');
+  const ttl = Math.max(30, Math.min(600, Math.floor(Number(ttlSeconds) || 300)));
+  const token = randomUUID();
+  const result = await command(['SET', `arix:outbox:alerts:lock:${id}`, token, 'NX', 'EX', String(ttl)]);
+  return result === 'OK' ? token : null;
+}
+
+export async function releaseIncidentAlertLease(projectId, token) {
+  const id = String(projectId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || typeof token !== 'string' || !/^[0-9a-f-]{36}$/.test(token)) return false;
+  const script = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
+  return Number(await command(['EVAL', script, '1', `arix:outbox:alerts:lock:${id}`, token])) === 1;
+}
+
+export async function recoverIncidentAlertClaims(projectId, maximum = 100) {
+  const id = String(projectId || '').trim(); const limit = Math.max(1, Math.min(1000, Math.floor(Number(maximum) || 100)));
+  const queueKey = `arix:outbox:alerts:${id}`; const processingKey = `${queueKey}:processing`;
+  let recovered = 0;
+  for (; recovered < limit; recovered++) {
+    const value = await command(['RPOPLPUSH', processingKey, queueKey]);
+    if (value == null) break;
+  }
+  return recovered;
+}
+
+export async function claimIncidentAlert(projectId) {
+  const id = String(projectId || '').trim();
+  return command(['RPOPLPUSH', `arix:outbox:alerts:${id}`, `arix:outbox:alerts:${id}:processing`]);
+}
+export async function ackIncidentAlert(projectId, raw) {
+  const id = String(projectId || '').trim();
+  return command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
+}
+export async function retryIncidentAlert(projectId, raw, nextRaw) {
+  const id = String(projectId || '').trim();
+  await command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
+  await pipeline([['LPUSH', `arix:outbox:alerts:${id}`, String(nextRaw)], ['LTRIM', `arix:outbox:alerts:${id}`, '0', '999']]);
+}
+export async function deadLetterIncidentAlert(projectId, raw) {
+  const id = String(projectId || '').trim();
+  await command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
+  await pipeline([['LPUSH', `arix:outbox:alerts:dead:${id}`, String(raw)], ['LTRIM', `arix:outbox:alerts:dead:${id}`, '0', '99']]);
+}
+
 
 const TRACK_WINDOW_LUA = `
 local now = tonumber(ARGV[1])

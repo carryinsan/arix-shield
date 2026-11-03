@@ -2,12 +2,14 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, createPrivateKey } from 'node:crypto';
 import { join } from 'node:path';
 import { CLEARANCE_RSA_MIN_BITS } from './security-constants.js';
+import { inspectLinuxHostHardening, inspectLinuxHardeningStatus } from './host-attestation.js';
+export { inspectLinuxHardeningStatus };
 
 let cachedPromise;
 const root = process.cwd();
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const signedFields = (manifest) => JSON.stringify({ schema: manifest.schema, algorithm: manifest.algorithm, fileCount: manifest.fileCount, rootDigest: manifest.rootDigest, files: manifest.files });
-const SOURCE_PATH_PATTERN = /^(?:api|sdk|edge|scripts|public|test|security-test-pack)\/[A-Za-z0-9._/-]+\.(?:js|mjs|html)$/;
+const SOURCE_PATH_PATTERN = /^(?:middleware\.js|(?:api|sdk|edge|scripts|public|test|security-test-pack|state)\/[A-Za-z0-9._/-]+\.(?:js|mjs|html))$/;
 const IGNORED_DIRECTORIES = new Set(['node_modules', '.git', '.vercel', '.next', 'coverage']);
 
 function validManifestPath(path) {
@@ -41,6 +43,11 @@ async function verify() {
   if (!secretReady && production) issues.push('ARIX_MASTER_SECRET_MISSING_OR_TOO_SHORT');
   if (deploymentProduction && process.env.NODE_ENV !== 'production') issues.push('NODE_ENV_NOT_PRODUCTION');
   if (production && process.env.VERCEL !== '1' && process.env.ARIX_FORCE_HTTPS !== 'true') issues.push('HTTPS_DEPLOYMENT_NOT_ATTESTED');
+  if (process.env.ARIX_REQUIRE_HARDENED_HOST === 'true') {
+    const host = await inspectLinuxHostHardening();
+    if (!host.supported) issues.push('HOST_HARDENING_NOT_SUPPORTED');
+    else if (!host.ok) issues.push(...host.issues);
+  }
 
   if (manifest) {
     if (manifest.schema !== 'arixshield.integrity.v1' || manifest.algorithm !== 'SHA-256' || !Array.isArray(manifest.files)) {
