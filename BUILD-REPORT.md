@@ -4,14 +4,14 @@
 
 Package version: **1.4.4**. This consolidated source tree uses v1.4.3 as its coherent base and selectively integrates compatible security controls from both supplied v1.4.2 archives. The merge policy, exact source inputs, deduplication decisions, and exclusions are recorded in `docs/CONSOLIDATION-REPORT.md`.
 
-The repository includes the hybrid API security SDK and Vercel control plane, a bounded Node.js 22 edge reverse proxy, Ed25519 origin proofs, Redis-backed shared replay/rate-limit state, AES-256-GCM envelope encryption helpers, identity-risk and recovery controls, WAF/parser validation, threat-feed and audit helpers, PostgreSQL RLS helpers, optional Linux host attestation, optional SNI/mTLS gateway admission, edge-clearance middleware, request-scoped DB access receipts, explicit database adapters, bounded process-fetch egress guard, optional egress-agent/firewall tooling, incident-alert outbox retry, and hardened deployment examples.
+The repository includes the hybrid API security SDK and Vercel control plane, a bounded Node.js 22 edge reverse proxy, Ed25519 origin proofs, Redis-backed shared replay/rate-limit state, AES-256-GCM envelope encryption helpers, identity-risk and recovery controls, WAF/parser validation, threat-feed and audit helpers, PostgreSQL RLS helpers, optional Linux host attestation, optional SNI/mTLS gateway admission, framework-independent Vercel edge-clearance proxy (`proxy.js`), request-scoped DB access receipts, explicit database adapters, bounded process-fetch egress guard, optional egress-agent/firewall tooling, incident-alert outbox retry, and hardened deployment examples.
 
-No third-party runtime dependency or production credential is bundled. The existing Upstash Redis primary remains the shared distributed security-state dependency. The alternate independent Redis failover path from one source archive was intentionally not imported because it could permit security-state divergence. The optional WAL-backed state service is not a Redis/Lua replacement and is not automatically enabled.
+One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared for framework-independent Vercel Routing Middleware; no production credential is bundled. The existing Upstash Redis primary remains the shared distributed security-state dependency. The alternate independent Redis failover path from one source archive was intentionally not imported because it could permit security-state divergence. The optional WAL-backed state service is not a Redis/Lua replacement and is not automatically enabled.
 
 ## v1.4.4 consolidation additions
 
 - SNI allowlisting and TLS listener admission, optional client-certificate mTLS, bounded connection ceilings, and pressure-based shedding in `edge/gateway.mjs`. These are process-local application-gateway controls, not volumetric DDoS or SYN-flood protection.
-- Optional middleware/edge-clearance support and request-scoped database-access receipts.
+- Optional Vercel Routing Middleware edge-clearance support (framework-independent `proxy.js`, no Next.js runtime dependency) and request-scoped database-access receipts.
 - Explicit PostgreSQL/MySQL/SQLite adapter guardrails and an RLS migration generator that uses a transaction-scoped advisory lock and refuses privileged migration roles. The operator must supply and review the real schema allowlist.
 - Optional process fetch egress guard and host firewall rule generation. The process guard intercepts `globalThis.fetch`; it does not intercept raw sockets, Node `http`/`https`, native add-ons, child processes, or kernel traffic.
 - Durable alert retry/dead-letter support layered on the existing Upstash primary. Delivery is at-least-once; downstream consumers should deduplicate by event/outbox identifier.
@@ -21,22 +21,24 @@ No third-party runtime dependency or production credential is bundled. The exist
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:114 -->
-<!-- ARIX-MANIFEST-ROOT:bf719d2048a47d05d37d6d43e5be966bdbc2b233651ac3eaccacdd7761ff1f2d -->
+<!-- ARIX-MANIFEST-FILE-COUNT:116 -->
+<!-- ARIX-MANIFEST-ROOT:610d5db27a4067fa260f71a8ec11204da9eab281f754dc808ff447b00d8b7d0e -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
 
-Runtime: Node.js v22.16.0, Linux x64. Results are local and deterministic unless explicitly described otherwise.
+Runtime: Node.js v22.16.0, Linux x64. Results are local and deterministic unless explicitly described otherwise. The Vercel runtime integration was validated against the published framework-independent Routing Middleware contract, but not deployed to the live Vercel project from this environment.
 
 | Verification | Result |
 |---|---:|
-| `npm test` | **193 passed, 0 failed, 0 skipped**; 168 top-level TAP tests; ~5.2 seconds |
-| `npm run check` | **110 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; zero declared third-party runtime dependencies; 113-file manifest verified** |
-| `NODE_ENV=production npm run build` | **Controlled smoke passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the test subprocess removed Redis credentials; manifests reset to unsigned afterwards |
+| `npm test` | **207 passed, 0 failed, 0 skipped**; 182 top-level TAP tests; ~5.3 seconds |
+| `npm run check` | **113 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 116-file manifest verified** |
+| `NODE_ENV=production npm run build` | **Controlled build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifests reset to unsigned afterwards |
 | `npm run audit:verify` | Not run; requires a real signed audit bundle and production signing secret |
 | Compose deployment profiles | Not run; Docker/Podman was unavailable |
 | Customer infrastructure / production PKI / database | Not available; not tested |
+| Vercel Routing Middleware | **10 targeted local regression tests passed**; real Vercel deployment/runtime package installation not executed |
+| Supplied brutal test pack v1.0.0 | **30 passed, 0 failed, 0 skipped** against a clean extraction of the final ZIP; 50,000 soak operations; 12 OS race workers; 256 KiB inspection p50 2.48 ms / p99 4.38 ms / max 37.10 ms |
 | Independent ASVS / penetration assessment | Not performed |
 
 A current test transcript and fuller limitations are in `results/TEST-RESULTS-SUMMARY.md` and `results/full-test.tap.txt`. Historical lab/endurance files in `results/` are retained as historical evidence and were not rerun on this v1.4.4 consolidation.

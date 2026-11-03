@@ -63,5 +63,8 @@
     "./waf": "./api/_lib/waf-engine.js",
     "./watermark": "./api/_lib/watermark.js",
     "./register-egress-firewall": "./sdk/register-egress-firewall.js"
+  },
+  "dependencies": {
+    "@vercel/functions": "3.10.5"
   }
 }

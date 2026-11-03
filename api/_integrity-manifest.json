@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 114,
-  "rootDigest": "bf719d2048a47d05d37d6d43e5be966bdbc2b233651ac3eaccacdd7761ff1f2d",
+  "fileCount": 116,
+  "rootDigest": "610d5db27a4067fa260f71a8ec11204da9eab281f754dc808ff447b00d8b7d0e",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -79,7 +79,7 @@
     },
     {
       "path": "api/_lib/edge-clearance.js",
-      "sha256": "aec83a77e2544e7e068d38997c6981f8cae3cd8ef207afe88134068eefd05014"
+      "sha256": "b3c819a84394abfeac78a7fa81ec8b391f34ef684caa7039e76f970e1741595c"
     },
     {
       "path": "api/_lib/file-security.js",
@@ -99,7 +99,7 @@
     },
     {
       "path": "api/_lib/integrity.js",
-      "sha256": "84c7df8af579e6744286235da21e4933803d8059afe6717961cda1b6474e335c"
+      "sha256": "03ce0f2b061e86f04cc60a93549768f355643f99d31e9c386d83399b287e685b"
     },
     {
       "path": "api/_lib/kms.js",
@@ -234,8 +234,12 @@
       "sha256": "67fb0871418ba75f1e3617268781763527778d727d533679de87192bf3e62b16"
     },
     {
-      "path": "middleware.js",
-      "sha256": "22c7e565420ee841538bef980b36ec3aea3fe1e8e4b412175012de2feda1311f"
+      "path": "proxy-core.js",
+      "sha256": "984b81ff68fddc8669cd560b1d526e71bd0c3bd68f52e9b08d2659619f3641fa"
+    },
+    {
+      "path": "proxy.js",
+      "sha256": "d0c5f2b488a9133b8d6371944c4e92ac037dae986b23a96bae9e370c1c7a251f"
     },
     {
       "path": "public/app.js",
@@ -279,7 +283,7 @@
     },
     {
       "path": "scripts/check.mjs",
-      "sha256": "165e9cbca6bf65e75d6c137b6330b35a34415e308d07bf943b530b6c3f5bab83"
+      "sha256": "ef6f280e0f4defa777a0201829c93f31552889cbe2e0750e349c1a3808b65348"
     },
     {
       "path": "scripts/compile-breach-filter.mjs",
@@ -460,6 +464,10 @@
     {
       "path": "test/tenant-isolation-attack-workflows.test.js",
       "sha256": "92633a529572f1672da4f70074c6b86b94bf659787d577d88a240fd855f3ca8c"
+    },
+    {
+      "path": "test/vercel-routing-middleware.test.js",
+      "sha256": "2c5940912e71998f69af0934b812c2a7847d9800dcb22fb3a1c0e0755fecdd55"
     }
   ],
   "signature": null

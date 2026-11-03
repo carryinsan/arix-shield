@@ -9,7 +9,7 @@ let cachedPromise;
 const root = process.cwd();
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const signedFields = (manifest) => JSON.stringify({ schema: manifest.schema, algorithm: manifest.algorithm, fileCount: manifest.fileCount, rootDigest: manifest.rootDigest, files: manifest.files });
-const SOURCE_PATH_PATTERN = /^(?:middleware\.js|(?:api|sdk|edge|scripts|public|test|security-test-pack|state)\/[A-Za-z0-9._/-]+\.(?:js|mjs|html))$/;
+const SOURCE_PATH_PATTERN = /^(?:proxy(?:-core)?\.js|(?:api|sdk|edge|scripts|public|test|security-test-pack|state)\/[A-Za-z0-9._/-]+\.(?:js|mjs|html))$/;
 const IGNORED_DIRECTORIES = new Set(['node_modules', '.git', '.vercel', '.next', 'coverage']);
 
 function validManifestPath(path) {

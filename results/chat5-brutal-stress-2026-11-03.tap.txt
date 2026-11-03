@@ -3,67 +3,67 @@ TAP version 13
 # Subtest: CAPABILITY MODE: read seals cannot be upgraded to PATCH/DELETE; write/delete seals are verb-bound
 ok 1 - CAPABILITY MODE: read seals cannot be upgraded to PATCH/DELETE; write/delete seals are verb-bound
   ---
-  duration_ms: 4.020764
+  duration_ms: 4.117995
   type: 'test'
   ...
 # Subtest: CAPABILITY TRANSPORT MATRIX: path, query and nested JSON body all bind owner/tenant/method
 ok 2 - CAPABILITY TRANSPORT MATRIX: path, query and nested JSON body all bind owner/tenant/method
   ---
-  duration_ms: 0.781966
+  duration_ms: 1.007981
   type: 'test'
   ...
 # Subtest: TENANT × ROLE × METHOD: deny foreign tenant, anonymous and unprivileged access with a scoped pre-check
 ok 3 - TENANT × ROLE × METHOD: deny foreign tenant, anonymous and unprivileged access with a scoped pre-check
   ---
-  duration_ms: 5.176681
+  duration_ms: 4.599281
   type: 'test'
   ...
 # Subtest: MCP confused-deputy: signed approval rejects argument mutation, tenant/user substitution and replay
 ok 4 - MCP confused-deputy: signed approval rejects argument mutation, tenant/user substitution and replay
   ---
-  duration_ms: 2.944967
+  duration_ms: 2.075963
   type: 'test'
   ...
 # Subtest: WORKFLOW: step skipping and too-early breadcrumb replay are rejected
 ok 5 - WORKFLOW: step skipping and too-early breadcrumb replay are rejected
   ---
-  duration_ms: 9.428473
+  duration_ms: 8.693958
   type: 'test'
   ...
 # Subtest: IMAGE: PNG dimensions enforce pixel and per-axis limits; truncated JPEG SOF is rejected
 ok 6 - IMAGE: PNG dimensions enforce pixel and per-axis limits; truncated JPEG SOF is rejected
   ---
-  duration_ms: 2.084684
+  duration_ms: 2.240261
   type: 'test'
   ...
 # Subtest: ZIP: traversal, symlink metadata, CRC tampering and local/central mismatch are rejected
 ok 7 - ZIP: traversal, symlink metadata, CRC tampering and local/central mismatch are rejected
   ---
-  duration_ms: 1.661378
+  duration_ms: 1.858936
   type: 'test'
   ...
 # Subtest: ZIP: duplicate/overlapping local-file offsets are rejected instead of aliasing two central entries
 ok 8 - ZIP: duplicate/overlapping local-file offsets are rejected instead of aliasing two central entries
   ---
-  duration_ms: 0.273902
+  duration_ms: 0.292992
   type: 'test'
   ...
 # Subtest: ZIP: deflate expansion is capped at extraction even when central metadata is otherwise valid
 ok 9 - ZIP: deflate expansion is capped at extraction even when central metadata is otherwise valid
   ---
-  duration_ms: 2.236212
+  duration_ms: 2.381144
   type: 'test'
   ...
 # Subtest: DOCUMENT: active PDF actions are rejected and benign PDF header does not trigger that rule
 ok 10 - DOCUMENT: active PDF actions are rejected and benign PDF header does not trigger that rule
   ---
-  duration_ms: 0.387623
+  duration_ms: 0.388366
   type: 'test'
   ...
 # Subtest: ZIP directory limits reject ZIP64 sentinels and too many entries
 ok 11 - ZIP directory limits reject ZIP64 sentinels and too many entries
   ---
-  duration_ms: 0.295434
+  duration_ms: 0.263017
   type: 'test'
   ...
 # [ArixShield] Upstash Redis is not configured. Using an ephemeral in-memory store for local preview only; data is not shared between serverless instances and will be lost on restart.
@@ -71,120 +71,120 @@ ok 11 - ZIP directory limits reject ZIP64 sentinels and too many entries
 # Subtest: CGNAT mixed traffic: an actor ban never hard-blocks a different user sharing the same IP
 ok 12 - CGNAT mixed traffic: an actor ban never hard-blocks a different user sharing the same IP
   ---
-  duration_ms: 6.685234
+  duration_ms: 8.233033
   type: 'test'
   ...
 # Subtest: CGNAT power user: 100 successful distinct sealed reads plus IP handoff create no actor lockout
 ok 13 - CGNAT power user: 100 successful distinct sealed reads plus IP handoff create no actor lockout
   ---
-  duration_ms: 19.842081
+  duration_ms: 22.728437
   type: 'test'
   ...
 # Subtest: CGNAT fairness: hostile actor credential failures do not rewrite legitimate actor identity
 ok 14 - CGNAT fairness: hostile actor credential failures do not rewrite legitimate actor identity
   ---
-  duration_ms: 19.065184
+  duration_ms: 16.584937
   type: 'test'
   ...
 # Subtest: MULTI-PROCESS RACE: 12 independent processes cannot consume one MFA recovery code twice
 ok 15 - MULTI-PROCESS RACE: 12 independent processes cannot consume one MFA recovery code twice
   ---
-  duration_ms: 315.691824
+  duration_ms: 329.232639
   type: 'test'
   ...
 # Subtest: MULTI-PROCESS RACE: 12 independent processes cannot replay one Ed25519 origin proof
 ok 16 - MULTI-PROCESS RACE: 12 independent processes cannot replay one Ed25519 origin proof
   ---
-  duration_ms: 313.067745
+  duration_ms: 330.354016
   type: 'test'
   ...
 # Subtest: LIVE SOCKET: fragmented UTF-8 JSON survives irregular real TCP writes byte-for-byte
 ok 17 - LIVE SOCKET: fragmented UTF-8 JSON survives irregular real TCP writes byte-for-byte
   ---
-  duration_ms: 32.253795
+  duration_ms: 32.062242
   type: 'test'
   ...
 # Subtest: LIVE SOCKET: conflicting duplicate framing is rejected at the HTTP ingress
 ok 18 - LIVE SOCKET: conflicting duplicate framing is rejected at the HTTP ingress
   ---
-  duration_ms: 4.712519
+  duration_ms: 7.038401
   type: 'test'
   ...
 # Subtest: NETWORK CHAOS: one-byte/200ms slow-drip body is cut off by the ingress deadline
 ok 19 - NETWORK CHAOS: one-byte/200ms slow-drip body is cut off by the ingress deadline
   ---
-  duration_ms: 1004.008288
+  duration_ms: 1005.375533
   type: 'test'
   ...
 # Subtest: NETWORK CHAOS: mid-body client disconnect does not leave the gateway socket open
 ok 20 - NETWORK CHAOS: mid-body client disconnect does not leave the gateway socket open
   ---
-  duration_ms: 103.071927
+  duration_ms: 104.268266
   type: 'test'
   ...
 # Subtest: UPSTREAM CHAOS: 503 is relayed and an unresponsive origin is bounded by absolute timeout
 ok 21 - UPSTREAM CHAOS: 503 is relayed and an unresponsive origin is bounded by absolute timeout
   ---
-  duration_ms: 1036.961053
+  duration_ms: 1056.853488
   type: 'test'
   ...
 # Subtest: CIRCUIT BREAKER: the 450ms timeout opens the circuit and aborts cooperative upstream work
 ok 22 - CIRCUIT BREAKER: the 450ms timeout opens the circuit and aborts cooperative upstream work
   ---
-  duration_ms: 452.61166
+  duration_ms: 451.545553
   type: 'test'
   ...
 # Subtest: HTTP differential corpus rejects duplicate headers, CL/TE ambiguity, bad tokens and HTTP/2 hop-by-hop headers
 ok 23 - HTTP differential corpus rejects duplicate headers, CL/TE ambiguity, bad tokens and HTTP/2 hop-by-hop headers
   ---
-  duration_ms: 42.956551
+  duration_ms: 50.10469
   type: 'test'
   ...
 # Subtest: JSON differential corpus detects duplicate siblings, prototype keys and malformed JSON
 ok 24 - JSON differential corpus detects duplicate siblings, prototype keys and malformed JSON
   ---
-  duration_ms: 1.475209
+  duration_ms: 1.626725
   type: 'test'
   ...
 # Subtest: URL normalization rejects backslashes, nested encoded separators, encoded dot traversal and invalid UTF-8
 ok 25 - URL normalization rejects backslashes, nested encoded separators, encoded dot traversal and invalid UTF-8
   ---
-  duration_ms: 0.770644
+  duration_ms: 0.507626
   type: 'test'
   ...
 # Subtest: deep AST and extreme JSON numeric inputs are bounded and cannot silently become non-finite values
 ok 26 - deep AST and extreme JSON numeric inputs are bounded and cannot silently become non-finite values
   ---
-  duration_ms: 0.607818
+  duration_ms: 0.600757
   type: 'test'
   ...
 # Subtest: AST BOUNDS: 6,001 nodes are rejected and RFC 8259 negative zero remains finite
 ok 27 - AST BOUNDS: 6,001 nodes are rejected and RFC 8259 negative zero remains finite
   ---
-  duration_ms: 14.65178
+  duration_ms: 17.005422
   type: 'test'
   ...
 # Subtest: SOAK: actor-state churn remains memory-bounded after forced GC
 ok 28 - SOAK: actor-state churn remains memory-bounded after forced GC
   ---
-  duration_ms: 365.215624
+  duration_ms: 363.285561
   type: 'test'
   ...
-# actor churn: 50000 unique IDs; post-GC heap delta 13.67 MiB; source cap is 20,000 actors
+# actor churn: 50000 unique IDs; post-GC heap delta 13.71 MiB; source cap is 20,000 actors
 # Subtest: CPU/P99: worst-case request inspection stays within a configurable local budget
 ok 29 - CPU/P99: worst-case request inspection stays within a configurable local budget
   ---
-  duration_ms: 334.975535
+  duration_ms: 346.254088
   type: 'test'
   ...
-# 256 KiB payload inspection: p50=2.45ms p99=4.23ms max=31.94ms (budget=5ms)
+# 256 KiB payload inspection: p50=2.48ms p99=4.38ms max=37.10ms (budget=5ms)
 # Subtest: RUNTIME GUARD: health result preserves authenticated traffic when overload is observed
 ok 30 - RUNTIME GUARD: health result preserves authenticated traffic when overload is observed
   ---
-  duration_ms: 112.538688
+  duration_ms: 112.911978
   type: 'test'
   ...
-# event-loop guard: healthy=false; lagP99=52.04ms; reasons=EVENT_LOOP_LAG
+# event-loop guard: healthy=false; lagP99=52.07ms; reasons=EVENT_LOOP_LAG
 1..30
 # tests 30
 # suites 0
@@ -193,4 +193,4 @@ ok 30 - RUNTIME GUARD: health result preserves authenticated traffic when overlo
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 4855.518361
+# duration_ms 4983.527347

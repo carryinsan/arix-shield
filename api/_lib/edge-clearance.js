@@ -15,7 +15,7 @@ function safeAudience(value) {
   return url.origin;
 }
 
-/** Create a short-lived stateless ticket for the root Next.js middleware. */
+/** Create a short-lived stateless ticket for the framework-independent Vercel Routing Middleware. */
 export function createEdgeClearanceTicket({ audience, pathPrefix = '/', methods = null, ttlMs = 120_000, now = Date.now(), secret = process.env.ARIX_MASTER_SECRET } = {}) {
   const aud = safeAudience(audience);
   const prefix = String(pathPrefix);

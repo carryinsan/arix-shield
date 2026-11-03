@@ -76,5 +76,11 @@
     "api/**/*.js": {
       "includeFiles": "api/**/*"
     }
+  },
+  "proxy": {
+    "entrypoint": "proxy.js",
+    "matcher": [
+      "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml).*)"
+    ]
   }
 }

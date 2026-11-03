@@ -59,7 +59,7 @@ This is an application-layer defense SDK, not a network-layer DDoS service. No z
 - `ARIX_REQUIRE_HARDENED_HOST=true` makes runtime integrity fail closed unless a Linux process is non-root, has `NoNewPrivs: 1`, and has zero effective Linux capabilities. `npm run attest:host` inspects the current process; `npm run attest:host:strict` exits non-zero when the controls are missing. It does not prove kernel, firewall, database, or cloud configuration.
 - `edge/docker-compose.hardened.yml` supplies a non-root, read-only, no-new-privileges, capability-dropped edge deployment with inbound mTLS. The actual firewall, provider DDoS controls, certificate issuance/rotation and trusted proxy CIDRs remain deployment responsibilities.
 
-The Upstash REST integration remains the shared distributed security-state provider. No Redis replacement, Raft cluster, new third-party runtime dependency, or new API key has been introduced.
+The Upstash REST integration remains the shared distributed security-state provider. No Redis replacement, Raft cluster, new API key, or external security-service credential has been introduced. The only added runtime package is the pinned first-party Vercel helper `@vercel/functions@3.10.5` used by the platform-level Routing Middleware.
 
 
 ## Consolidated v1.4.4 additions
@@ -70,7 +70,7 @@ The Upstash REST integration remains the shared distributed security-state provi
 This release consolidates the v1.4.3 baseline with selected, separately opt-in controls from the integrated v1.4.2 archive:
 
 - TLS SNI allowlisting, optional inbound mTLS, bounded TCP connections and per-process pressure-based header/keep-alive shedding in `edge/gateway.mjs`.
-- HMAC edge-clearance tickets and an optional Next.js/Vercel middleware pre-shedder (`middleware.js`).
+- HMAC edge-clearance tickets and optional framework-independent Vercel Routing Middleware (`proxy.js`), using the pinned first-party `@vercel/functions` pass-through helper.
 - Request-scoped data-access receipts, transaction-local PostgreSQL tenant context, guarded MySQL session variables, explicit SQLite adapter requirements, and database RLS verification.
 - Durable incident alert retry/dead-letter handling on the existing Upstash Redis primary. Delivery is at-least-once, so receivers should deduplicate using `outboxId`.
 - Optional egress agent hooks, host firewall rule generation, hardened container examples, and a WAL-backed quorum state service for separately evaluated deployments.

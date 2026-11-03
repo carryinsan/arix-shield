@@ -26,7 +26,7 @@ The dashboard pins verified chain heads in browser IndexedDB and can export a JS
 
 ## 9. Build integrity and runtime attestation
 
-`npm run check` performs Node syntax checks, imports API/SDK modules, enforces zero third-party entries in package dependency sections, scans source for selected dangerous constructs, scans repository text files for selected credential patterns, and verifies a deterministic SHA-256 manifest covering `.js`, `.mjs`, and `.html` files. Runtime production attestation checks manifest coverage of the `api/_lib` JavaScript files, their hashes, manifest structure/signature, a 32-byte minimum master secret, an RSA private JWK of at least 3072 bits, and HTTPS security configuration.
+`npm run check` performs Node syntax checks, imports API/SDK modules, enforces an exact allowlist containing only the pinned first-party `@vercel/functions@3.10.5` runtime helper (and empty development/optional/peer dependency sections), scans source for selected dangerous constructs, scans repository text files for selected credential patterns, and verifies a deterministic SHA-256 manifest covering `.js`, `.mjs`, and `.html` files. Runtime production attestation checks manifest coverage of the `api/_lib` JavaScript files, their hashes, manifest structure/signature, a 32-byte minimum master secret, an RSA private JWK of at least 3072 bits, and HTTPS security configuration.
 
 The static scanner is a dependency-free lexical pattern gate, not a complete JavaScript AST parser or a general-purpose SAST engine. It can miss obfuscated or semantically dangerous code and can flag benign patterns. It does not inspect deployment platform settings, customer applications, transitive runtime code outside this repository, or every binary artifact.
 

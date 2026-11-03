@@ -68,12 +68,34 @@ try {
     failed = true;
     process.stderr.write('[deployment] Vercel API functions must include the complete api/**/* tree, including its runtime integrity manifest.\n');
   }
+  const proxyEntrypoint = vercel.proxy?.entrypoint;
+  const proxyMatcher = vercel.proxy?.matcher;
+  if (proxyEntrypoint !== 'proxy.js' || !Array.isArray(proxyMatcher) || !proxyMatcher.length) {
+    failed = true;
+    process.stderr.write('[deployment] Vercel Routing Middleware must use proxy.entrypoint="proxy.js" with an explicit matcher.\n');
+  } else {
+    const proxySource = await readFile(join(root, proxyEntrypoint), 'utf8').catch(() => '');
+    if (!proxySource.includes("from '@vercel/functions'") || !/export\s+default\s/.test(proxySource) || /from\s+['"]next\/server['"]/.test(proxySource)) {
+      failed = true;
+      process.stderr.write('[deployment] proxy.js must default-export the framework-independent Vercel handler and must not import next/server.\n');
+    }
+  }
+  if (repositoryFiles.some((file) => relative(root, file).split('\\').join('/') === 'middleware.js')) {
+    failed = true;
+    process.stderr.write('[deployment] obsolete root middleware.js must be removed when proxy.entrypoint is configured.\n');
+  }
 } catch {
   failed = true;
   process.stderr.write('[deployment] vercel.json is missing or invalid.\n');
 }
-const dependencySections = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
-for (const section of dependencySections) {
+const approvedRuntimeDependencies = { '@vercel/functions': '3.10.5' };
+const actualRuntimeDependencies = pkg.dependencies || {};
+if (JSON.stringify(Object.entries(actualRuntimeDependencies).sort(([a], [b]) => a.localeCompare(b)))
+  !== JSON.stringify(Object.entries(approvedRuntimeDependencies).sort(([a], [b]) => a.localeCompare(b)))) {
+  failed = true;
+  process.stderr.write(`[supply-chain] package.json dependencies must contain only the pinned Vercel runtime helper: @vercel/functions@3.10.5; found ${Object.entries(actualRuntimeDependencies).map(([name, version]) => `${name}@${version}`).join(', ') || '(none)'}\n`);
+}
+for (const section of ['devDependencies', 'optionalDependencies', 'peerDependencies']) {
   if (Object.keys(pkg[section] || {}).length) { failed = true; process.stderr.write(`[supply-chain] package.json ${section} must remain empty; found ${Object.keys(pkg[section]).join(', ')}\n`); }
 }
 
@@ -206,4 +228,4 @@ if (process.argv.includes('--write-manifest')) {
   }
 }
 if (failed) process.exit(1);
-console.log(`Syntax checks passed for ${sourceFiles.filter((file) => ['.js', '.mjs'].includes(extname(file))).length} JS modules; imported ${serverModules.length}; zero third-party dependencies; static scanner passed; manifest ${process.argv.includes('--write-manifest') ? 'written' : 'verified'} (${entries.length} files, ${rootDigest.slice(0, 16)}…).`);
+console.log(`Syntax checks passed for ${sourceFiles.filter((file) => ['.js', '.mjs'].includes(extname(file))).length} JS modules; imported ${serverModules.length}; one pinned first-party Vercel runtime helper; static scanner passed; manifest ${process.argv.includes('--write-manifest') ? 'written' : 'verified'} (${entries.length} files, ${rootDigest.slice(0, 16)}…).`);
