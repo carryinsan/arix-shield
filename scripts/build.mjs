@@ -54,36 +54,6 @@ try {
   process.exit(1);
 }
 
-// Intercept https:// imports for Node's ESM loader during build/checks
-import { register } from 'node:module';
-import { pathToFileURL } from 'node:url';
-
-// Register a lightweight hook to handle https:// imports during build evaluation
-import { writeFile, unlink } from 'node:fs/promises';
-const hookPath = resolve(root, 'scripts/_https-loader.mjs');
-await writeFile(hookPath, `
-export async function resolve(specifier, context, defaultResolve) {
-  if (specifier.startsWith('https://')) {
-    return { shortCircuit: true, url: specifier };
-  }
-  return defaultResolve(specifier, context);
-}
-export async function load(url, context, defaultLoad) {
-  if (url.startsWith('https://')) {
-    const res = await fetch(url);
-    const source = await res.text();
-    return { format: 'module', shortCircuit: true, source };
-  }
-  return defaultLoad(url, context);
-}
-`);
-
-try {
-  register(pathToFileURL(hookPath));
-} catch {
-  // Fallback if registration is restricted in this node version
-}
-
 // Sign the source manifest with the already configured production master secret,
 // then verify the signed result before running the deterministic regression suite.
 run(['scripts/check.mjs', '--write-manifest'], 'compile and sign source integrity manifest');
