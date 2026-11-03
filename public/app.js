@@ -162,7 +162,11 @@ def arix_telemetry(response):
 
   async function initDashboard() {
     if (!$('#visitor-table')) return;
-    const status = $('#connection-status'); const primaryOriginInput = $('#primary-origin'); const customOriginsInput = $('#custom-origins'); const originsForm = $('#origins-form'); const originsNotice = $('#origins-notice'); let originsDirty = false; let dashboardTotpEnabled = false; let currentPolicyMode = 'ENFORCE';
+    const status = $('#connection-status'); const primaryOriginInput = $('#primary-origin'); const customOriginsInput = $('#custom-origins'); const originsForm = $('#origins-form'); const originsNotice = $('#origins-notice');
+    // Bind dashboard-only elements explicitly; relying on implicit window globals for HTML IDs
+    // breaks in strict mode and differs across browsers.
+    const feedWarning = $('#threat-feed-warning'); const witnessStatus = $('#audit-witness-status'); const auditDownload = $('#download-audit-bundle');
+    let originsDirty = false; let dashboardTotpEnabled = false; let currentPolicyMode = 'ENFORCE';
     const promptStepUp = (purpose) => requestStepUp({ title: 'Confirm sensitive change', description: `Confirm your identity to ${purpose}.`, requirePassword: true, requireTotp: dashboardTotpEnabled });
     const showDashError = (message) => { status.textContent = 'DISCONNECTED'; status.classList.add('is-danger'); status.classList.remove('is-good'); $('#project-origin').textContent = message; };
     const updateOriginCount = () => { if (!primaryOriginInput || !customOriginsInput) return; const primary = primaryOriginInput.value.trim().replace(/\/$/, ''); const extras = [...new Set(customOriginsInput.value.split(/[\n,]+/).map((value) => value.trim().replace(/\/$/, '')).filter((value) => value && value !== primary))]; $('#origin-count').textContent = `${1 + extras.length} / 11 origins configured`; };
@@ -251,7 +255,7 @@ def arix_telemetry(response):
         const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' }); const url = URL.createObjectURL(blob);
         const link = document.createElement('a'); link.href = url; link.download = `arixshield-audit-${String(result.bundle.projectId).replace(/[^a-z0-9_-]/gi, '_')}-${Date.now()}.jsonl`; document.body.append(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch (error) { if (witnessStatus) witnessStatus.textContent = `Evidence export failed: ${error.message}`; }
-      finally { auditDownload.disabled = false; }
+      finally { if (auditDownload) auditDownload.disabled = false; }
     });
 
     function initializeAccountSecurity(security) {

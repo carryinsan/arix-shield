@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 116,
-  "rootDigest": "8b00d72e9d7ff2579a865ded228e030b1b344b8bde034f669718afe1db8e4f69",
+  "fileCount": 117,
+  "rootDigest": "03fba4ea80d11daa4445c4c2d5dd9b4cd4958cc0b018e8f3421ea20c7cf6a257",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -243,7 +243,7 @@
     },
     {
       "path": "public/app.js",
-      "sha256": "edd19982796fa6fdf75a584aed05a8a05dbafa5eeda6f010a3c2ecd81087ea2f"
+      "sha256": "90edbec06f2cea0790571c52c3ccb5b33b241fdc0482e802ce29b234475ce722"
     },
     {
       "path": "public/arix-client.js",
@@ -412,6 +412,10 @@
     {
       "path": "test/customer-record-encryption.test.js",
       "sha256": "a033cb88186cb764485a4909eeaebd63c43ebd7ca0dae5727cd6a212a6836674"
+    },
+    {
+      "path": "test/dashboard-dom-bindings.test.js",
+      "sha256": "9faa4791fc978049cf7846db60ca6fe957e19e5e81dbf8bea4332bdca30a94b9"
     },
     {
       "path": "test/edge-gateway.test.js",

@@ -7,8 +7,8 @@
 ## Current release-candidate checks
 
 - `npm test`: **207 passed, 0 failed, 0 skipped** (182 top-level TAP tests; nested tests included in the total), approximately 5.2 seconds on this host.
-- `npm run check`: **113 JavaScript/MJS syntax checks, 66 API/SDK imports, the exact runtime dependency allowlist (`@vercel/functions@3.10.5`), static scanner passed; 116-file source-integrity manifest verified**.
-- `NODE_ENV=production npm run build`: **controlled build smoke passed** using temporary non-deployable secrets, a generated temporary RSA-3072 clearance key, and a dummy Upstash-shaped HTTPS URL/token. The build signs the manifest for its preflight; after the smoke run, both shipped manifests were regenerated unsigned. Test subprocesses had the dummy Redis URL/token removed. No real Redis endpoint or customer credential was used.
+- `npm run check`: **114 JavaScript/MJS syntax checks, 66 API/SDK imports, the exact runtime dependency allowlist (`@vercel/functions@3.10.5`), static scanner passed; 117-file source-integrity manifest verified**.
+- `NODE_ENV=production npm run build`: **controlled build smoke passed** using temporary non-deployable secrets, a generated temporary RSA-3072 clearance key, and a dummy Upstash-shaped HTTPS URL/token; the shipped manifests were reset unsigned afterwards. The build signs the manifest for its preflight; after the smoke run, both shipped manifests were regenerated unsigned. Test subprocesses had the dummy Redis URL/token removed. No real Redis endpoint or customer credential was used.
 - ZIP integrity: all three supplied source archives passed CRC/integrity checks. The final archive is separately checked after packaging.
 
 ## Focused coverage in the merged test suite
@@ -53,3 +53,15 @@ The Node verifier and framework-independent Vercel proxy now require canonical u
 - Event-loop lag p99 was 53.90 ms and raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed. This remains a warning to investigate under production-like load.
 
 The final local build is not a live Vercel deployment. The production deployment must still confirm the platform recognizes `proxy.entrypoint` and serves `/` and `/arix-client.js` without middleware invocation errors.
+
+
+## Dashboard runtime correction (2026-11-03)
+
+The dashboard client called `feedWarning` without an explicit DOM binding. The thrown `ReferenceError` aborted the initial telemetry poll and changed the connection indicator to `DISCONNECTED`. Review also found `witnessStatus` and `auditDownload` were referenced without declarations in the same initialization scope.
+
+- Explicitly bound `feedWarning` to `#threat-feed-warning`, `witnessStatus` to `#audit-witness-status`, and `auditDownload` to `#download-audit-bundle`.
+- Made the audit-download button reset null-safe. No WAF, authentication, authorization, telemetry policy, or edge-clearance checks were changed.
+- Added a regression test asserting each dashboard ID exists and is explicitly bound.
+- New final local run: **208/208 tests pass**, 114 JS/MJS syntax checks, 66 imports, static scanner pass, 117-entry manifest check pass, and controlled production build preflight pass.
+- The supplied external brutal test pack was not rerun after this frontend-only patch; its previously reported 30/30 result belongs to the prior backend candidate.
+- Live Vercel deployment and interactive browser smoke testing remain to be confirmed after the archive is deployed.

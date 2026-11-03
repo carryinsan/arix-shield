@@ -11,7 +11,7 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 ## v1.4.4 consolidation additions
 
 - SNI allowlisting and TLS listener admission, optional client-certificate mTLS, bounded connection ceilings, and pressure-based shedding in `edge/gateway.mjs`. These are process-local application-gateway controls, not volumetric DDoS or SYN-flood protection.
-- Optional Vercel Routing Middleware edge-clearance support (framework-independent `proxy.js`, no Next.js runtime dependency), canonical base64url validation for both HMAC ticket segments in Node and edge runtimes, and request-scoped database-access receipts.
+- Optional Vercel Routing Middleware edge-clearance support (framework-independent `proxy.js`, no Next.js runtime dependency), canonical base64url validation for both HMAC ticket segments in Node and edge runtimes, and request-scoped database-access receipts. The dashboard explicitly binds its threat-feed warning and audit-witness controls instead of relying on browser-created ID globals.
 - Explicit PostgreSQL/MySQL/SQLite adapter guardrails and an RLS migration generator that uses a transaction-scoped advisory lock and refuses privileged migration roles. The operator must supply and review the real schema allowlist.
 - Optional process fetch egress guard and host firewall rule generation. The process guard intercepts `globalThis.fetch`; it does not intercept raw sockets, Node `http`/`https`, native add-ons, child processes, or kernel traffic.
 - Durable alert retry/dead-letter support layered on the existing Upstash primary. Delivery is at-least-once; downstream consumers should deduplicate by event/outbox identifier.
@@ -21,8 +21,8 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:116 -->
-<!-- ARIX-MANIFEST-ROOT:8b00d72e9d7ff2579a865ded228e030b1b344b8bde034f669718afe1db8e4f69 -->
+<!-- ARIX-MANIFEST-FILE-COUNT:117 -->
+<!-- ARIX-MANIFEST-ROOT:03fba4ea80d11daa4445c4c2d5dd9b4cd4958cc0b018e8f3421ea20c7cf6a257 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -31,17 +31,29 @@ Runtime: Node.js v22.16.0, Linux x64. Results are local and deterministic unless
 
 | Verification | Result |
 |---|---:|
-| `npm test` | **207 passed, 0 failed, 0 skipped**; 182 top-level TAP tests; ~5.3 seconds |
-| `npm run check` | **113 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 116-file manifest verified** |
-| `NODE_ENV=production npm run build` | **Controlled build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifests reset to unsigned afterwards |
+| `npm test` | **208 passed, 0 failed, 0 skipped**; 183 top-level TAP tests; ~5.8 seconds |
+| `npm run check` | **114 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 117-file manifest verified** |
+| `node scripts/build.mjs` | **Controlled production build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifests reset to unsigned afterwards |
 | `npm run audit:verify` | Not run; requires a real signed audit bundle and production signing secret |
 | Compose deployment profiles | Not run; Docker/Podman was unavailable |
 | Customer infrastructure / production PKI / database | Not available; not tested |
 | Vercel Routing Middleware | **10 targeted local regression tests passed**; real Vercel deployment/runtime package installation not executed |
-| Supplied brutal test pack v1.0.0 | **Final clean-extraction run: 30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS race workers; 256 KiB inspection p50 2.41 ms / p99 4.54 ms / max 32.20 ms (5 ms p99 gate). One prior local run measured 5.05 ms and missed only this host-sensitive timing gate; it was not relaxed. Event-loop p99 53.90 ms raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed |
+| Supplied brutal test pack v1.0.0 | **Previous backend candidate clean-extraction run: 30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS race workers; 256 KiB inspection p50 2.41 ms / p99 4.54 ms / max 32.20 ms (5 ms p99 gate). Not rerun after the dashboard-only JavaScript correction. One earlier local run measured 5.05 ms and missed only this host-sensitive timing gate; it was not relaxed. Event-loop p99 53.90 ms raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed |
 | Independent ASVS / penetration assessment | Not performed |
 
 A current test transcript and fuller limitations are in `results/TEST-RESULTS-SUMMARY.md` and `results/full-test.tap.txt`. Historical lab/endurance files in `results/` are retained as historical evidence and were not rerun on this v1.4.4 consolidation.
+
+
+## Dashboard runtime correction (2026-11-03)
+
+The dashboard rendered `feedWarning` without declaring a DOM reference. This raised `ReferenceError: feedWarning is not defined` during the first telemetry poll, which caused the dashboard connection status to flip to `DISCONNECTED`. The same initialization block also used `witnessStatus` and `auditDownload` without explicit declarations; those failures would have surfaced after the first error was corrected.
+
+- Added explicit bindings for `#threat-feed-warning`, `#audit-witness-status`, and `#download-audit-bundle` in `initDashboard()`.
+- Made the audit export button's completion-state reset null-safe.
+- Added `test/dashboard-dom-bindings.test.js` to ensure all three elements exist in the dashboard markup and are explicitly bound in the client script.
+- Verification after this patch: **208/208 tests passed**, **114 JavaScript/MJS syntax checks**, **66 API/SDK imports**, static scanner passed, and the **117-file integrity manifest** was regenerated and verified.
+- Controlled `node scripts/build.mjs` production preflight passed with disposable local-only secrets and a temporary RSA-3072 clearance key. The distributed manifest was reset to unsigned for trusted CI signing.
+- A real browser session and live Vercel deployment were not available for this patch; confirm the dashboard returns to `LIVE · 5S POLL` after deploying the new archive.
 
 ## Password corpus limitations
 
