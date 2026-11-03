@@ -32,19 +32,24 @@ function isProjectOriginAllowed(project, origin) {
   return Array.isArray(project.allowedOrigins) && project.allowedOrigins.includes(origin);
 }
 
-async function issuePowChallenge(projectId, signals = {}) {
-  const binding = await sha256Hex(JSON.stringify(signals && typeof signals === 'object' ? signals : {}));
-  return createSignedToken({ projectId, nonce: randomToken(16), renderSeed: String(signals.renderSeed || ''), binding, exp: Date.now() + 120000, difficulty: 12 }, 'browser-pow');
+export async function issuePowChallenge(projectId, signals = {}, thumbprint = '') {
+  const safeSignals = signals && typeof signals === 'object' && !Array.isArray(signals) ? signals : {};
+  const binding = await sha256Hex(JSON.stringify({ signals: safeSignals, thumbprint: String(thumbprint) }));
+  return createSignedToken({ projectId, nonce: randomToken(24), thumbprint: String(thumbprint), renderSeed: String(safeSignals.renderSeed || ''), binding, exp: Date.now() + 120000, difficulty: 12 }, 'browser-pow');
 }
 
-async function validatePow(projectId, token, solution, signals = {}) {
+export async function validatePow(projectId, token, solution, signals = {}, thumbprint = '') {
   if (typeof solution !== 'string' || solution.length > 16 || !/^\d{1,12}$/.test(solution)) return false;
   const payload = await verifySignedToken(token, 'browser-pow');
-  if (!payload || payload.projectId !== projectId || payload.exp < Date.now()) return false;
-  const binding = await sha256Hex(JSON.stringify(signals && typeof signals === 'object' ? signals : {}));
+  if (!payload || payload.projectId !== projectId || payload.exp < Date.now() || typeof payload.nonce !== 'string' || payload.nonce.length < 20 || payload.thumbprint !== String(thumbprint)) return false;
+  const safeSignals = signals && typeof signals === 'object' && !Array.isArray(signals) ? signals : {};
+  const binding = await sha256Hex(JSON.stringify({ signals: safeSignals, thumbprint: String(thumbprint) }));
   if (payload.binding !== binding) return false;
   const digest = await sha256(`${payload.nonce}:${payload.binding}:${solution}`);
-  return digest[0] === 0 && (digest[1] & 0xf0) === 0;
+  if (!(digest[0] === 0 && (digest[1] & 0xf0) === 0)) return false;
+  // A PoW token is a one-use capability bound to the DPoP key that requested it.
+  const consumed = await setString(`arix:browser-pow-used:${projectId}:${payload.nonce}`, '1', 120, true);
+  return consumed === 'OK';
 }
 
 async function resolveProjectFromApiKey(apiKey) {
@@ -65,7 +70,78 @@ async function getCachedProjectIdForApiKey(apiKey) {
   return cached && cached.expiresAt > Date.now() && !cached.mapping?.revokedAt ? String(cached.mapping.projectId || '') : null;
 }
 
+
+const CLEARANCE_SIGNAL_FIELDS = Object.freeze({
+  renderSeed: 'string', webdriver: 'boolean', headless: 'boolean', automationFlag: 'boolean',
+  screenMismatch: 'boolean', eventTimingAnomaly: 'boolean', interactionCountBucket: 'interaction-bucket',
+  touchAvailable: 'boolean', hardwareConcurrencyBucket: 'hardware-bucket', hardwareConcurrency: 'hardware-count',
+  platform: 'platform', canvasAvailable: 'boolean', webglAvailable: 'boolean', webglRenderer: 'renderer',
+  canvasPixelHash: 'hash', keyboardSamples: 'sample-count', keyboardDwellVariance: 'variance',
+  focusTransitions: 'sample-count', prototypeTampered: 'boolean', pointerSamples: 'pointer-count',
+  straightLineRatio: 'ratio', pointerSpeedVariance: 'variance', kinematicAnomaly: 'boolean'
+});
+
+/** Validate the versioned browser signal contract before decrypting it into policy input. */
+export function normalizeClearanceSignals(signals) {
+  const requiredKeys = Object.keys(CLEARANCE_SIGNAL_FIELDS);
+  if (!signals || typeof signals !== 'object' || Array.isArray(signals)
+    || (Object.getPrototypeOf(signals) !== Object.prototype && Object.getPrototypeOf(signals) !== null)
+    || Object.keys(signals).length !== requiredKeys.length
+    || requiredKeys.some((key) => !Object.hasOwn(signals, key))) return null;
+  const output = Object.create(null);
+  for (const [key, value] of Object.entries(signals)) {
+    const kind = CLEARANCE_SIGNAL_FIELDS[key];
+    if (!kind) return null; // Reject opaque/unknown keys rather than letting WAF exemptions hide them.
+    if (kind === 'boolean') {
+      if (typeof value !== 'boolean') return null;
+    } else if (kind === 'string') {
+      if (typeof value !== 'string' || value.length > 64 || !/^[A-Za-z0-9_-]*$/.test(value) || (key === 'renderSeed' && value.length < 8)) return null;
+    } else if (kind === 'interaction-bucket') {
+      if (!['0', '1', '2', '3', '4', '5-19', '20+'].includes(value)) return null;
+    } else if (kind === 'hardware-bucket') {
+      if (!['0-3', '4-7', '8+'].includes(value)) return null;
+    } else if (kind === 'platform') {
+      if (typeof value !== 'string' || value.length > 80 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+    } else if (kind === 'renderer') {
+      if (typeof value !== 'string' || value.length > 160 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+    } else if (kind === 'hash') {
+      if (value !== '' && (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value))) return null;
+    } else {
+      const limits = {
+        'hardware-count': [0, 256], 'sample-count': [0, 1000], 'pointer-count': [0, 15],
+        variance: [0, 1e9], ratio: [0, 1.01]
+      }[kind];
+      if (!limits || typeof value !== 'number' || !Number.isFinite(value) || value < limits[0] || value > limits[1]) return null;
+      if (['hardware-count', 'sample-count', 'pointer-count'].includes(kind) && !Number.isInteger(value)) return null;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+export function inspectDecryptedClearancePayload(sealed, projectId, method = 'POST') {
+  const allowedFields = new Set(['projectId', 'path', 'latencyMs', 'iat', 'signals', 'clearanceVersion']);
+  if (!sealed || typeof sealed !== 'object' || Array.isArray(sealed)
+    || Object.keys(sealed).some((key) => !allowedFields.has(key))
+    || sealed.projectId !== projectId || sealed.clearanceVersion !== 1
+    || typeof sealed.iat !== 'number' || !Number.isSafeInteger(sealed.iat) || Math.abs(Date.now() - sealed.iat) > 10 * 60 * 1000
+    || typeof sealed.path !== 'string' || sealed.path.length > 180 || !sealed.path.startsWith('/') || sealed.path.startsWith('//')
+    || /[\u0000-\u001f\u007f]/.test(sealed.path)
+    || typeof sealed.latencyMs !== 'number' || !Number.isFinite(sealed.latencyMs) || sealed.latencyMs < 0 || sealed.latencyMs > 60000) {
+    return { valid: false, inspection: null };
+  }
+  const signals = normalizeClearanceSignals(sealed.signals);
+  if (!signals) return { valid: false, inspection: null };
+  const inspection = inspectRequest({ method, url: sealed.path, headers: { 'content-type': 'application/json' }, body: { path: sealed.path, latencyMs: sealed.latencyMs, signals }, production: process.env.NODE_ENV === 'production' });
+  return { valid: true, inspection, signals };
+}
+
+export function isSuspiciousAutomation({ strongAutomationSignal, signalCount, keyboardHumanSignal }) {
+  return strongAutomationSignal === true || (Number(signalCount) >= 2 && keyboardHumanSignal !== true);
+}
+
 async function browserVisit(body, req, res, mapping, project, inspection) {
+  let effectiveInspection = inspection;
   const origin = req.headers?.origin;
   if (body.action === 'clearance-key') {
     if (!isProjectOriginAllowed(project, origin)) return sendJson(res, 403, { error: 'Browser origin is not registered for this project.' });
@@ -97,10 +173,17 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   if (body.clearanceJwe) {
     try {
       const sealed = await decryptClearanceJwe(body.clearanceJwe);
-      if (sealed.projectId !== project.id) return sendJson(res, 401, { error: 'Clearance token project mismatch.' });
-      body.path = typeof sealed.path === 'string' ? sealed.path.slice(0, 180) : '/';
-      body.latencyMs = Math.max(0, Math.min(60000, Number(sealed.latencyMs) || 0));
-      body.signals = sealed.signals && typeof sealed.signals === 'object' ? sealed.signals : {};
+      const decryptedInspection = inspectDecryptedClearancePayload(sealed, project.id, req.method);
+      if (!decryptedInspection.valid) return sendJson(res, 400, { error: 'Encrypted browser telemetry contains invalid fields or a project mismatch.' });
+      // The ciphertext is intentionally opaque to the outer JSON inspection. Re-run
+      // the full WAF against the authenticated plaintext before trusting any field.
+      const sealedInspection = decryptedInspection.inspection;
+      if (sealedInspection.findings.length) {
+        effectiveInspection = { findings: [...(inspection?.findings || []), ...sealedInspection.findings], riskScore: Math.max(Number(inspection?.riskScore) || 0, Number(sealedInspection.riskScore) || 0) };
+      }
+      body.path = sealed.path.slice(0, 180);
+      body.latencyMs = Math.max(0, Math.min(60000, Number(sealed.latencyMs)));
+      body.signals = decryptedInspection.signals;
     } catch {
       return sendJson(res, 400, { error: 'Encrypted client clearance could not be verified.' });
     }
@@ -124,18 +207,18 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   const humanOnly = /\/(?:login|signup|checkout)(?:\/|\?|$)/i.test(pathForPolicy);
   // A valid, single-use DPoP proof is an explicit clearance signal. ASN alone is never a hard block here.
   const dcSignal = Boolean(project.policy?.blockDatacenterAsn && humanOnly && DATA_CENTER_ASNS.has(asnForPolicy));
-  if (inspection?.findings?.length && project.policy?.mode !== 'DRY_RUN') {
+  if (effectiveInspection?.findings?.length && project.policy?.mode !== 'DRY_RUN') {
     const hints = getNetworkHints(req);
-    await recordProjectEvent(project.id, { type: 'WAF_BLOCK', blocked: true, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, country: hints.country, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
-    return sendJson(res, 403, { error: 'Request blocked by ArixShield policy.', findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0 });
+    await recordProjectEvent(project.id, { type: 'WAF_BLOCK', blocked: true, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, country: hints.country, asn: hints.asn, findings: effectiveInspection?.findings ?? [], riskScore: effectiveInspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
+    return sendJson(res, 403, { error: 'Request blocked by ArixShield policy.', findings: effectiveInspection?.findings ?? [], riskScore: effectiveInspection?.riskScore ?? 0 });
   }
-  if (inspection?.findings?.length || dcSignal) {
+  if (effectiveInspection?.findings?.length || dcSignal) {
     const hints = getNetworkHints(req);
-    await recordProjectEvent(project.id, { type: 'WAF_OBSERVED', blocked: false, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, asn: hints.asn, findings: inspection?.findings ?? [], riskScore: inspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
+    await recordProjectEvent(project.id, { type: 'WAF_OBSERVED', blocked: false, timestamp: new Date().toISOString(), path: pathForPolicy.slice(0, 180), ip: hints.ip, asn: hints.asn, findings: effectiveInspection?.findings ?? [], riskScore: effectiveInspection?.riskScore ?? 0, datacenterSignal: dcSignal }, { threat: true });
   }
 
-  if (!body.powToken || !(await validatePow(project.id, body.powToken, String(body.powSolution ?? ''), body.signals || {}))) {
-    const challenge = await issuePowChallenge(project.id, body.signals || {});
+  if (!body.powToken || !(await validatePow(project.id, body.powToken, String(body.powSolution ?? ''), body.signals || {}, proofResult.thumbprint))) {
+    const challenge = await issuePowChallenge(project.id, body.signals || {}, proofResult.thumbprint);
     return sendJson(res, 200, { ok: true, challenge, pow: { difficulty: 12, expiresInSeconds: 120 } });
   }
 
@@ -148,7 +231,7 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
   const keyboardHumanSignal = Number(botSignals.keyboardSamples) >= 3 || Number(botSignals.focusTransitions) >= 3;
   const signalCount = ['webdriver', 'headless', 'automationFlag', 'screenMismatch', 'eventTimingAnomaly', 'prototypeTampered', 'kinematicAnomaly'].filter((name) => botSignals[name] === true).length + (nonBrowserClient ? 1 : 0);
   const strongAutomationSignal = botSignals.webdriver === true || botSignals.headless === true || nonBrowserClient;
-  const suspicious = strongAutomationSignal || (signalCount >= 2 && !keyboardHumanSignal);
+  const suspicious = isSuspiciousAutomation({ strongAutomationSignal, signalCount, keyboardHumanSignal });
   const tlsMismatch = Boolean(nonBrowserClient && ja4);
   const path = typeof body.path === 'string' ? body.path.slice(0, 180) : '/';
   const event = {
@@ -166,12 +249,18 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     userAgent: String(req.headers?.['user-agent'] || 'unknown').slice(0, 180),
     path,
     latencyMs: Math.max(0, Math.min(60000, Number(body.latencyMs) || 0)),
-    status: 'OBSERVED',
+    status: suspicious && project.policy?.mode !== 'DRY_RUN' ? 'BLOCKED' : 'OBSERVED',
     dpopVerified: true,
     riskScore: calculateAutomationRiskScore({ strongAutomationSignal, signalCount, tlsMismatch }),
     botSignals: { webdriver: botSignals.webdriver === true, headless: botSignals.headless === true, automationFlag: botSignals.automationFlag === true, screenMismatch: botSignals.screenMismatch === true, eventTimingAnomaly: botSignals.eventTimingAnomaly === true, prototypeTampered: botSignals.prototypeTampered === true, kinematicAnomaly: botSignals.kinematicAnomaly === true, keyboardHumanSignal, keyboardSamples: Math.max(0, Math.min(1000, Number(botSignals.keyboardSamples) || 0)), focusTransitions: Math.max(0, Math.min(1000, Number(botSignals.focusTransitions) || 0)), nonBrowserClient, canvasAvailable: botSignals.canvasAvailable === true, webglAvailable: botSignals.webglAvailable === true, softwareRendererObserved: /swiftshader|llvmpipe|mesa offscreen|software rasterizer/i.test(String(botSignals.webglRenderer || '')), tlsFingerprintPresent: Boolean(ja4), canvasHashPresent: typeof botSignals.canvasPixelHash === 'string' && /^[a-f0-9]{64}$/i.test(botSignals.canvasPixelHash) }
   };
-  await recordProjectEvent(project.id, event);
+  if (suspicious && project.policy?.mode !== 'DRY_RUN') {
+    event.blocked = true;
+    event.type = 'BOT_AUTOMATION_BLOCK';
+    await recordProjectEvent(project.id, event, { threat: true });
+    return sendJson(res, 403, { error: 'Browser automation risk exceeded the project threshold.', result: 'CHALLENGED', riskScore: event.riskScore });
+  }
+  await recordProjectEvent(project.id, event, { threat: suspicious });
   const clearanceNonce = randomToken(24);
   const clearance = await createSignedToken({
     projectId: project.id,

@@ -4,7 +4,10 @@ import { sha256Hex } from './crypto-trap.js';
 import { formatIpPrefix } from './cidr.js';
 import { recordProjectEvent } from './redis.js';
 
-const ID_SEGMENT = /^(?:\d{1,20}|[0-9a-f]{8}-[0-9a-f-]{27,})$/i;
+// Recognize database/object identifiers across UUID, Mongo ObjectId, ULID,
+// CUID and opaque URL-safe ID formats so BOLA velocity and route catalogs do
+// not silently ignore non-numeric resource identifiers.
+const ID_SEGMENT = /^(?:\d{1,20}|[0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9A-HJKMNP-TV-Z]{26}|c[a-z0-9]{23,25}|[A-Za-z0-9_-]{20,128})$/i;
 // Kept as a compatibility export for older integrations. Shared IP addresses are
 // reputation/quota context only and are never a hard-ban identity.
 export function isIpLocallyBlocked(_projectId, _ip) { return false; }
@@ -14,14 +17,20 @@ function hasStableActorIdentity(value) {
   return Boolean(identity) && identity !== 'anonymous' && !identity.startsWith('anonymous:');
 }
 
-function normalizeRoute(path) {
-  return String(path || '/').split('?')[0].split('/').map((part) => ID_SEGMENT.test(part) ? ':id' : part).join('/').slice(0, 220) || '/';
+export function normalizeRoute(path) {
+  return String(path || '/').split('?')[0].split('/').map((part) => {
+    let decoded = part;
+    try { decoded = decodeURIComponent(part); } catch { /* malformed escapes remain literal */ }
+    return ID_SEGMENT.test(decoded) ? ':id' : part;
+  }).join('/').slice(0, 220) || '/';
 }
 
-function extractResourceId(path) {
+export function extractResourceId(path) {
   const parts = String(path || '').split('?')[0].split('/').filter(Boolean);
   for (let index = parts.length - 1; index >= 0; index--) {
-    if (ID_SEGMENT.test(parts[index])) return parts[index].slice(0, 80);
+    let decoded = parts[index];
+    try { decoded = decodeURIComponent(decoded); } catch { /* malformed escapes are not IDs */ }
+    if (ID_SEGMENT.test(decoded)) return decoded.slice(0, 80);
   }
   return null;
 }

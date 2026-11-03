@@ -22,12 +22,12 @@
     "recall": 1,
     "falsePositiveRate": 0,
     "attackBlockRate": 1,
-    "p50LatencyMs": 0.0390110000007553,
-    "p95LatencyMs": 0.14865800000006857,
-    "p99LatencyMs": 0.3946609999998145,
-    "maxLatencyMs": 355.1900170000008,
-    "elapsedSeconds": 13.173753955,
-    "throughputPerSecond": 15181.701486393064
+    "p50LatencyMs": 0.023205000000416476,
+    "p95LatencyMs": 0.0692349999999351,
+    "p99LatencyMs": 0.21548600000005536,
+    "maxLatencyMs": 22.0007470000005,
+    "elapsedSeconds": 6.99400021,
+    "throughputPerSecond": 28595.93851799441
   },
   "attackCategories": {
     "binary-magic": {

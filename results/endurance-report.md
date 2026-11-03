@@ -1,13 +1,12 @@
-# ArixShield local endurance results
+# ArixShield local endurance run — final audit candidate
 
-- Generated: 2026-11-02T14:53:44.305Z
-- Requested duration: 10000 ms
-- Actual duration: 10.00 s
-- Concurrent workers: 8
-- Requests processed: 253,170
-- Invariant errors: **0**
-- Throughput: 25317 req/s
-- Peak heap: 11.9 MiB
-- Peak RSS: 57.1 MiB
+- Runtime: Node.js v22.16.0
+- Duration: 15 seconds
+- Concurrency: 8
+- Total operations: 801,000
+- Invariant errors: 0
+- Throughput: approximately 53,390 operations/second
+- Peak heap: approximately 15.8 MiB
+- Peak RSS: approximately 68.7 MiB
 
-Local in-process loop; no real network, browser farm, external Redis, or database involved.
+Scope: local in-process loop only. This is not a network load test, DDoS test, distributed Redis test, database test, or production capacity guarantee.

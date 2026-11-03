@@ -60,6 +60,15 @@
     return result;
   }
 
+  async function collectPasskeyStepUp() {
+    if (!window.isSecureContext || !navigator.credentials?.get) throw new Error('Passkey verification requires a supported browser on HTTPS or localhost.');
+    const options = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-step-up-options' }) });
+    const publicKey = { ...options.publicKey, challenge: b64urlToBytes(options.publicKey.challenge), allowCredentials: (options.publicKey.allowCredentials || []).map((item) => ({ ...item, id: b64urlToBytes(item.id) })) };
+    const credential = await navigator.credentials.get({ publicKey });
+    if (!credential) throw new Error('Passkey verification was cancelled.');
+    return { passkeyChallenge: options.challenge, passkeyCredential: serializeWebAuthnCredential(credential) };
+  }
+
   async function initDeveloper() {
     const form = $('#auth-form'); if (!form) return;
     const tabs = $$('[data-auth-mode]'); const nameField = $('#full-name'); const projectField = $('#project-name'); const originField = $('#origin'); const passField = $('#password'); const submit = $('#auth-submit'); const notice = $('#auth-notice'); const keysPanel = $('#keys-panel'); const passkeyLogin = $('#passkey-login');
@@ -166,8 +175,13 @@ def arix_telemetry(response):
     // Bind dashboard-only elements explicitly; relying on implicit window globals for HTML IDs
     // breaks in strict mode and differs across browsers.
     const feedWarning = $('#threat-feed-warning'); const witnessStatus = $('#audit-witness-status'); const auditDownload = $('#download-audit-bundle');
-    let originsDirty = false; let dashboardTotpEnabled = false; let currentPolicyMode = 'ENFORCE';
-    const promptStepUp = (purpose) => requestStepUp({ title: 'Confirm sensitive change', description: `Confirm your identity to ${purpose}.`, requirePassword: true, requireTotp: dashboardTotpEnabled });
+    let originsDirty = false; let dashboardTotpEnabled = false; let dashboardPasskeyRequired = false; let currentPolicyMode = 'ENFORCE';
+    const promptStepUp = async (purpose) => {
+      const proof = await requestStepUp({ title: 'Confirm sensitive change', description: `Confirm your identity to ${purpose}.`, requirePassword: true, requireTotp: dashboardTotpEnabled });
+      if (!proof) return null;
+      if (dashboardPasskeyRequired && !dashboardTotpEnabled) return { ...proof, ...await collectPasskeyStepUp() };
+      return proof;
+    };
     const showDashError = (message) => { status.textContent = 'DISCONNECTED'; status.classList.add('is-danger'); status.classList.remove('is-good'); $('#project-origin').textContent = message; };
     const updateOriginCount = () => { if (!primaryOriginInput || !customOriginsInput) return; const primary = primaryOriginInput.value.trim().replace(/\/$/, ''); const extras = [...new Set(customOriginsInput.value.split(/[\n,]+/).map((value) => value.trim().replace(/\/$/, '')).filter((value) => value && value !== primary))]; $('#origin-count').textContent = `${1 + extras.length} / 11 origins configured`; };
     const syncOrigins = (project) => { if (!primaryOriginInput || !customOriginsInput) return; const primary = project.origin || ''; const allowed = Array.isArray(project.allowedOrigins) && project.allowedOrigins.length ? project.allowedOrigins : [primary].filter(Boolean); primaryOriginInput.value = primary; customOriginsInput.value = allowed.filter((origin) => origin && origin !== primary).join(', '); originsDirty = false; updateOriginCount(); };
@@ -180,7 +194,7 @@ def arix_telemetry(response):
       finally { saveButton.disabled = false; saveButton.textContent = 'Save origins'; }
     });
     try {
-      const account = await jsonFetch('/api/auth'); if (!account.authenticated) { location.href = '/developer'; return; } $('#dash-user').textContent = account.user.email; dashboardTotpEnabled = account.security?.totpEnabled === true;
+      const account = await jsonFetch('/api/auth'); if (!account.authenticated) { location.href = '/developer'; return; } $('#dash-user').textContent = account.user.email; dashboardTotpEnabled = account.security?.totpEnabled === true; dashboardPasskeyRequired = !dashboardTotpEnabled && Array.isArray(account.security?.passkeys) && account.security.passkeys.length > 0;
       initializeAccountSecurity(account.security || {});
       const poll = async () => {
         const data = await jsonFetch('/api/telemetry'); $('#project-title').textContent = data.project.name; $('#project-origin').textContent = `${data.project.origin} · ${data.project.id}`; if (!originsDirty) syncOrigins(data.project);
@@ -262,16 +276,18 @@ def arix_telemetry(response):
       const notice = $('#security-notice');
       const enrollment = $('#totp-enrollment'); const disablePanel = $('#totp-disable-panel');
       dashboardTotpEnabled = security?.totpEnabled === true;
+      dashboardPasskeyRequired = !dashboardTotpEnabled && Array.isArray(security?.passkeys) && security.passkeys.length > 0;
       $('#password-change-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
         const changeButton = $('#change-password'); const passwordNotice = $('#password-change-notice');
         const currentPassword = $('#password-current').value; const newPassword = $('#password-new').value; const confirmPassword = $('#password-confirm').value;
         if (newPassword !== confirmPassword) { showNotice(passwordNotice, 'New password and confirmation do not match.', 'error'); return; }
-        const proof = dashboardTotpEnabled ? await requestStepUp({ title: 'Confirm password change', description: 'Enter your current authenticator code.', requirePassword: false, requireTotp: true }) : { totpCode: '' };
-        if (!proof) return;
+        let proof = { totpCode: '' };
+        if (dashboardTotpEnabled) { proof = await requestStepUp({ title: 'Confirm password change', description: 'Enter your current authenticator code.', requirePassword: false, requireTotp: true }); if (!proof) return; }
+        else if (dashboardPasskeyRequired) { try { proof = { ...proof, ...await collectPasskeyStepUp() }; } catch (error) { showNotice(passwordNotice, error.message, 'error'); return; } }
         const totpCode = proof.totpCode;
         changeButton.disabled = true;
-        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'change-password', currentPassword, newPassword, confirmPassword, totpCode: String(totpCode || '').trim() }) }); $('#password-current').value = ''; $('#password-new').value = ''; $('#password-confirm').value = ''; showNotice(passwordNotice, 'Password changed. Other sessions were revoked; this browser remains signed in.', 'success'); }
+        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'change-password', currentPassword, newPassword, confirmPassword, totpCode: String(totpCode || '').trim(), ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) }); $('#password-current').value = ''; $('#password-new').value = ''; $('#password-confirm').value = ''; showNotice(passwordNotice, 'Password changed. Other sessions were revoked; this browser remains signed in.', 'success'); }
         catch (error) { showNotice(passwordNotice, error.message, 'error'); }
         finally { changeButton.disabled = false; }
       });
@@ -291,14 +307,15 @@ def arix_telemetry(response):
             const row = document.createElement('div'); row.className = 'inline-form';
             const label = document.createElement('span'); label.textContent = `Passkey ${index + 1} · last used ${item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : 'not yet used'}`;
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-secondary'; remove.textContent = 'Remove'; remove.addEventListener('click', async () => {
-              const proof = await requestStepUp({ title: 'Remove passkey', description: 'Re-authenticate before removing this passkey.', requirePassword: true, requireTotp: securityState.totpEnabled === true }); if (!proof) return;
-              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password: proof.password, totpCode: proof.totpCode }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
+              let proof = await requestStepUp({ title: 'Remove passkey', description: 'Re-authenticate before removing this passkey.', requirePassword: true, requireTotp: securityState.totpEnabled === true }); if (!proof) return;
+              if (!securityState.totpEnabled && Array.isArray(securityState.passkeys) && securityState.passkeys.length) { try { proof = { ...proof, ...await collectPasskeyStepUp() }; } catch (error) { showNotice(notice, error.message, 'error'); return; } }
+              try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password: proof.password, totpCode: proof.totpCode, ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
               catch (error) { showNotice(notice, error.message, 'error'); }
             }); row.append(label, remove); passkeyList.append(row);
           });
         }
       };
-      const refreshSecurity = async () => { const current = await jsonFetch('/api/auth'); securityState = current.security || {}; dashboardTotpEnabled = securityState.totpEnabled === true; render(); };
+      const refreshSecurity = async () => { const current = await jsonFetch('/api/auth'); securityState = current.security || {}; dashboardTotpEnabled = securityState.totpEnabled === true; dashboardPasskeyRequired = !dashboardTotpEnabled && Array.isArray(securityState.passkeys) && securityState.passkeys.length > 0; render(); };
       render();
 
       $('#totp-start')?.addEventListener('click', async () => {
@@ -350,7 +367,9 @@ def arix_telemetry(response):
         const button = $('#rotate-key'); button.disabled = true; const graceSeconds = Number($('#rotate-grace').value);
         try {
           if (!Number.isInteger(graceSeconds) || graceSeconds < 0 || graceSeconds > 86400) throw new Error('Grace period must be an integer from 0 to 86400 seconds.');
-          const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'rotate-server-key', password: $('#rotate-password').value, totpCode: $('#rotate-totp').value.trim(), graceSeconds }) });
+          let passkeyProof = {};
+          if (dashboardPasskeyRequired && !dashboardTotpEnabled) passkeyProof = await collectPasskeyStepUp();
+          const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'rotate-server-key', password: $('#rotate-password').value, totpCode: $('#rotate-totp').value.trim(), graceSeconds, ...passkeyProof }) });
           $('#rotated-server-key').textContent = result.serverKey; $('#rotated-key-panel').classList.remove('hidden');
           showNotice(notice, `Server key rotated. Update your server environment now. Previous key grace: ${result.oldKeyGraceSeconds} seconds${result.cleanupWarning ? ' · post-rotation cleanup needs operator review' : ''}.`, result.cleanupWarning ? 'error' : 'success');
           $('#rotate-password').value = ''; $('#rotate-totp').value = ''; await refreshSessions();

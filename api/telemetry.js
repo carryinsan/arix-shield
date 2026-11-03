@@ -119,7 +119,7 @@ async function handler(req, res) {
     if (body.action === 'origins') {
       const nextOrigins = buildAllowedOrigins(body);
       if (nextOrigins.error) return sendJson(res, 400, { error: nextOrigins.error });
-      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, password: body.password, totpCode: body.totpCode });
+      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, projectId: project.id, password: body.password, totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
       if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
 
       project.origin = nextOrigins.origin;
@@ -196,7 +196,7 @@ async function handler(req, res) {
     }
 
     if (body.mode === 'DRY_RUN' && project.policy?.mode !== 'DRY_RUN') {
-      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, password: body.password, totpCode: body.totpCode });
+      const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, projectId: project.id, password: body.password, totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
       if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
     }
     project.policy = nextPolicy;

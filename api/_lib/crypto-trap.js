@@ -180,13 +180,29 @@ function rewriteBodyCapabilities(value, identity, mode, { requireSealed = true, 
   const output = Object.create(null);
   let invalid = false; let verified = 0;
   for (const [key, child] of Object.entries(value)) {
-    if (RESOURCE_ID_KEYS.has(key.toLowerCase()) && (typeof child === 'string' || typeof child === 'number')) {
-      const raw = String(child);
-      const clean = verifyResourceId(raw, identity, mode);
-      if (clean !== null) { output[key] = clean; verified++; }
-      else if (requireSealed && !raw.includes('~')) { invalid = true; output[key] = child; }
-      else if (raw.includes('~')) { invalid = true; output[key] = child; }
-      else output[key] = child;
+    if (RESOURCE_ID_KEYS.has(key.toLowerCase())) {
+      const rewriteScalar = (candidate) => {
+        if (typeof candidate !== 'string' && typeof candidate !== 'number') {
+          invalid = true;
+          return candidate;
+        }
+        const raw = String(candidate);
+        const clean = verifyResourceId(raw, identity, mode);
+        if (clean !== null) { verified++; return clean; }
+        if (requireSealed || raw.includes('~')) invalid = true;
+        return candidate;
+      };
+      if (Array.isArray(child)) {
+        // Singular resource-ID properties may be represented as a bounded list,
+        // but every element must be an independently verified capability.
+        if (child.length > 100) invalid = true;
+        output[key] = child.slice(0, 100).map(rewriteScalar);
+      } else if (child !== null && typeof child === 'object') {
+        invalid = true;
+        output[key] = child;
+      } else {
+        output[key] = rewriteScalar(child);
+      }
     } else {
       const result = rewriteBodyCapabilities(child, identity, mode, { requireSealed, depth: depth + 1 });
       output[key] = result.value; invalid ||= result.invalid; verified += result.verified || 0;
@@ -206,7 +222,7 @@ export function rewriteCapabilityRequest(url, body, identity, { requireSealed = 
     let decoded;
     try { decoded = decodeURIComponent(segments[index]); } catch { invalid = true; break; }
     if (!decoded.includes('~')) {
-      let looksLikeResourceId = /^\d{1,20}$/.test(decoded) || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded);
+      let looksLikeResourceId = looksLikeId(decoded);
       if (idPattern instanceof RegExp) { idPattern.lastIndex = 0; looksLikeResourceId ||= idPattern.test(decoded); }
       if (requireSealed && looksLikeResourceId) invalid = true;
       continue;

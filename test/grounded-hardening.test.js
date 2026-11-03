@@ -44,7 +44,7 @@ test('Node response receipt gate atomically blocks unscoped JSON and permits sco
       res.statusCode = 200;
       res.setHeader('content-type', 'application/json; charset=utf-8');
       if (req.url === '/scoped') {
-        const db = { async query() { return { rows: [] }; } };
+        const db = { async query(sql) { if (String(sql).startsWith('SELECT rolsuper')) return { rows: [{ rolsuper: false, rolbypassrls: false }] }; return { rows: [] }; } };
         await withTenantTransaction(db, { tenantId: 'tenant-a', userId: 'user-a' }, async (tx) => tx.query('SELECT 1'), { driver: 'pg' });
       }
       res.write('{"result":');
@@ -80,7 +80,7 @@ test('edge clearance tickets bind origin, path and method and reject tampering',
 test('PostgreSQL tenant transaction sets transaction-local scope and records request receipt only after commit', async () => {
   const calls = [];
   const client = {
-    async query(sql, params) { calls.push({ sql, params }); return { rows: [] }; }
+    async query(sql, params) { calls.push({ sql, params }); if (String(sql).startsWith('SELECT rolsuper')) return { rows: [{ rolsuper: false, rolbypassrls: false }] }; return { rows: [] }; }
   };
   const observed = await runWithArixContext({ tenantId: 'tenant-a', userId: 'user-a' }, async () => {
     assert.equal(hasScopedDataReceipt(), false);
@@ -94,14 +94,15 @@ test('PostgreSQL tenant transaction sets transaction-local scope and records req
   });
   assert.deepEqual(observed, { result: { rowCount: 1 }, receipt: true });
   assert.equal(calls[0].sql, 'BEGIN');
-  assert.match(calls[1].sql, /set_config\('arix\.tenant_id', \$1, true\)/);
-  assert.deepEqual(calls[1].params, ['tenant-a', 'user-a']);
+  assert.match(calls[1].sql, /SELECT rolsuper, rolbypassrls/);
+  assert.match(calls[2].sql, /set_config\('arix\.tenant_id', \$1, true\)/);
+  assert.deepEqual(calls[2].params, ['tenant-a', 'user-a']);
   assert.equal(calls.at(-1).sql, 'COMMIT');
 });
 
 test('PostgreSQL tenant transaction rolls back and does not issue a receipt on failure', async () => {
   const calls = [];
-  const client = { async query(sql) { calls.push(sql); return { rows: [] }; } };
+  const client = { async query(sql) { calls.push(sql); if (String(sql).startsWith('SELECT rolsuper')) return { rows: [{ rolsuper: false, rolbypassrls: false }] }; return { rows: [] }; } };
   await runWithArixContext({ tenantId: 'tenant-a', userId: 'user-a' }, async () => {
     await assert.rejects(withTenantTransaction(client, { tenantId: 'tenant-a', userId: 'user-a' }, async () => { throw new Error('query failed'); }, { driver: 'pg' }), /query failed/);
     assert.equal(hasScopedDataReceipt(), false);

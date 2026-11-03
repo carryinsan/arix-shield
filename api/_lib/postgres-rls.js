@@ -21,16 +21,78 @@ function isExpectedTenantPolicy(policy, column) {
   return using === expected && check === expected;
 }
 
-function assertTenantScopedQuery(args) {
+function splitSqlStatementsOutsideLiterals(sql) {
+  const statements = [];
+  let current = '';
+  let index = 0;
+  let blockDepth = 0;
+  let quote = '';
+  let quoteBackslashEscapes = false;
+  while (index < sql.length) {
+    const char = sql[index];
+    const next = sql[index + 1];
+    if (blockDepth > 0) {
+      if (char === '/' && next === '*') { blockDepth++; current += '  '; index += 2; continue; }
+      if (char === '*' && next === '/') { blockDepth--; current += '  '; index += 2; continue; }
+      current += char === '\n' ? '\n' : ' '; index++; continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        const quoteChar = quote;
+        if (next === quote) { current += quoteChar === '"' ? '""' : '  '; index += 2; continue; }
+        quote = ''; quoteBackslashEscapes = false; current += quoteChar === '"' ? '"' : ' '; index++; continue;
+      }
+      // Preserve quoted identifiers so policy checks can recognize e.g.
+      // pg_catalog."set_config". String literals stay blanked. PostgreSQL
+      // treats backslash escapes only in E'...' strings when
+      // standard_conforming_strings is enabled (the PostgreSQL default).
+      if (quote === '"') { current += char; index++; continue; }
+      // Treat ordinary string backslashes literally; otherwise a quote after
+      // a backslash can terminate SQL at the server while this lexer hides the
+      // remaining statement inside the string. E-strings retain escape rules.
+      if (char === '\\' && quote === "'" && quoteBackslashEscapes && index + 1 < sql.length) { current += '  '; index += 2; continue; }
+      current += char === '\n' ? '\n' : ' '; index++; continue;
+    }
+    if (char === '-' && next === '-') {
+      while (index < sql.length && sql[index] !== '\n') { current += ' '; index++; }
+      continue;
+    }
+    if (char === '/' && next === '*') { blockDepth = 1; current += '  '; index += 2; continue; }
+    if (char === "'" || char === '"') {
+      quote = char;
+      quoteBackslashEscapes = char === "'" && /[eE]/.test(sql[index - 1] || '') && !/[A-Za-z0-9_$]/.test(sql[index - 2] || '');
+      current += char === '"' ? '"' : ' '; index++; continue;
+    }
+    if (char === '$') {
+      const match = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index));
+      if (match) {
+        const delimiter = match[0];
+        const close = sql.indexOf(delimiter, index + delimiter.length);
+        if (close < 0) throw new TypeError('Malformed PostgreSQL dollar-quoted string.');
+        const literal = sql.slice(index, close + delimiter.length);
+        current += literal.replace(/[^\n]/g, ' ');
+        index = close + delimiter.length;
+        continue;
+      }
+    }
+    if (char === ';') { statements.push(current); current = ''; index++; continue; }
+    current += char;
+    index++;
+  }
+  if (blockDepth > 0 || quote) throw new TypeError('Malformed PostgreSQL SQL literal or comment.');
+  if (current.trim()) statements.push(current);
+  return statements;
+}
+
+export function assertTenantScopedQuery(args) {
   const candidate = args[0];
   const sql = typeof candidate === 'string' ? candidate : typeof candidate?.text === 'string' ? candidate.text : '';
   if (!sql || sql.length > 1_000_000) throw new TypeError('Tenant-scoped PostgreSQL queries require bounded SQL text.');
-  const withoutComments = sql.replace(/--[^\n]*/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
-  for (const statement of withoutComments.split(';')) {
+  for (const statement of splitSqlStatementsOutsideLiterals(sql)) {
     const trimmed = statement.trim();
     if (!trimmed) continue;
-    if (/^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|SET|RESET|DISCARD)\b/i.test(trimmed)
-      || /\bset_config\s*\(/i.test(trimmed)) {
+    if (/^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|SET|RESET|DISCARD|DO|CALL|EXECUTE|PREPARE|DEALLOCATE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COMMENT|VACUUM|ANALYZE|CLUSTER|REFRESH|LOCK|COPY|LISTEN|UNLISTEN|NOTIFY|LOAD)\b/i.test(trimmed)
+      || /(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)*"?set_config"?\s*\(/i.test(trimmed)) {
       throw Object.assign(new Error('ARIX_RLS_CONTEXT_MUTATION_BLOCKED: transaction control and tenant-context mutation are reserved to ArixShield.'), { code: 'ARIX_RLS_CONTEXT_MUTATION_BLOCKED' });
     }
   }

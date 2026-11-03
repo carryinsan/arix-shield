@@ -1,10 +1,10 @@
 # ArixShield 100k security lab results
 
-- Generated: 2026-11-02T14:53:25.492Z
+- Generated: 2026-11-03T15:22:15.471Z
 - Node: v22.16.0 (linux/x64)
 - Seed: `0x4152495853484945`
 - Vectors: **100,000 adversarial + 100,000 benign**
-- Duration: **13.174 s**
+- Duration: **6.994 s**
 
 ## Measured results
 
@@ -17,11 +17,11 @@
 | Precision | 100.00000% |
 | Recall | 100.00000% |
 | False-positive rate | 0.00000% |
-| p50 per-request latency | 0.03901 ms |
-| p95 per-request latency | 0.14866 ms |
-| p99 per-request latency | 0.39466 ms |
-| Max per-request latency | 355.19002 ms |
-| Throughput | 15182 vectors/s |
+| p50 per-request latency | 0.02321 ms |
+| p95 per-request latency | 0.06923 ms |
+| p99 per-request latency | 0.21549 ms |
+| Max per-request latency | 22.00075 ms |
+| Throughput | 28596 vectors/s |
 
 ## Attack categories
 

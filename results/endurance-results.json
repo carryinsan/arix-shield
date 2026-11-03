@@ -1,52 +1,76 @@
 {
-  "generatedAt": "2026-11-02T14:53:44.305Z",
+  "generatedAt": "2026-11-03T15:22:32.427Z",
   "node": "v22.16.0",
-  "durationRequestedMs": 10000,
-  "elapsedSeconds": 10.000066734,
+  "durationRequestedMs": 15000,
+  "elapsedSeconds": 15.002753199999999,
   "concurrency": 8,
-  "totalRequests": 253170,
-  "allowed": 202537,
-  "rejected": 50633,
+  "totalRequests": 801000,
+  "allowed": 640800,
+  "rejected": 160200,
   "invariantErrors": 0,
-  "requestsPerSecond": 25316.831050659664,
-  "peakHeapMiB": 11.889541625976562,
-  "peakRssMiB": 57.12890625,
+  "requestsPerSecond": 53390.20040668269,
+  "peakHeapMiB": 15.7718505859375,
+  "peakRssMiB": 68.68359375,
   "perSecond": [
     {
       "atSeconds": 1,
-      "requests": 10149
+      "requests": 39574
     },
     {
       "atSeconds": 2,
-      "requests": 22498
+      "requests": 52533
     },
     {
       "atSeconds": 3,
-      "requests": 21990
+      "requests": 52304
     },
     {
       "atSeconds": 4,
-      "requests": 27184
+      "requests": 57622
     },
     {
       "atSeconds": 5,
-      "requests": 28533
+      "requests": 50229
     },
     {
       "atSeconds": 6,
-      "requests": 28510
+      "requests": 52420
     },
     {
       "atSeconds": 7,
-      "requests": 28256
+      "requests": 54589
     },
     {
       "atSeconds": 8,
-      "requests": 28799
+      "requests": 51637
     },
     {
       "atSeconds": 9,
-      "requests": 28691
+      "requests": 53578
+    },
+    {
+      "atSeconds": 10,
+      "requests": 60472
+    },
+    {
+      "atSeconds": 11,
+      "requests": 54533
+    },
+    {
+      "atSeconds": 12,
+      "requests": 58158
+    },
+    {
+      "atSeconds": 13,
+      "requests": 58289
+    },
+    {
+      "atSeconds": 14,
+      "requests": 55604
+    },
+    {
+      "atSeconds": 15,
+      "requests": 49458
     }
   ],
   "scope": "Local in-process loop; no real network, browser farm, external Redis, or database involved."

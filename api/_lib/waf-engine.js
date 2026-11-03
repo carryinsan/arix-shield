@@ -260,8 +260,15 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
         const bytes = Buffer.byteLength(value, 'utf8');
         if (bytes > opaqueLimit) add('OPAQUE_FIELD_SIZE', 'PROTOCOL', 'high', `Opaque security field at ${path.slice(0, 70)} exceeds its ${opaqueLimit}-byte limit.`);
         if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) add('CONTROL_CHARACTERS', 'PROTOCOL', 'medium', `Control characters detected in opaque field at ${path.slice(0, 70)}.`);
+        // Opaque credentials must not be parsed as SQL grammar, but they are
+        // still attacker-controlled bytes. Keep the high-confidence non-SQL
+        // checks (XSS, SSRF, SSTI, LDAP, XXE, command/deserialization markers)
+        // active so a field-name exemption cannot suppress those controls.
+        const canonical = canonicalizeSecurityText(value);
+        if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form in opaque field at ${path.slice(0, 70)}.`);
+        for (const finding of scanNonSqlTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Opaque field: ${path.slice(0, 70)}.`);
       }
-      return; // Passwords, tokens, signatures and hashes are opaque data, not SQL grammar.
+      return; // Keep SQL grammar opaque; non-SQL exploit checks still apply.
     }
     if (typeof value === 'string') {
       const bytes = Buffer.byteLength(value, 'utf8');
@@ -275,10 +282,14 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
       const richText = richTextFields.has(fieldName);
       // A prose/code field is not SQL to be executed: do not treat SQL comment
       // tokens or tutorial grammar as an injection. Non-SQL exploit checks keep
-      // their real severity in every field (including rich text).
-      for (const finding of matchingNonSqlRuleFindings(text)) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 80)}.`);
-      const scan = richText ? scanNonSqlTextInChunks(text) : scanTextInChunks(text, grammarFindings);
-      for (const finding of scan) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 60)}.`);
+      // their real severity in every field (including rich text). Scan each text
+      // leaf once; the chunk scanner preserves boundary-spanning matches.
+      const nonSql = scanNonSqlTextInChunks(text);
+      for (const finding of nonSql) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 80)}.`);
+      if (!richText) {
+        const scan = scanTextInChunks(text, grammarFindings);
+        for (const finding of scan) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 60)}.`);
+      }
       // Symbol density alone is not an exploit indicator and is never a blocking rule.
       if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) add('CONTROL_CHARACTERS', 'PROTOCOL', 'medium', `Control characters detected at ${path.slice(0, 80)}.`);
     }
@@ -403,6 +414,15 @@ function graphqlLimits(query) {
   return { depth: maxDepth, aliases, introspection: /\b__(?:schema|type)\b/.test(text) };
 }
 
+function rawPathForInspection(input) {
+  let raw = String(input ?? '/');
+  const absolute = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(.*)$/i.exec(raw);
+  if (absolute) raw = absolute[1] || '/';
+  const query = raw.search(/[?#]/);
+  if (query >= 0) raw = raw.slice(0, query);
+  return raw || '/';
+}
+
 function normalizePathForInspection(input) {
   try {
     const parsed = new URL(String(input), 'https://arixshield.invalid');
@@ -482,12 +502,42 @@ function inspectMultipart(contentType, body, add) {
     if (next < 0) { add('MULTIPART_TRUNCATED', 'UPLOAD', 'high', 'Multipart part has no terminating boundary.'); return; }
     const disposition = headers['content-disposition'] ?? '';
     const isFile = /(?:^|;)\s*filename\s*=\s*(?:"[^"]*"|[^;\s]+)/i.test(disposition);
+    const nameMatch = /(?:^|;)\s*name\s*=\s*(?:"([^"]*)"|([^;\s]+))/i.exec(disposition);
+    const fieldName = String(nameMatch?.[1] ?? nameMatch?.[2] ?? '').slice(0, 80).toLowerCase();
+    const partBytes = buffer.subarray(dataStart, next);
+    const declaredType = String(headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
     if (isFile) {
-      const declaredType = String(headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
-      const fileBytes = buffer.subarray(dataStart, next);
+      // Executable signatures are rejected regardless of the client-declared
+      // MIME type (including a mislabeled image or application/octet-stream).
+      if (partBytes.length >= 2 && partBytes[0] === 0x4d && partBytes[1] === 0x5a) {
+        add('UPLOAD_EXECUTABLE_SIGNATURE', 'UPLOAD', 'critical', 'Windows executable content is not accepted in multipart file parts.');
+      }
       if (!declaredType) add('UPLOAD_PART_CONTENT_TYPE', 'UPLOAD', 'high', 'Uploaded file part has no declared content type.');
-      else if (['image/png', 'image/jpeg', 'application/pdf', 'image/svg+xml'].includes(declaredType)) checkFileSignature(declaredType, fileBytes, add);
+      else if (['image/png', 'image/jpeg', 'application/pdf', 'image/svg+xml'].includes(declaredType)) checkFileSignature(declaredType, partBytes, add);
       else if (/^(?:application\/(?:x-msdownload|x-executable|x-sh|x-dosexec|javascript|x-javascript)|text\/html|image\/svg\+xml)$/i.test(declaredType)) add('UPLOAD_EXECUTABLE_TYPE', 'UPLOAD', 'critical', 'Scriptable or executable file content types are not accepted.');
+      if (/^(?:application|text)\/(?:xml|[^;]+\+xml)$/i.test(declaredType)) {
+        const xml = new TextDecoder('utf-8', { fatal: false }).decode(partBytes);
+        if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(xml)) add('XML_DTD_XXE', 'XXE', 'critical', 'DOCTYPE and ENTITY declarations are forbidden in multipart XML file parts.');
+      }
+    } else {
+      // Ordinary multipart fields are user-controlled input too; never skip them
+      // merely because they have no filename parameter.
+      const opaqueLimit = OPAQUE_FIELD_LIMITS.get(fieldName);
+      if (opaqueLimit) {
+        if (partBytes.length > opaqueLimit) add('OPAQUE_FIELD_SIZE', 'PROTOCOL', 'high', `Multipart opaque field '${fieldName}' exceeds its ${opaqueLimit}-byte limit.`);
+        const fieldText = new TextDecoder('utf-8', { fatal: false }).decode(partBytes);
+        const canonical = canonicalizeSecurityText(fieldText);
+        if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form in multipart opaque field '${fieldName}'.`);
+        for (const finding of scanNonSqlTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Multipart opaque field: ${fieldName || 'unnamed'}.`);
+      } else {
+        const fieldText = new TextDecoder('utf-8', { fatal: false }).decode(partBytes);
+        const canonical = canonicalizeSecurityText(fieldText);
+        if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form in multipart field '${fieldName || 'unnamed'}'.`);
+        for (const finding of scanNonSqlTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Multipart field: ${fieldName || 'unnamed'}.`);
+        if (!DEFAULT_RICH_TEXT_FIELDS.has(fieldName)) {
+          for (const finding of scanTextInChunks(canonical.value, grammarFindings)) add(finding.id, finding.category, finding.severity, `${finding.detail} Multipart field: ${fieldName || 'unnamed'}.`);
+        }
+      }
     }
     parts++;
     cursor = next + 2;
@@ -545,8 +595,16 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
   if (normalizedHeaders['x-http-method-override'] || normalizedHeaders['x-method-override']) add('METHOD_OVERRIDE', 'PROTOCOL', 'medium', 'HTTP method override headers are not accepted by default.');
   if (/\0|%00/i.test(String(url))) add('NULL_BYTE', 'PROTOCOL', 'high', 'Null byte detected in request URL.');
   if (/\/\*!\s*\d{5,}\s*(?:UNION|SELECT|INSERT|UPDATE|DELETE|DROP|SLEEP)\b/i.test(String(url))) add('SQLI_VERSIONED_COMMENT', 'SQL_INJECTION', 'high', 'Executable MySQL versioned comment containing SQL instructions detected.');
+  const rawPath = rawPathForInspection(url);
+  const rawPathCanonical = canonicalizeSecurityText(rawPath).value;
   const normalizedPath = normalizePathForInspection(url);
   if (!normalizedPath) add('URL_PATH_NORMALIZATION', 'PROTOCOL', 'high', 'Path cannot be normalized consistently.');
+  // WHATWG URL parsing collapses dot segments before exposing pathname. Inspect
+  // the original request-target path as well, so normalization cannot erase the
+  // evidence that an encoded or literal traversal sequence was supplied.
+  if (/(?:^|[\/])\.{1,2}(?:[\/]|$)|(?:%2e){2}(?:%2f|%5c|$)/i.test(rawPathCanonical)) {
+    add('PATH_TRAVERSAL', 'PATH_TRAVERSAL', 'high', 'Dot-segment path traversal syntax detected in the original request target.');
+  }
   const contentType = normalizedHeaders['content-type'] ?? '';
   const hasPayload = declaredBytes > 0 || (body != null && bodyText !== 'null' && bytes > 2);
   if (hasPayload && !['GET', 'HEAD', 'OPTIONS'].includes(methodUpper)) {
@@ -558,7 +616,7 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
   const headerText = headerEntries.filter(([key]) => !excludedHeaders.has(String(key).toLowerCase())).map(([key, value]) => `${key}:${String(value).slice(0, 1000)}`).join('\n');
   const urlText = canonicalizeSecurityText(normalizedPath || String(url));
   for (const rule of NON_SQL_RULES) {
-    if (rule.pattern.test(urlText.value) || rule.pattern.test(headerText)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic in request metadata.`);
+    if (rule.pattern.test(urlText.value) || rule.pattern.test(rawPathCanonical) || rule.pattern.test(headerText)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic in request metadata.`);
   }
   for (const finding of grammarFindings(urlText.value + '\n' + headerText)) add(finding.id, finding.category, finding.severity, finding.detail);
   try {

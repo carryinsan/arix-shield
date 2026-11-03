@@ -179,6 +179,10 @@ async function recoverMfaAccount(body, req, res) {
   return sendJson(res, 200, { ok: true, recovered: true, mfaReset: true, requireMfaReenrollment: true, message: 'MFA factors were reset, existing sessions were revoked, and this browser received a new session. Re-enroll a passkey or authenticator now.' });
 }
 
+export function accountLoginRequiresPow(accountLocked, backoffUntil, now = Date.now()) {
+  return Boolean(accountLocked) || (Number.isFinite(Number(backoffUntil)) && Number(backoffUntil) > now);
+}
+
 async function loginAccount(body, req, res) {
   const email = String(body.email ?? '').trim().toLowerCase();
   const password = String(body.password ?? '');
@@ -192,11 +196,11 @@ async function loginAccount(body, req, res) {
   if (!subnetLimit.allowed) return sendJson(res, 429, { error: 'Too many sign-in attempts from this network. Try again later.' }, { 'Retry-After': String(Math.ceil(subnetLimit.retryAfterMs / 1000)) });
   const accountLockKey = `arix:auth:acct-lock:${emailHash}`;
   const backoffUntil = Number(await getString(`arix:auth:acct-backoff:${emailHash}`) || 0);
-  if (Number.isFinite(backoffUntil) && backoffUntil > Date.now()) {
-    const retrySeconds = Math.max(1, Math.ceil((backoffUntil - Date.now()) / 1000));
-    return sendJson(res, 429, { error: 'Sign-in is temporarily delayed after repeated failures. Try again later.' }, { 'Retry-After': String(retrySeconds), 'Cache-Control': 'no-store' });
-  }
-  if (await getString(accountLockKey)) {
+  const accountLocked = await getString(accountLockKey);
+  // Backoff must never hard-deny a correct password: an attacker can trigger
+  // these counters anonymously. Require a one-use PoW instead of returning a
+  // time-based 429 that lets the attacker hold the victim's account hostage.
+  if (accountLoginRequiresPow(accountLocked, backoffUntil)) {
     const powValid = await verifyLoginPow(body, emailHash, subnet);
     if (!powValid) return issueLoginPowChallenge(res, emailHash, subnet);
   }
@@ -220,15 +224,12 @@ async function loginAccount(body, req, res) {
   }
   const recentFailures = Math.max(0, Math.min(5, Number(await getString(`arix:auth:acct-failure-count:${emailHash}`)) || 0));
   const loginRisk = evaluateLoginRisk({ failedLoginCount: recentFailures });
-  if (loginRisk.decision !== 'allow' && !secondFactorVerified) {
-    const hasPasskey = Array.isArray(user.passkeys) && user.passkeys.length > 0;
-    return sendJson(res, 428, {
-      error: hasPasskey ? 'Additional passkey verification is required for this sign-in.' : 'Additional multi-factor verification is required for this sign-in. Contact the account administrator to enroll a second factor.',
-      stepUpRequired: true,
-      challengeType: hasPasskey ? 'passkey' : 'mfa-enrollment',
-      riskScore: loginRisk.riskScore,
-      reasons: loginRisk.reasons
-    }, { 'Cache-Control': 'no-store' });
+  const hasPasskey = Array.isArray(user.passkeys) && user.passkeys.length > 0;
+  // Failed-password counters are attacker-controlled signals. They may require
+  // an enrolled factor, but must never demand an impossible MFA enrollment from
+  // an account that has no second factor configured.
+  if (loginRisk.decision !== 'allow' && !secondFactorVerified && hasPasskey) {
+    return sendJson(res, 428, { error: 'Additional passkey verification is required for this sign-in.', stepUpRequired: true, challengeType: 'passkey', riskScore: loginRisk.riskScore, reasons: loginRisk.reasons }, { 'Cache-Control': 'no-store' });
   }
   // A validated TOTP/passkey is treated as the second-factor step-up proof.
   // Upgrade every historical PBKDF2 record only after the risk decision passes.
@@ -252,7 +253,7 @@ async function changePassword(body, req, res, session) {
   ]);
   if (!user || !project || project.ownerId !== session.ownerId) return sendJson(res, 403, { error: 'Account ownership could not be verified.' });
   const currentPassword = String(body.currentPassword ?? '');
-  const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, password: currentPassword, totpCode: body.totpCode });
+  const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: currentPassword, totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
   if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
   const newPassword = String(body.newPassword ?? '');
   if (body.confirmPassword !== undefined && body.confirmPassword !== newPassword) return sendJson(res, 400, { error: 'New password and confirmation do not match.' });
@@ -260,9 +261,9 @@ async function changePassword(body, req, res, session) {
   const passwordCheck = await validatePasswordPolicy(newPassword, { email: user.email, projectName: project.name });
   if (!passwordCheck.valid) return sendJson(res, 400, { error: passwordCheck.message, code: passwordCheck.code });
 
-  user.password = await derivePassword(newPassword);
-  user.passwordChangedAt = new Date().toISOString();
-  await setJson(`arix:user:${session.ownerId}`, user);
+  stepUp.user.password = await derivePassword(newPassword);
+  stepUp.user.passwordChangedAt = new Date().toISOString();
+  await setJson(`arix:user:${session.ownerId}`, stepUp.user);
 
   // Rotate the current session and revoke all other sessions. Reuse of the
   // spent cookie triggers a family-wide replay kill switch in getSession().
@@ -277,12 +278,8 @@ async function rotateServerKey(body, req, res, immediate = false) {
   if (!session) return sendJson(res, 401, { error: 'Sign in again before rotating server keys.' });
   const [user, project] = await Promise.all([getJson(`arix:user:${session.ownerId}`), getJson(`arix:project:${session.projectId}`)]);
   if (!user || !project || project.ownerId !== session.ownerId) return sendJson(res, 403, { error: 'Project ownership could not be verified.' });
-  if (!await verifyPassword(String(body.password || ''), user.password)) return sendJson(res, 401, { error: 'Re-authentication failed.' });
-  if (user.totpEnabled === true) {
-    let secret;
-    try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'MFA configuration is unavailable.' }); }
-    if (!await verifyAndConsumeTotp(session.ownerId, secret, body.totpCode)) return sendJson(res, 401, { error: 'Authenticator re-authentication failed.' });
-  }
+  const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: String(body.password || ''), totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
+  if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, challengeType: stepUp.challengeType });
   const lockKey = `arix:project-key-rotation:${project.id}`;
   const lockToken = randomToken(18);
   const lock = await setString(lockKey, lockToken, 30, true);
@@ -409,6 +406,8 @@ async function loginWithPasskey(body, req, res) {
   credentials[index] = { ...credentials[index], signCount: assertion.signCount, lastUsedAt: Date.now() };
   user.passkeys = credentials;
   await setJson(`arix:user:${user.id}`, user);
+  const emailHash = typeof user.email === 'string' ? await sha256Hex(user.email.toLowerCase()) : '';
+  if (emailHash) await deleteKeys(`arix:auth:acct-lock:${emailHash}`, `arix:auth:acct-failures:${emailHash}`, `arix:auth:acct-failure-count:${emailHash}`, `arix:auth:acct-backoff:${emailHash}`);
   const session = await createSession(user.id, project.id, req);
   setSessionCookie(res, session.token, session.ttl, isSecure(req));
   return sendJson(res, 200, { ok: true, user: { id: user.id, name: user.name, email: user.email }, project: { id: project.id }, authentication: 'passkey' });
@@ -439,13 +438,15 @@ async function handler(req, res) {
     let limitCount;
     let limitWindowMs;
     if (action === 'login' || action === 'signup' || action === 'recover-mfa') {
-      // A password/signup rate bucket follows the account being attempted, not a
-      // shared carrier/office IP. Account failure lockout remains independently enforced.
+      // Signup/recovery remain tightly account-scoped. Login uses a broad account
+      // ceiling plus the subnet envelope and one-use PoW after failed attempts;
+      // a low per-email request ceiling would let an unauthenticated attacker
+      // repeatedly deny the victim's own password sign-in.
       const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
       const emailScope = EMAIL_RE.test(email) ? await sha256Hex(email) : await sha256Hex(`invalid:${clientRateKey(req)}`);
       limitKey = `${action}:email:${emailScope}`;
-      limitCount = action === 'login' ? 30 : 5;
-      limitWindowMs = action === 'login' ? 60000 : 60 * 60 * 1000;
+      limitCount = action === 'login' ? 12000 : 5;
+      limitWindowMs = action === 'login' ? 15 * 60 * 1000 : 60 * 60 * 1000;
     } else if (session?.ownerId) {
       limitKey = `account:${session.ownerId}:${action}`;
       limitCount = 120;
@@ -473,6 +474,15 @@ async function handler(req, res) {
       return sendJson(res, 200, { ok: true, challenge, publicKey: { challenge, rp: { name: 'ArixShield', id: origin.rpId }, user: { id: Buffer.from(user.id).toString('base64url'), name: user.email, displayName: user.name }, pubKeyCredParams: [{ type: 'public-key', alg: -7 }], timeout: 120000, attestation: 'none', authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' }, excludeCredentials } });
     }
     if (body.action === 'passkey-register') return await registerPasskey(body, req, res);
+    if (body.action === 'passkey-step-up-options') {
+      if (!session) return sendJson(res, 401, { error: 'Sign in before requesting a passkey assertion.' });
+      const origin = getWebAuthnOrigin(req); if (!origin) return sendJson(res, 403, { error: 'WebAuthn origin is not allowed.' });
+      const [user, project] = await Promise.all([getJson(`arix:user:${session.ownerId}`), getJson(`arix:project:${session.projectId}`)]);
+      if (!user || !project || project.ownerId !== session.ownerId || !Array.isArray(user.passkeys) || !user.passkeys.length) return sendJson(res, 409, { error: 'No passkey is available for this account.' });
+      const challenge = await createWebAuthnChallenge({ purpose: 'step-up', ...origin, ownerId: session.ownerId, projectId: session.projectId });
+      const allowCredentials = user.passkeys.slice(0, 10).map((item) => ({ type: 'public-key', id: item.credentialId, transports: Array.isArray(item.transports) ? item.transports.slice(0, 8) : [] }));
+      return sendJson(res, 200, { ok: true, challenge, publicKey: { challenge, rpId: origin.rpId, timeout: 120000, userVerification: 'required', allowCredentials } });
+    }
     if (body.action === 'passkey-login-options') {
       const origin = getWebAuthnOrigin(req); if (!origin) return sendJson(res, 403, { error: 'WebAuthn origin is not allowed.' });
       const challenge = await createWebAuthnChallenge({ purpose: 'authenticate', ...origin });
@@ -481,13 +491,9 @@ async function handler(req, res) {
     if (body.action === 'passkey-login') return await loginWithPasskey(body, req, res);
     if (body.action === 'passkey-remove') {
       const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to remove a passkey.' });
-      const user = await getJson(`arix:user:${session.ownerId}`); if (!user) return sendJson(res, 401, { error: 'Account not found.' });
-      if (!await verifyPassword(String(body.password || ''), user.password)) return sendJson(res, 401, { error: 'Re-authentication failed.' });
-      if (user.totpEnabled === true) {
-        let secret;
-        try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'MFA configuration is unavailable.' }); }
-        if (!await verifyAndConsumeTotp(session.ownerId, secret, body.totpCode)) return sendJson(res, 401, { error: 'Authenticator re-authentication failed.' });
-      }
+      const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: String(body.password || ''), totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, challengeType: stepUp.challengeType });
+      const user = stepUp.user;
       const id = String(body.credentialId || ''); const index = (Array.isArray(user.passkeys) ? user.passkeys : []).findIndex((item) => item.credentialId === id);
       if (index < 0) return sendJson(res, 404, { error: 'Passkey not found.' });
       const [removed] = user.passkeys.splice(index, 1);

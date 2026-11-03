@@ -91,17 +91,111 @@ function localCommand(parts) {
     case 'MGET': return args.map((candidate) => { const value = getLocal(String(candidate)); return value?.type === 'string' ? value.value : null; });
     case 'SET': { const value = String(args[1] ?? ''); const nx = args.some((v) => String(v).toUpperCase() === 'NX'); const exIndex = args.findIndex((v) => String(v).toUpperCase() === 'EX'); if (nx && item) return null; setLocal(key, 'string', value, exIndex >= 0 ? Number(args[exIndex + 1]) : null); return 'OK'; }
     case 'DEL': { let count = 0; for (const k of args) if (localStore.delete(String(k))) count++; return count; }
-    case 'EXPIRE': { if (!item) return 0; item.expiresAt = Date.now() + Number(args[1]) * 1000; return 1; }
+    case 'EXPIRE': { if (!item) return 0; const ttl = Number(args[1]); if (!Number.isFinite(ttl) || ttl <= 0) { localStore.delete(key); return 1; } item.expiresAt = Date.now() + ttl * 1000; return 1; }
+    case 'PTTL': return !item ? -2 : (item.expiresAt ? Math.max(0, item.expiresAt - Date.now()) : -1);
     case 'INCR': case 'INCRBY': { const by = name === 'INCR' ? 1 : Number(args[1]); const next = Number(item?.value ?? 0) + by; setLocal(key, 'string', String(next), item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return next; }
     case 'LPUSH': { const list = item?.type === 'list' ? item.value : []; for (const value of args.slice(1)) list.unshift(String(value)); setLocal(key, 'list', list, item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return list.length; }
     case 'LTRIM': { if (!item || item.type !== 'list') return 'OK'; const start = Number(args[1]); const end = Number(args[2]); const stop = end < 0 ? item.value.length + end + 1 : end + 1; item.value = item.value.slice(start, Math.max(start, stop)); return 'OK'; }
     case 'LRANGE': { if (!item || item.type !== 'list') return []; const start = Number(args[1]); const end = Number(args[2]); const stop = end < 0 ? item.value.length + end + 1 : end + 1; return item.value.slice(start, Math.max(start, stop)); }
     case 'LLEN': return item?.type === 'list' ? item.value.length : 0;
+    case 'RECOVERALERT': {
+      const processingKey = String(args[0] ?? '');
+      const queueKey = String(args[1] ?? '');
+      const deadKey = String(args[2] ?? '');
+      const maxAttempts = Math.max(1, Math.floor(Number(args[3]) || 8));
+      const processing = getLocal(processingKey);
+      if (!processing || processing.type !== 'list' || processing.value.length === 0) return 0;
+      const raw = processing.value.pop();
+      if (processing.value.length === 0) localStore.delete(processingKey);
+      const queueItem = getLocal(queueKey);
+      const queue = queueItem?.type === 'list' ? queueItem.value : [];
+      const deadItem = getLocal(deadKey);
+      const dead = deadItem?.type === 'list' ? deadItem.value : [];
+      let payload;
+      try { payload = JSON.parse(String(raw)); } catch { payload = null; }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        dead.unshift(String(raw));
+        setLocal(deadKey, 'list', dead.slice(0, 100), deadItem?.expiresAt ? Math.max(1, Math.ceil((deadItem.expiresAt - Date.now()) / 1000)) : null);
+        return 2;
+      }
+      const attempts = Math.max(0, Number(payload.attempts) || 0) + 1;
+      const recovered = JSON.stringify({ ...payload, attempts, recoveredAt: new Date().toISOString() });
+      if (attempts >= maxAttempts) {
+        dead.unshift(recovered);
+        setLocal(deadKey, 'list', dead.slice(0, 100), deadItem?.expiresAt ? Math.max(1, Math.ceil((deadItem.expiresAt - Date.now()) / 1000)) : null);
+        return 2;
+      }
+      queue.unshift(recovered);
+      setLocal(queueKey, 'list', queue.slice(0, 1000), queueItem?.expiresAt ? Math.max(1, Math.ceil((queueItem.expiresAt - Date.now()) / 1000)) : null);
+      return 1;
+    }
+    case 'RPOPLPUSH': {
+      const sourceKey = String(args[0] ?? '');
+      const destinationKey = String(args[1] ?? '');
+      const source = getLocal(sourceKey);
+      if (!source || source.type !== 'list' || source.value.length === 0) return null;
+      const value = source.value.pop();
+      if (source.value.length === 0) localStore.delete(sourceKey);
+      else setLocal(sourceKey, 'list', source.value, source.expiresAt ? Math.max(1, Math.ceil((source.expiresAt - Date.now()) / 1000)) : null);
+      const destination = getLocal(destinationKey);
+      const list = destination?.type === 'list' ? destination.value : [];
+      list.unshift(value);
+      setLocal(destinationKey, 'list', list, destination?.expiresAt ? Math.max(1, Math.ceil((destination.expiresAt - Date.now()) / 1000)) : null);
+      return value;
+    }
+    case 'LREM': {
+      if (!item || item.type !== 'list') return 0;
+      const count = Number(args[1]) || 0;
+      const target = String(args[2] ?? '');
+      let removed = 0;
+      if (count >= 0) {
+        const next = [];
+        for (const value of item.value) {
+          if (String(value) === target && (count === 0 || removed < count)) removed++;
+          else next.push(value);
+        }
+        item.value = next;
+      } else {
+        const next = [];
+        for (let index = item.value.length - 1; index >= 0; index--) {
+          const value = item.value[index];
+          if (String(value) === target && removed < Math.abs(count)) removed++;
+          else next.push(value);
+        }
+        item.value = next.reverse();
+      }
+      if (item.value.length === 0) localStore.delete(key);
+      return removed;
+    }
+    case 'RETRYALERT': case 'DEADALERT': {
+      const processingKey = String(args[0] ?? '');
+      const targetRaw = String(args[1] ?? '');
+      const destinationKey = String(args[2] ?? '');
+      const queuedRaw = String(args[3] ?? targetRaw);
+      const processing = getLocal(processingKey);
+      if (!processing || processing.type !== 'list') return 0;
+      const index = processing.value.findIndex((entry) => String(entry) === targetRaw);
+      if (index < 0) return 0;
+      processing.value.splice(index, 1);
+      if (!processing.value.length) localStore.delete(processingKey);
+      const destination = getLocal(destinationKey);
+      if (destination && destination.type !== 'list') throw new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+      const list = destination?.value || [];
+      list.unshift(queuedRaw);
+      setLocal(destinationKey, 'list', list.slice(0, name === 'RETRYALERT' ? 1000 : 100), destination?.expiresAt ? Math.max(1, (destination.expiresAt - Date.now()) / 1000) : null);
+      return 1;
+    }
     case 'ZADD': { const zset = item?.type === 'zset' ? item.value : new Map(); let added = 0; for (let i = 1; i + 1 < args.length; i += 2) { const score = Number(args[i]); const member = String(args[i + 1]); if (!zset.has(member)) added++; zset.set(member, score); } setLocal(key, 'zset', zset, item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return added; }
     case 'ZREMRANGEBYSCORE': { if (!item || item.type !== 'zset') return 0; const min = Number(args[1]); const max = Number(args[2]); let removed = 0; for (const [member, score] of item.value) if (score >= min && score <= max) { item.value.delete(member); removed++; } return removed; }
     case 'ZCARD': return item?.type === 'zset' ? item.value.size : 0;
     case 'PEXPIRE': { if (!item) return 0; item.expiresAt = Date.now() + Number(args[1]); return 1; }
-    case 'SADD': { const set = item?.type === 'set' ? item.value : new Set(); let added = 0; for (const member of args.slice(1)) { const before = set.size; set.add(String(member)); if (set.size > before) added++; } setLocal(key, 'set', set, item?.expiresAt ? Math.max(1, Math.ceil((item.expiresAt - Date.now()) / 1000)) : null); return added; }
+    case 'SADD': {
+      if (item && item.type !== 'set') throw new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+      const set = item?.value || new Set(); let added = 0;
+      for (const member of args.slice(1)) { const before = set.size; set.add(String(member)); if (set.size > before) added++; }
+      setLocal(key, 'set', set, item?.expiresAt ? Math.max(1, (item.expiresAt - Date.now()) / 1000) : null);
+      return added;
+    }
     case 'SCARD': return item?.type === 'set' ? item.value.size : 0;
     case 'SREM': { if (!item || item.type !== 'set') return 0; let removed = 0; for (const member of args.slice(1)) if (item.value.delete(String(member))) removed++; return removed; }
     case 'SMEMBERS': return item?.type === 'set' ? [...item.value] : [];
@@ -371,10 +465,22 @@ export async function setMaxStringWithExpiry(key, value, ttlSeconds) {
   }
   return Number(await command(['EVAL', SET_MAX_WITH_TTL_LUA, '1', key, String(requested), String(ttl)]));
 }
+// A Redis Set has one key-level TTL, not a per-member TTL. Only extend the
+// index lifetime; never shorten it when a shorter-lived member is added.
 const ADD_SET_MEMBER_LUA = `
 local added = redis.call('SADD', KEYS[1], ARGV[1])
-local ttl = tonumber(ARGV[2])
-if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end
+local ttl = tonumber(ARGV[2]) or 0
+if ttl > 0 then
+  local requested = ttl * 1000
+  local current = redis.call('PTTL', KEYS[1])
+  -- Extend an expiring index but never shorten it. A persistent existing set
+  -- stays persistent; only a newly-created set receives its initial TTL.
+  if current >= 0 and requested > current then
+    redis.call('PEXPIRE', KEYS[1], requested)
+  elseif current == -1 and added == 1 and redis.call('SCARD', KEYS[1]) == 1 then
+    redis.call('PEXPIRE', KEYS[1], requested)
+  end
+end
 return added
 `;
 const PUSH_TRIM_LUA = `
@@ -389,7 +495,23 @@ export async function listPushTrim(key, event, keep = 500) {
 }
 export async function listRange(key, start = 0, end = 99) { return command(['LRANGE', key, String(start), String(end)]); }
 export async function expire(key, seconds) { return command(['EXPIRE', key, String(seconds)]); }
-export async function setAdd(key, member, ttlSeconds = null) { const ttl = Math.max(0, Math.min(31536000, Math.floor(Number(ttlSeconds) || 0))); if (!redisConfigured()) { if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.'); warnFallback(); const result = await localCommand(['SADD', key, String(member)]); if (ttl) await localCommand(['EXPIRE', key, String(ttl)]); return result; } return command(['EVAL', ADD_SET_MEMBER_LUA, '1', key, String(member), String(ttl)]); }
+export async function setAdd(key, member, ttlSeconds = null) {
+  const ttl = Math.max(0, Math.min(31536000, Math.floor(Number(ttlSeconds) || 0)));
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+    warnFallback();
+    const before = getLocal(key);
+    if (before && before.type !== 'set') throw new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const existed = Boolean(before?.type === 'set' && before.value.size > 0);
+    const remainingMs = before?.expiresAt ? Math.max(0, before.expiresAt - Date.now()) : Infinity;
+    const result = await localCommand(['SADD', key, String(member)]);
+    if (ttl > 0 && ((!existed && result === 1) || (Number.isFinite(remainingMs) && ttl * 1000 > remainingMs))) {
+      await localCommand(['EXPIRE', key, String(ttl)]);
+    }
+    return result;
+  }
+  return command(['EVAL', ADD_SET_MEMBER_LUA, '1', key, String(member), String(ttl)]);
+}
 export async function setMembers(key) { return command(['SMEMBERS', key]); }
 export async function setCard(key) { return command(['SCARD', key]); }
 export async function getStrings(...keys) { if (!keys.length) return []; const result = await command(['MGET', ...keys.map(String)]); return Array.isArray(result) ? result : []; }
@@ -628,13 +750,49 @@ export async function releaseIncidentAlertLease(projectId, token) {
   return Number(await command(['EVAL', script, '1', `arix:outbox:alerts:lock:${id}`, token])) === 1;
 }
 
-export async function recoverIncidentAlertClaims(projectId, maximum = 100) {
-  const id = String(projectId || '').trim(); const limit = Math.max(1, Math.min(1000, Math.floor(Number(maximum) || 100)));
-  const queueKey = `arix:outbox:alerts:${id}`; const processingKey = `${queueKey}:processing`;
+const RECOVER_INCIDENT_ALERT_LUA = `
+local raw = redis.call('RPOP', KEYS[1])
+if not raw then return 0 end
+local ok, payload = pcall(cjson.decode, raw)
+if not ok or type(payload) ~= 'table' then
+  redis.call('LPUSH', KEYS[3], raw)
+  redis.call('LTRIM', KEYS[3], 0, 99)
+  return 2
+end
+local attempts = tonumber(payload.attempts) or 0
+payload.attempts = attempts + 1
+payload.recoveredAt = ARGV[2]
+local updated = cjson.encode(payload)
+if payload.attempts >= tonumber(ARGV[1]) then
+  redis.call('LPUSH', KEYS[3], updated)
+  redis.call('LTRIM', KEYS[3], 0, 99)
+  return 2
+end
+redis.call('LPUSH', KEYS[2], updated)
+redis.call('LTRIM', KEYS[2], 0, 999)
+return 1
+`;
+
+export async function recoverIncidentAlertClaims(projectId, maximum = 100, maxAttempts = 8) {
+  const id = String(projectId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw new TypeError('A valid project ID is required for alert recovery.');
+  const limit = Math.max(1, Math.min(1000, Math.floor(Number(maximum) || 100)));
+  const attemptsLimit = Math.max(1, Math.min(20, Math.floor(Number(maxAttempts) || 8)));
+  const queueKey = `arix:outbox:alerts:${id}`;
+  const processingKey = `${queueKey}:processing`;
+  const deadKey = `arix:outbox:alerts:dead:${id}`;
   let recovered = 0;
-  for (; recovered < limit; recovered++) {
-    const value = await command(['RPOPLPUSH', processingKey, queueKey]);
-    if (value == null) break;
+  for (let index = 0; index < limit; index++) {
+    let status;
+    if (!redisConfigured()) {
+      if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH Redis in production.');
+      warnFallback();
+      status = await localCommand(['RECOVERALERT', processingKey, queueKey, deadKey, String(attemptsLimit)]);
+    } else {
+      status = await command(['EVAL', RECOVER_INCIDENT_ALERT_LUA, '3', processingKey, queueKey, deadKey, String(attemptsLimit), new Date().toISOString()]);
+    }
+    if (Number(status) === 0) break;
+    recovered++;
   }
   return recovered;
 }
@@ -647,15 +805,31 @@ export async function ackIncidentAlert(projectId, raw) {
   const id = String(projectId || '').trim();
   return command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
 }
+const RETRY_INCIDENT_ALERT_LUA = `
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 1 then
+  redis.call('LPUSH', KEYS[2], ARGV[2])
+  redis.call('LTRIM', KEYS[2], 0, 999)
+end
+return removed
+`;
+const DEADLETTER_INCIDENT_ALERT_LUA = `
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 1 then
+  redis.call('LPUSH', KEYS[2], ARGV[1])
+  redis.call('LTRIM', KEYS[2], 0, 99)
+end
+return removed
+`;
 export async function retryIncidentAlert(projectId, raw, nextRaw) {
   const id = String(projectId || '').trim();
-  await command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
-  await pipeline([['LPUSH', `arix:outbox:alerts:${id}`, String(nextRaw)], ['LTRIM', `arix:outbox:alerts:${id}`, '0', '999']]);
+  if (!redisConfigured()) return Number(await localCommand(['RETRYALERT', `arix:outbox:alerts:${id}:processing`, String(raw), `arix:outbox:alerts:${id}`, String(nextRaw)])) === 1;
+  return Number(await command(['EVAL', RETRY_INCIDENT_ALERT_LUA, '2', `arix:outbox:alerts:${id}:processing`, `arix:outbox:alerts:${id}`, String(raw), String(nextRaw)])) === 1;
 }
 export async function deadLetterIncidentAlert(projectId, raw) {
   const id = String(projectId || '').trim();
-  await command(['LREM', `arix:outbox:alerts:${id}:processing`, '1', String(raw)]);
-  await pipeline([['LPUSH', `arix:outbox:alerts:dead:${id}`, String(raw)], ['LTRIM', `arix:outbox:alerts:dead:${id}`, '0', '99']]);
+  if (!redisConfigured()) return Number(await localCommand(['DEADALERT', `arix:outbox:alerts:${id}:processing`, String(raw), `arix:outbox:alerts:dead:${id}`, String(raw)])) === 1;
+  return Number(await command(['EVAL', DEADLETTER_INCIDENT_ALERT_LUA, '2', `arix:outbox:alerts:${id}:processing`, `arix:outbox:alerts:dead:${id}`, String(raw)])) === 1;
 }
 
 

@@ -1,4 +1,5 @@
 import { recordScopedDataReceipt, getArixContext } from '../../sdk/context-internal.js';
+import { assertTenantScopedQuery } from './postgres-rls.js';
 
 function identity(context) {
   const tenantId = String(context?.tenantId || context?.projectId || '').trim();
@@ -30,8 +31,12 @@ async function pgTransaction(client, ctx, fn, options) {
   let began = false;
   try {
     await connection.query('BEGIN'); began = true;
+    const roleResult = await connection.query('SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user');
+    const role = roleResult?.rows?.[0];
+    if (!role || role.rolsuper === true || role.rolbypassrls === true) throw Object.assign(new Error('RLS transaction refused: runtime role is missing, superuser, or BYPASSRLS.'), { code: 'ARIX_RLS_PRIVILEGED_ROLE' });
     await connection.query("SELECT set_config('arix.tenant_id', $1, true), set_config('arix.user_id', $2, true)", [ctx.tenantId, ctx.userId]);
-    const result = await fn(connection);
+    const scopedConnection = Object.freeze({ query: (...args) => { assertTenantScopedQuery(args); return connection.query(...args); } });
+    const result = await fn(scopedConnection);
     await connection.query('COMMIT'); began = false;
     return result;
   } catch (error) {

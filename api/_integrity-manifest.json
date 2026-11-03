@@ -2,12 +2,12 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 117,
-  "rootDigest": "03fba4ea80d11daa4445c4c2d5dd9b4cd4958cc0b018e8f3421ea20c7cf6a257",
+  "fileCount": 118,
+  "rootDigest": "8fdf76e0f7a56613170ef4db2681114baf6cd85444ed0b3f41feedeb014bd4a4",
   "files": [
     {
       "path": "api/_lib/abuse.js",
-      "sha256": "eeef49c456cc4f3d514f4f719222537369d0cbd77de88cd41e89dc73d6eb432f"
+      "sha256": "f78fdff3e314ddfb683f6b05dec882bc3e5247e0242a8eee4583454097bddd00"
     },
     {
       "path": "api/_lib/ai-guard.js",
@@ -15,7 +15,7 @@
     },
     {
       "path": "api/_lib/alerts.js",
-      "sha256": "f2494d9c15abcd2946eeefdfe558b209ddc84613c1a5b5997c20c4f54dd69f20"
+      "sha256": "29932c19ea7ba6cdddbad9e4fad1d401bae8f90fff5734209ff90f0928956e1c"
     },
     {
       "path": "api/_lib/analytics.js",
@@ -55,11 +55,11 @@
     },
     {
       "path": "api/_lib/crypto-trap.js",
-      "sha256": "c2767268ba1007cc478a77e4a74987c7209961925251572e30513be55bd8f38d"
+      "sha256": "7af14b3ed2b26abcae86477f7423a1ee21b32e16fbe317c5d14008ddfb1c6f9a"
     },
     {
       "path": "api/_lib/db-guard.js",
-      "sha256": "991bd4ec09ce39095a629fce326acc87f51231917c38f116f14c0afa7e9aecd1"
+      "sha256": "97ca5510682cfc983511b1df4ca6deb9142d19cad9d56f52906962cb6ab5fb60"
     },
     {
       "path": "api/_lib/db.js",
@@ -123,7 +123,7 @@
     },
     {
       "path": "api/_lib/postgres-rls.js",
-      "sha256": "6e65642f095e380848019b8a6d1623fe26a8f54faf3baf1e8ef93e4013cdc733"
+      "sha256": "ec7af5a4ac9f48e4e440c3b1317dc12af01ebe646577cc3d0edbfe3ac0764994"
     },
     {
       "path": "api/_lib/recovery-codes.js",
@@ -131,7 +131,7 @@
     },
     {
       "path": "api/_lib/redis.js",
-      "sha256": "6b94a163c995688af84becf69e2345c45309c3f3ceb31c5cc1b33e77395c0dfc"
+      "sha256": "2717e9ac60a0f7588cd9b2310821254f8711ff4e8e92b242008b463df6190cd6"
     },
     {
       "path": "api/_lib/reputation.js",
@@ -163,7 +163,7 @@
     },
     {
       "path": "api/_lib/step-up.js",
-      "sha256": "183885b72bfefbc84d227043fdec522bfeca69cc5421eeba2f97ea39227d09a2"
+      "sha256": "066de71b36c58c9d322b2382afd5ba6ceda83875b71b1ef92c6d4c4e1f5f3553"
     },
     {
       "path": "api/_lib/threat-intel.js",
@@ -175,7 +175,7 @@
     },
     {
       "path": "api/_lib/waf-engine.js",
-      "sha256": "55f86af9671f8c43cc6bfd40a6285c91b35f234b9010cfbb4c87034dc84239b1"
+      "sha256": "8bb6960c68c79a0019e5636a8cc78fcf5da59ce1dab16d2a8991fc685d0c1dc3"
     },
     {
       "path": "api/_lib/watermark.js",
@@ -187,7 +187,7 @@
     },
     {
       "path": "api/auth.js",
-      "sha256": "e6b04da42549359c7cee43153207b7f9e0e419e05ad1f5e7ddb293f289a98800"
+      "sha256": "be221c03998acd702c6bf04ea9f673f10b882b19b9e95b56a0e3191d6f9d9e49"
     },
     {
       "path": "api/cron/analytics-flush.js",
@@ -219,11 +219,11 @@
     },
     {
       "path": "api/shield.js",
-      "sha256": "c5c8bd6b1bf5bfe566ed241fd9c3ce9cf13278416c6473a149d3317bf983f777"
+      "sha256": "00805832bd7194bbaf07815c06c74afe1e712c3012b886bfb24253d8bc9ed4da"
     },
     {
       "path": "api/telemetry.js",
-      "sha256": "4464ced576466badb3d25fc70900d4c8da7e6d0792b6a240f36d4d6977c230b9"
+      "sha256": "158ad392b5cbde4f702cef2a23c52a8db236cfc12050a0c51cef83f620540a36"
     },
     {
       "path": "edge/gateway.mjs",
@@ -243,7 +243,7 @@
     },
     {
       "path": "public/app.js",
-      "sha256": "90edbec06f2cea0790571c52c3ccb5b33b241fdc0482e802ce29b234475ce722"
+      "sha256": "5851616dbd9f183e876674c56a7a7793b7f36f3a06fea68feb88f67fb1d0f4c5"
     },
     {
       "path": "public/arix-client.js",
@@ -386,6 +386,10 @@
       "sha256": "b070c4fa0a7fc26f504477ad0c658fea3956bc8f92ad87d96971cd2c485315e9"
     },
     {
+      "path": "test/audit-11-regressions.test.js",
+      "sha256": "a85340c012d5d30a6b4e46a919785026505f7019761abb2f510163e04ea33fe7"
+    },
+    {
       "path": "test/auth-recovery.test.js",
       "sha256": "0fbf7fcb1ce595641d14e08ca1e381caf9a95daa448a445dd5dc5a4f78e8f5ca"
     },
@@ -427,7 +431,7 @@
     },
     {
       "path": "test/grounded-hardening.test.js",
-      "sha256": "2958fabc66adc9980febb1b2b4fad2a38f8a507e88149fa78d300c75e139d69e"
+      "sha256": "63fcf5994fbc7b72285db77601d03cd795459c1a5f63cccd2dc17ebc8e3a9408"
     },
     {
       "path": "test/hardening-regressions.test.js",

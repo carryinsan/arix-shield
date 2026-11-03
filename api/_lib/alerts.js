@@ -44,9 +44,10 @@ export async function drainIncidentAlertOutbox(projectIds, { maxPerProject = 50,
       const leaseToken = await acquireIncidentAlertLease(projectId, 300);
       if (!leaseToken) continue;
       try {
-        await recoverIncidentAlertClaims(projectId, 100);
+        await recoverIncidentAlertClaims(projectId, 100, attemptsLimit);
         const project = await getJson(`arix:project:${projectId}`);
         const webhookUrl = typeof project?.policy?.alertWebhookUrl === 'string' ? project.policy.alertWebhookUrl : '';
+        const attemptedIds = new Set();
         for (let index = 0; index < limit; index++) {
           const raw = await claimIncidentAlert(projectId);
           if (raw == null) break;
@@ -58,7 +59,16 @@ export async function drainIncidentAlertOutbox(projectIds, { maxPerProject = 50,
           if (!webhookUrl || !payload?.incident || !payload?.id) {
             await ackIncidentAlert(projectId, raw); summary.discarded++; continue;
           }
-          const incident = { ...payload.incident, outboxId: String(payload.id), outboxCreatedAt: payload.createdAt };
+          const payloadId = String(payload.id);
+          // RPOPLPUSH is FIFO; a just-retried item eventually reaches the head
+          // again in this invocation. Defer it instead of exhausting all retries
+          // immediately or repeatedly hammering a failing webhook.
+          if (attemptedIds.has(payloadId)) {
+            await retryIncidentAlert(projectId, raw, raw);
+            break;
+          }
+          attemptedIds.add(payloadId);
+          const incident = { ...payload.incident, outboxId: payloadId, outboxCreatedAt: payload.createdAt };
           try {
             await dispatchIncidentAlert(webhookUrl, incident);
             await ackIncidentAlert(projectId, raw); summary.delivered++;
@@ -71,7 +81,10 @@ export async function drainIncidentAlertOutbox(projectIds, { maxPerProject = 50,
               await retryIncidentAlert(projectId, raw, next); summary.retried++;
             }
             summary.errors.push({ projectId, error: String(error?.message || error).slice(0, 160) });
-            break;
+            // A failed delivery is retried/dead-lettered above. Continue draining
+            // independent incidents rather than allowing one poison webhook to
+            // starve every later alert for this project.
+            continue;
           }
         }
       } finally {

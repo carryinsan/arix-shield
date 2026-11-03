@@ -21,8 +21,8 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:117 -->
-<!-- ARIX-MANIFEST-ROOT:03fba4ea80d11daa4445c4c2d5dd9b4cd4958cc0b018e8f3421ea20c7cf6a257 -->
+<!-- ARIX-MANIFEST-FILE-COUNT:118 -->
+<!-- ARIX-MANIFEST-ROOT:8fdf76e0f7a56613170ef4db2681114baf6cd85444ed0b3f41feedeb014bd4a4 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -95,3 +95,15 @@ Do not use the disposable smoke-test credentials from the local verification. Co
 5. Configure shared Redis and verify quota/replay/session/audit/alert consistency during outage and recovery.
 6. Apply and verify host/container seccomp, non-root, capabilities, `NoNewPrivs`, filesystem, egress and secret-management policies.
 7. Run live integration, backup/restore, disaster-recovery, external SAST/SCA/secret scans, DAST and independent penetration tests. Map all applicable ASVS 5.0.0 Level 3 requirements before making any compliance statement.
+
+## Follow-up audit — 11 implementation findings (2026-11-03)
+
+The follow-up audit identified defects in decrypted browser-clearance inspection, account risk/lockout handling, Redis index TTL updates, browser PoW replay, capability-bearing IDs, WAF path/multipart inspection, PostgreSQL transaction/SQL parsing, sensitive-action step-up, automation verdict handling, alert outbox retry/local commands, and BOLA route normalization. The remediation and important qualifications are recorded in `AUDIT-11-REMEDIATION.md`.
+
+- Repository tests after the audit fixes: **223 passed, 0 failed**.
+- Static integrity check: **118 files**, 115 JavaScript/MJS syntax checks, 66 import checks, static scanner passed.
+- Deterministic WAF corpus: **200,000 cases** (100,000 adversarial and 100,000 benign), with 100,000 attack detections, 0 misses, 100,000 benign allowed, and 0 false positives on this corpus.
+- Local in-process endurance: **801,000 operations over 15 seconds**, concurrency 8, 0 invariant errors; approximately 53,390 operations/second, peak RSS approximately 68.7 MiB.
+- Controlled `node scripts/build.mjs` preflight: passed with isolated, disposable local test settings; all 223 tests passed inside the build.
+
+These local results are not proof of zero vulnerabilities. No live Upstash Redis, production PostgreSQL instance, actual Vercel deployment, external webhook receiver, or real-device WebAuthn ceremony was available. Rich-text SQL grammar exclusions remain intentional and are documented in `AUDIT-11-REMEDIATION.md`; non-SQL WAF checks still apply to those fields. A production-like staging test and independent security assessment remain release gates.
