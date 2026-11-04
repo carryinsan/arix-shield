@@ -22,7 +22,7 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
 <!-- ARIX-MANIFEST-FILE-COUNT:126 -->
-<!-- ARIX-MANIFEST-ROOT:701f361a29a5622a8e45da837011132a3dc57c95669402d829ae52a681977b41 -->
+<!-- ARIX-MANIFEST-ROOT:e04cc3e36b13878c1bd3fb7f18a53ca88364431091bc61bb24031f3ab4f9a99c -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -177,3 +177,14 @@ The latest independent review identified an unbounded degraded-mode outage-proof
 - Controlled `npm run build`: passed with disposable build-only secrets, a temporary RSA-3072 clearance key and dummy Upstash-shaped HTTPS configuration. The build runs all 276 tests in an isolated local test environment. Temporary values were not packaged; manifests were reset to unsigned form for trusted CI signing.
 
 **Remaining release gates:** no `package-lock.json` is included; `npm ci` and `npm audit --omit=dev --audit-level=low` remain outstanding. No live Vercel deployment, Upstash instance, PostgreSQL server, or external replay/cache cluster was exercised. The replay caches described here are process-local protections; distributed replay correctness depends on the production Redis callback and must be checked in staging.
+
+## Vercel build regression correction — 2026-11-04
+
+The user-reported Vercel build failure was reproduced locally with `VERCEL=1`: the session-rotation grace regression test sent the development-only `arix_session` cookie while the production session reader correctly requires `__Host-arix_session` on Vercel. The test fixture now selects the cookie name from the same `VERCEL`/production condition as `getSession()`. Its security assertions were retained; no production cookie or session enforcement was weakened.
+
+- Pre-fix reproduction: focused regression failed under `VERCEL=1` and passed without it.
+- Post-fix focused regression: passed under `VERCEL=1`.
+- Full Vercel-like suite (`VERCEL=1 NODE_ENV=test npm test`): **276 passed, 0 failed, 0 skipped**.
+- `npm run check` equivalent (`NODE_ENV=test node scripts/check.mjs`): passed; **123** JavaScript/MJS syntax checks, **68** API/SDK imports, static scanner passed, **126** integrity-manifest entries verified.
+- Controlled Vercel-like production build (`VERCEL=1 VERCEL_ENV=production NODE_ENV=production npm run build`): passed, including all **276** tests. Temporary build-only secrets and RSA key material were not packaged. The manifests were reset unsigned for trusted deployment signing.
+- This is local Vercel-environment verification, not a deployment to the live Vercel project. Existing dependency-lockfile/SCA and live-infrastructure release gates remain open.

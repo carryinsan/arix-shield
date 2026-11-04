@@ -3,7 +3,7 @@
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
   "fileCount": 126,
-  "rootDigest": "701f361a29a5622a8e45da837011132a3dc57c95669402d829ae52a681977b41",
+  "rootDigest": "e04cc3e36b13878c1bd3fb7f18a53ca88364431091bc61bb24031f3ab4f9a99c",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -447,7 +447,7 @@
     },
     {
       "path": "test/hardening-regressions.test.js",
-      "sha256": "12b2ba6681800f5c288d3c8b5fc929d98ef418ffc6d12002348f7d002a986272"
+      "sha256": "4e3521bb59eec5cb80b490418137a6f63bc3679a27a32c103af1afc142beffa0"
     },
     {
       "path": "test/host-attestation.test.js",
