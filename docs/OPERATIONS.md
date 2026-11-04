@@ -1,3 +1,8 @@
+# Account signup verification
+
+Production signup requires an email delivery provider. Configure `ARIX_RESEND_API_KEY` and `ARIX_EMAIL_FROM` (a sender/domain verified with Resend) before allowing new registrations. A registration temporarily reserves the normalized email for ten minutes, sends a six-digit single-use code, and creates the account and project only after the code is verified. The email index is atomically changed from the pending reservation to the permanent owner ID; failure cleanup deletes only a reservation still owned by that registration. The API key is server-only. If delivery is not configured or Resend is unavailable, signup fails closed and removes its pending reservation; existing accounts and sign-in continue to work. No verification code is returned in the API response or written to logs. `ARIX_REQUIRE_EMAIL_VERIFICATION=true` enables the same behavior in development/staging.
+
+Browser visitor telemetry is rate-limited independently by DPoP thumbprint, trusted ingress network prefix (IPv4 `/24`, IPv6 `/64`), and project total. Defaults are 3,600 requests/minute/network and 60,000 requests/minute/project. The project cap is bounded at 100,000/minute. Adjust `ARIX_BROWSER_NETWORK_RATE_LIMIT_PER_MINUTE` and `ARIX_BROWSER_PROJECT_RATE_LIMIT_PER_MINUTE` to match expected peak traffic; account for carrier-grade NAT and corporate egress concentration. `clearance-key` bootstrap requests consume the same buckets as telemetry requests. Signup also has a shared service-wide cap of 10,000 requests/hour (`ARIX_SIGNUP_GLOBAL_LIMIT_PER_HOUR`, bounded at 100,000), in addition to per-email and trusted-network limits. These limits constrain telemetry and Redis cost; they do not stop volumetric traffic before it reaches Vercel and do not make client-provided automation signals trustworthy.
 # ArixShield production operations
 
 This release preserves the existing Vercel API routes and project-key formats. Existing application route handlers can remain in place; install the SDK wrapper/middleware for request inspection, optional capability sealing, outbound response checks, and final status reporting.
@@ -9,6 +14,7 @@ This release preserves the existing Vercel API routes and project-key formats. E
 - A strong `ARIX_MASTER_SECRET` containing at least 32 random bytes.
 - `CRON_SECRET` configured in Vercel and used by the cron endpoints.
 - A Vercel project deployment of this repository.
+- For new production account registrations, `ARIX_RESEND_API_KEY` and `ARIX_EMAIL_FROM` set to a verified Resend sender. Signup fails closed without these settings; existing account sign-in is unaffected.
 
 Generate secrets locally and do not commit them:
 
@@ -16,7 +22,7 @@ Generate secrets locally and do not commit them:
 openssl rand -base64 48
 ```
 
-Copy `.env.example` into Vercel Project Settings → Environment Variables. Never commit `.env`, private JWK values, server keys, or provider credentials. No new third-party API key is required by the security additions in this release.
+Copy `.env.example` into Vercel Project Settings → Environment Variables. Never commit `.env`, private JWK values, server keys, or provider credentials. Resend is used only to deliver signup verification mail; it is not required for sign-in or other runtime operations.
 
 ## 1A. Password security and step-up verification
 

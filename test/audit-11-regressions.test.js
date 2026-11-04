@@ -44,7 +44,7 @@ test('browser PoW is bound to the DPoP thumbprint and atomically single-use', as
   let solution = '';
   for (let candidate = 0; candidate < 200000; candidate++) {
     const digest = createHash('sha256').update(`${claims.nonce}:${claims.binding}:${candidate}`).digest();
-    if (digest[0] === 0 && (digest[1] & 0xf0) === 0) { solution = String(candidate); break; }
+    if (digest[0] === 0 && digest[1] === 0) { solution = String(candidate); break; }
   }
   assert.notEqual(solution, '');
   assert.equal(await validatePow(projectId, token, solution, signals, thumbprint), true);
@@ -196,7 +196,8 @@ test('browser automation verdict is actionable and does not misclassify isolated
   assert.equal(isSuspiciousAutomation({ strongAutomationSignal: true, signalCount: 1, keyboardHumanSignal: false }), true);
   assert.equal(isSuspiciousAutomation({ strongAutomationSignal: false, signalCount: 2, keyboardHumanSignal: false }), true);
   assert.equal(isSuspiciousAutomation({ strongAutomationSignal: false, signalCount: 1, keyboardHumanSignal: false }), false);
-  assert.equal(isSuspiciousAutomation({ strongAutomationSignal: false, signalCount: 2, keyboardHumanSignal: true }), false);
+  // A fabricated keyboard/focus sample cannot cancel unrelated automation indicators.
+  assert.equal(isSuspiciousAutomation({ strongAutomationSignal: false, signalCount: 2, keyboardHumanSignal: true }), true);
 });
 
 

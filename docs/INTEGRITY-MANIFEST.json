@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 118,
-  "rootDigest": "8fdf76e0f7a56613170ef4db2681114baf6cd85444ed0b3f41feedeb014bd4a4",
+  "fileCount": 119,
+  "rootDigest": "a677b1f7257e8db2260b8f1cef0b83a6295029d8988eca410ba06913c00fba43",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -91,7 +91,7 @@
     },
     {
       "path": "api/_lib/http.js",
-      "sha256": "1083e3ab5d7574eba7a6c49b7a46f1baa12d03de1b7e6ebc8fb737e9f432e20c"
+      "sha256": "7e8bf3ed3afca47ff86dad02dd996fd5425cfd669bcc6f2c44f855fa226e9057"
     },
     {
       "path": "api/_lib/identity-risk.js",
@@ -131,7 +131,7 @@
     },
     {
       "path": "api/_lib/redis.js",
-      "sha256": "2717e9ac60a0f7588cd9b2310821254f8711ff4e8e92b242008b463df6190cd6"
+      "sha256": "0ae90e54fb4ef300fa869d87e01bcc4090d556a5a3a792ab5396b2ce2bb8f6c3"
     },
     {
       "path": "api/_lib/reputation.js",
@@ -187,7 +187,7 @@
     },
     {
       "path": "api/auth.js",
-      "sha256": "be221c03998acd702c6bf04ea9f673f10b882b19b9e95b56a0e3191d6f9d9e49"
+      "sha256": "1d815bed8b362b21e46575b6eb8f9679f6c412482adad3ea57ac123eea0e75e1"
     },
     {
       "path": "api/cron/analytics-flush.js",
@@ -219,7 +219,7 @@
     },
     {
       "path": "api/shield.js",
-      "sha256": "00805832bd7194bbaf07815c06c74afe1e712c3012b886bfb24253d8bc9ed4da"
+      "sha256": "c7a07cf581873b9cd7f5da2cc881d772c5690d725aae74bd14bcd61eaeab7b42"
     },
     {
       "path": "api/telemetry.js",
@@ -243,7 +243,7 @@
     },
     {
       "path": "public/app.js",
-      "sha256": "5851616dbd9f183e876674c56a7a7793b7f36f3a06fea68feb88f67fb1d0f4c5"
+      "sha256": "fb661a849925b782eae68bec83fd247646a6c1308134184b4a4e99659671ab9a"
     },
     {
       "path": "public/arix-client.js",
@@ -255,7 +255,7 @@
     },
     {
       "path": "public/developer.html",
-      "sha256": "f0829f8bca6bda9814467002f59506fc11b737e7778e286c60cb83efd10196c7"
+      "sha256": "d087905d36c4580b51f9dee8600c1878f710422700279badcdccc32bf8d76115"
     },
     {
       "path": "public/index.html",
@@ -387,7 +387,7 @@
     },
     {
       "path": "test/audit-11-regressions.test.js",
-      "sha256": "a85340c012d5d30a6b4e46a919785026505f7019761abb2f510163e04ea33fe7"
+      "sha256": "4c10e781deb53f6059cc452a33ff657857cea32f3b5bd6b57b9a893c402c2047"
     },
     {
       "path": "test/auth-recovery.test.js",
@@ -444,6 +444,10 @@
     {
       "path": "test/http-parser-differential.test.js",
       "sha256": "0c028099d618d25040e50b82c1abcbb7ca92eea0bbe3919e28444b95fb882e81"
+    },
+    {
+      "path": "test/independent-audit-followup.test.js",
+      "sha256": "39346b06536037fcc5fdfc93205278d77e3a4a5ab1de8ffaf675966f4c323f9b"
     },
     {
       "path": "test/new-domain-primitives.test.js",

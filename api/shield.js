@@ -1,13 +1,12 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { calculateAutomationRiskScore } from './_lib/bot-intel.js';
-import { sendJson, readJson, methodNotAllowed, getNetworkHints, normalizeOrigin } from './_lib/http.js';
+import { sendJson, readJson, methodNotAllowed, getNetworkHints, trustedClientNetworkPrefix, normalizeOrigin } from './_lib/http.js';
 import { rateLimit, rateLimitMulti, acquireConcurrency, releaseConcurrency, increment, getJson, getString, setString, setMembers, setCard, getStrings, setRemoveMany, recordProjectEvent, recordApiTelemetryEvent } from './_lib/redis.js';
 import { sha256Hex, hashCredential, verifyDpopProof, trapMirage, createSignedToken, verifySignedToken, randomToken, sha256, getClearancePublicJwk, decryptClearanceJwe } from './_lib/crypto-trap.js';
 import { inspectRequest } from './_lib/waf-engine.js';
 import { checkIpReputation, verifyForwardConfirmedCrawler, verifyConfiguredProviderIp } from './_lib/reputation.js';
 import { isActorBackedOff, banActorForHoneypot, recordRequestOutcome, sanitizeForensicEvent, recordThreatCorrelation } from './_lib/abuse.js';
 import { createInvisibleWatermarkMarker, createChameleonCanaryId, storeChameleonCanary, lookupChameleonCanary, storeChameleonExposedId, lookupChameleonCanaryByExposedId } from './_lib/watermark.js';
-import { formatIpPrefix } from './_lib/cidr.js';
 import { verifyRuntimeIntegrity } from './_lib/integrity.js';
 
 const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
@@ -35,18 +34,18 @@ function isProjectOriginAllowed(project, origin) {
 export async function issuePowChallenge(projectId, signals = {}, thumbprint = '') {
   const safeSignals = signals && typeof signals === 'object' && !Array.isArray(signals) ? signals : {};
   const binding = await sha256Hex(JSON.stringify({ signals: safeSignals, thumbprint: String(thumbprint) }));
-  return createSignedToken({ projectId, nonce: randomToken(24), thumbprint: String(thumbprint), renderSeed: String(safeSignals.renderSeed || ''), binding, exp: Date.now() + 120000, difficulty: 12 }, 'browser-pow');
+  return createSignedToken({ projectId, nonce: randomToken(24), thumbprint: String(thumbprint), renderSeed: String(safeSignals.renderSeed || ''), binding, exp: Date.now() + 120000, difficulty: 16 }, 'browser-pow');
 }
 
 export async function validatePow(projectId, token, solution, signals = {}, thumbprint = '') {
   if (typeof solution !== 'string' || solution.length > 16 || !/^\d{1,12}$/.test(solution)) return false;
   const payload = await verifySignedToken(token, 'browser-pow');
-  if (!payload || payload.projectId !== projectId || payload.exp < Date.now() || typeof payload.nonce !== 'string' || payload.nonce.length < 20 || payload.thumbprint !== String(thumbprint)) return false;
+  if (!payload || payload.projectId !== projectId || payload.exp < Date.now() || typeof payload.nonce !== 'string' || payload.nonce.length < 20 || payload.thumbprint !== String(thumbprint) || payload.difficulty !== 16) return false;
   const safeSignals = signals && typeof signals === 'object' && !Array.isArray(signals) ? signals : {};
   const binding = await sha256Hex(JSON.stringify({ signals: safeSignals, thumbprint: String(thumbprint) }));
   if (payload.binding !== binding) return false;
   const digest = await sha256(`${payload.nonce}:${payload.binding}:${solution}`);
-  if (!(digest[0] === 0 && (digest[1] & 0xf0) === 0)) return false;
+  if (!(digest[0] === 0 && digest[1] === 0)) return false;
   // A PoW token is a one-use capability bound to the DPoP key that requested it.
   const consumed = await setString(`arix:browser-pow-used:${projectId}:${payload.nonce}`, '1', 120, true);
   return consumed === 'OK';
@@ -137,7 +136,42 @@ export function inspectDecryptedClearancePayload(sealed, projectId, method = 'PO
 }
 
 export function isSuspiciousAutomation({ strongAutomationSignal, signalCount, keyboardHumanSignal }) {
-  return strongAutomationSignal === true || (Number(signalCount) >= 2 && keyboardHumanSignal !== true);
+  // Keyboard/focus samples are supplied by the browser and can be fabricated.
+  // They are useful for telemetry but must never cancel independent automation
+  // indicators. Absence of suspicious signals is NOT proof of a human.
+  void keyboardHumanSignal;
+  return strongAutomationSignal === true || Number(signalCount) >= 2;
+}
+
+function boundedQuotaSetting(name, fallback, maximum) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value >= 1 && value <= maximum ? value : fallback;
+}
+
+/** Build independent actor, network and project buckets for browser telemetry. */
+export async function buildBrowserVisitQuotaDimensions(project, thumbprint, req) {
+  const visitorLimitRaw = Number(project?.policy?.rateLimitPerMinute);
+  const visitorLimit = Number.isSafeInteger(visitorLimitRaw) && visitorLimitRaw >= 1 && visitorLimitRaw <= 10000 ? visitorLimitRaw : 120;
+  const dimensions = [{
+    key: `arix:limit:${project.id}:${String(thumbprint).slice(0, 128)}`,
+    limit: visitorLimit,
+    windowMs: 60000
+  }];
+  const networkPrefix = trustedClientNetworkPrefix(req);
+  if (networkPrefix) {
+    const networkHash = await sha256Hex(networkPrefix);
+    dimensions.push({
+      key: `arix:limit-network:${project.id}:${networkHash}`,
+      limit: boundedQuotaSetting('ARIX_BROWSER_NETWORK_RATE_LIMIT_PER_MINUTE', 3600, 100000),
+      windowMs: 60000
+    });
+  }
+  dimensions.push({
+    key: `arix:limit-project:${project.id}`,
+    limit: boundedQuotaSetting('ARIX_BROWSER_PROJECT_RATE_LIMIT_PER_MINUTE', 60000, 100000),
+    windowMs: 60000
+  });
+  return dimensions;
 }
 
 async function browserVisit(body, req, res, mapping, project, inspection) {
@@ -147,6 +181,8 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     if (!isProjectOriginAllowed(project, origin)) return sendJson(res, 403, { error: 'Browser origin is not registered for this project.' });
     const proofResult = await verifyDpopProof({ proof: req.headers?.['x-arix-pop'], method: req.method, url: requestUrl(req), projectId: project.id, redisGetSet: setString });
     if (!proofResult.valid) return sendJson(res, 401, { error: 'Browser proof-of-possession failed.' });
+    const quota = await rateLimitMulti({ dimensions: await buildBrowserVisitQuotaDimensions(project, proofResult.thumbprint, req) });
+    if (!quota.allowed) return sendJson(res, 429, { error: 'Project browser bootstrap rate limit exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(quota.retryAfterMs / 1000))) });
     const publicJwk = getClearancePublicJwk();
     if (!publicJwk) return sendJson(res, 503, { error: 'Encrypted client clearance is not configured.' });
     return sendJson(res, 200, { ok: true, publicJwk, projectId: project.id, renderSeed: randomToken(16) });
@@ -198,8 +234,8 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     }
   }
 
-  const key = `arix:limit:${project.id}:${proofResult.thumbprint}`;
-  const limit = await rateLimit({ key, algorithm: 'TOKEN_BUCKET', limit: project.policy?.rateLimitPerMinute ?? 120, windowMs: 60000 });
+  const dimensions = await buildBrowserVisitQuotaDimensions(project, proofResult.thumbprint, req);
+  const limit = await rateLimitMulti({ dimensions });
   if (!limit.allowed) return sendJson(res, 429, { error: 'Project visitor telemetry rate limit exceeded.' }, { 'Retry-After': String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))) });
 
   const pathForPolicy = String(body.path ?? req.url ?? '/');
@@ -219,7 +255,7 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
 
   if (!body.powToken || !(await validatePow(project.id, body.powToken, String(body.powSolution ?? ''), body.signals || {}, proofResult.thumbprint))) {
     const challenge = await issuePowChallenge(project.id, body.signals || {}, proofResult.thumbprint);
-    return sendJson(res, 200, { ok: true, challenge, pow: { difficulty: 12, expiresInSeconds: 120 } });
+    return sendJson(res, 200, { ok: true, challenge, pow: { difficulty: 16, expiresInSeconds: 120 } });
   }
 
   const botSignals = body.signals && typeof body.signals === 'object' ? body.signals : {};
@@ -271,7 +307,7 @@ async function browserVisit(body, req, res, mapping, project, inspection) {
     issuedAt: Date.now(),
     exp: Date.now() + 60000
   }, 'browser-clearance');
-  return sendJson(res, 200, { ok: true, result: 'CLEARED', dpopVerified: true, riskScore: event.riskScore, clearanceTicket: clearance, expiresInSeconds: 60 });
+  return sendJson(res, 200, { ok: true, result: 'CLEARED', dpopVerified: true, humanVerified: false, botAssessment: 'UNTRUSTED_CLIENT_TELEMETRY', riskScore: event.riskScore, clearanceTicket: clearance, expiresInSeconds: 60 });
 }
 
 async function serverEvent(body, req, res) {

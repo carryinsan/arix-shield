@@ -426,6 +426,47 @@ export async function setJson(key, value, ttlSeconds = null, nx = false) {
 }
 export async function setString(key, value, ttlSeconds = null, nx = false) { const args = ['SET', key, String(value)]; if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) args.push('EX', String(Math.floor(ttlSeconds))); if (nx) args.push('NX'); return command(args); }
 export async function getString(key) { return command(['GET', key]); }
+
+const STRING_COMPARE_AND_SET_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+const STRING_COMPARE_AND_DELETE_LUA = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+
+/** Atomically replace a string only while it still contains the expected value. */
+export async function compareAndSetString(key, expected, replacement) {
+  const values = [String(key), String(expected), String(replacement)];
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.');
+    warnFallback();
+    const current = getLocal(values[0]);
+    if (!current || current.type !== 'string' || current.value !== values[1]) return false;
+    // No await occurs between read and write: this is atomic within this local
+    // preview isolate. Production uses the Redis Lua script below.
+    setLocal(values[0], 'string', values[2], null);
+    return true;
+  }
+  return Number(await command(['EVAL', STRING_COMPARE_AND_SET_LUA, '1', ...values])) === 1;
+}
+
+/** Atomically delete a reservation only if it is still owned by this caller. */
+export async function compareAndDeleteString(key, expected) {
+  const values = [String(key), String(expected)];
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires Upstash Redis in production.');
+    warnFallback();
+    const current = getLocal(values[0]);
+    if (!current || current.type !== 'string' || current.value !== values[1]) return false;
+    localStore.delete(values[0]);
+    return true;
+  }
+  return Number(await command(['EVAL', STRING_COMPARE_AND_DELETE_LUA, '1', ...values])) === 1;
+}
+
 export async function deleteKeys(...keys) { return keys.length ? command(['DEL', ...keys]) : 0; }
 export async function increment(key, amount = 1) { return command(['INCRBY', key, String(amount)]); }
 const INCREMENT_TTL_LUA = `

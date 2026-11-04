@@ -1,7 +1,8 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
-import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey } from './_lib/http.js';
-import { rateLimit, getJson, getJsonOnce, getString, setJson, setString, deleteKeys, incrementWithExpiry, setMaxStringWithExpiry } from './_lib/redis.js';
-import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential, createSignedToken, verifySignedToken } from './_lib/crypto-trap.js';
+import { randomInt } from 'node:crypto';
+import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey, trustedClientIp, trustedClientNetworkPrefix } from './_lib/http.js';
+import { rateLimit, rateLimitMulti, getJson, getJsonOnce, getString, setJson, setString, compareAndSetString, compareAndDeleteString, deleteKeys, incrementWithExpiry, setMaxStringWithExpiry } from './_lib/redis.js';
+import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential, createSignedToken, verifySignedToken, hmacSha256, constantTimeEqual, getMasterSecret } from './_lib/crypto-trap.js';
 import { LEGACY_PBKDF2_ITERATIONS } from './_lib/security-constants.js';
 import { createSession, getSession, listUserSessions, revokeUserSession, revokeAllUserSessions, rotateSession } from './_lib/session.js';
 import { formatIpPrefix } from './_lib/cidr.js';
@@ -26,34 +27,77 @@ async function verifyAndConsumeTotp(ownerId, secret, code) {
   return result === 'OK';
 }
 
-async function provisionAccount(body, req, res) {
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const password = String(body.password ?? '');
-  const name = String(body.name ?? '').trim();
-  const projectName = String(body.projectName ?? 'My Project').trim();
-  const origin = normalizeOrigin(body.origin);
-  if (!EMAIL_RE.test(email) || email.length > 254) return sendJson(res, 400, { error: 'Enter a valid email address.' });
-  if (!validName(name) || !validName(projectName) || !origin) return sendJson(res, 400, { error: 'Provide your name, a project name and an HTTPS site origin (localhost is allowed for development).' });
-  const passwordCheck = await validatePasswordPolicy(password, { email, projectName });
-  if (!passwordCheck.valid) return sendJson(res, 400, { error: passwordCheck.message, code: passwordCheck.code });
+const SIGNUP_VERIFICATION_TTL_SECONDS = 600;
+const SIGNUP_VERIFICATION_ATTEMPTS = 5;
 
-  const emailHash = await sha256Hex(email);
-  const ownerId = `usr_${randomToken(12)}`;
-  const projectId = `prj_${randomToken(9)}`;
+function emailVerificationRequired() {
+  return process.env.NODE_ENV === 'production' || process.env.ARIX_REQUIRE_EMAIL_VERIFICATION === 'true';
+}
+
+function signupEmailConfig() {
+  const apiKey = process.env.ARIX_RESEND_API_KEY;
+  const from = process.env.ARIX_EMAIL_FROM;
+  if (typeof apiKey !== 'string' || apiKey.length < 12 || apiKey.length > 512 || /[\r\n\u0000]/.test(apiKey)
+    || typeof from !== 'string' || from.length < 5 || from.length > 254 || /[\r\n\u0000]/.test(from)) return null;
+  return { apiKey, from };
+}
+
+async function deliverSignupVerificationEmail({ email, name, code }) {
+  const config = signupEmailConfig();
+  if (!config) throw Object.assign(new Error('New account registration is temporarily unavailable. Configure ARIX_RESEND_API_KEY and ARIX_EMAIL_FROM to enable email ownership verification.'), { statusCode: 503 });
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    redirect: 'error',
+    signal: AbortSignal.timeout(8000),
+    headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: config.from,
+      to: [email],
+      subject: 'Verify your ArixShield account',
+      text: `Hello ${name},\n\nYour ArixShield verification code is ${code}. It expires in 10 minutes and can be used once.\n\nIf you did not request this account, you can ignore this message.`
+    })
+  });
+  if (!response.ok) throw Object.assign(new Error(`Email verification delivery failed (${response.status}).`), { statusCode: 503 });
+}
+
+function signupResponse(ownerId, projectId, name, email, projectName, origin, keys) {
+  return {
+    ok: true,
+    user: { id: ownerId, name, email },
+    project: { id: projectId, name: projectName, origin },
+    keys,
+    keyNotice: 'ARIX_LIVE is a publishable project identifier. Store ARIX_SECRET only in server-side environment variables. These credentials are shown once.'
+  };
+}
+
+async function persistNewAccount(registration, req, res, { reservation = null, pendingRegistrationId = null } = {}) {
+  const { email, emailHash, name, projectName, origin, passwordRecord } = registration;
+  const ownerId = registration.ownerId || `usr_${randomToken(12)}`;
+  const projectId = registration.projectId || `prj_${randomToken(9)}`;
   const emailIndex = `arix:user-email:${emailHash}`;
-  const indexResult = await setString(emailIndex, ownerId, null, true);
-  if (indexResult !== 'OK') return sendJson(res, 409, { error: 'An account with this email already exists. Sign in instead.' });
 
+  // Reserve the address before writing any account records. In production the
+  // reservation came from email verification; development uses an NX owner ID.
+  if (reservation) {
+    if (await getString(emailIndex) !== reservation) return sendJson(res, 409, { error: 'This verification request is no longer valid. Start registration again.' });
+  } else if (await setString(emailIndex, ownerId, null, true) !== 'OK') {
+    return sendJson(res, 409, { error: 'An account with this email already exists. Sign in instead.' });
+  }
+
+  const liveKey = `ARIX_LIVE_${randomToken(18)}`;
+  const serverKey = `ARIX_SECRET_${randomToken(32)}`;
+  const canaryKey = `ARIX_CANARY_${randomToken(18)}`;
+  const recordKeys = [
+    `arix:user:${ownerId}`, `arix:project:${projectId}`, `arix:owner-project:${ownerId}`,
+    // Key mappings are hashed below and appended after credential derivation.
+  ];
+  let published = false;
   try {
-    const passwordRecord = await derivePassword(password);
-    const liveKey = `ARIX_LIVE_${randomToken(18)}`;
-    const serverKey = `ARIX_SECRET_${randomToken(32)}`;
-    const canaryKey = `ARIX_CANARY_${randomToken(18)}`;
     const [liveHash, serverHash, canaryHash] = await Promise.all([
       hashCredential(liveKey), hashCredential(serverKey), hashCredential(canaryKey)
     ]);
     const now = new Date().toISOString();
-    const user = { id: ownerId, name, email, password: passwordRecord, createdAt: now };
+    const user = { id: ownerId, name, email, password: passwordRecord, emailVerified: true, emailVerifiedAt: now, createdAt: now };
     const project = {
       id: projectId,
       ownerId,
@@ -66,27 +110,124 @@ async function provisionAccount(body, req, res) {
       policy: { mode: 'ENFORCE', rateLimitPerMinute: 120, blockDatacenterAsn: false, canaryRowsEnabled: false, deceptionEnabled: true, abuseProtectionEnabled: false, geoVelocityEnabled: false, threatFeedEnabled: true, shadowApiCatalogEnabled: false, forensicReplayEnabled: false, alertWebhookUrl: null, autoContainmentEnabled: false },
       createdAt: now
     };
+    const credentialKeys = [`arix:key:${liveHash}`, `arix:key:${serverHash}`, `arix:key:${canaryHash}`];
+    recordKeys.push(...credentialKeys);
     await Promise.all([
-      setJson(`arix:user:${ownerId}`, user),
-      setJson(`arix:project:${projectId}`, project),
-      setString(`arix:owner-project:${ownerId}`, projectId),
-      setJson(`arix:key:${liveHash}`, { projectId, type: 'live', createdAt: Date.now() }),
-      setJson(`arix:key:${serverHash}`, { projectId, type: 'server', createdAt: Date.now() }),
-      setJson(`arix:key:${canaryHash}`, { projectId, type: 'canary', createdAt: Date.now() })
+      setJson(recordKeys[0], user),
+      setJson(recordKeys[1], project),
+      setString(recordKeys[2], projectId),
+      setJson(credentialKeys[0], { projectId, type: 'live', createdAt: Date.now() }),
+      setJson(credentialKeys[1], { projectId, type: 'server', createdAt: Date.now() }),
+      setJson(credentialKeys[2], { projectId, type: 'canary', createdAt: Date.now() })
     ]);
+
     const session = await createSession(ownerId, projectId, req);
+    if (reservation) {
+      // Replace the pending reservation atomically. A read-then-SET sequence
+      // could otherwise overwrite a newer registration after a TTL/race.
+      if (!(await compareAndSetString(emailIndex, reservation, ownerId))) {
+        throw Object.assign(new Error('Registration reservation changed during verification.'), { statusCode: 409 });
+      }
+    } else if (await getString(emailIndex) !== ownerId) {
+      throw Object.assign(new Error('Account email reservation changed during registration.'), { statusCode: 409 });
+    }
+
+    // The permanent email index is now published and the session exists.
+    published = true;
+    if (pendingRegistrationId) {
+      try { await deleteKeys(`arix:signup:pending:${pendingRegistrationId}`, `arix:signup:attempts:${pendingRegistrationId}`); }
+      catch { /* Pending material has a short TTL and no longer owns the email index. */ }
+    }
     setSessionCookie(res, session.token, session.ttl, isSecure(req));
-    return sendJson(res, 201, {
-      ok: true,
-      user: { id: ownerId, name, email },
-      project: { id: projectId, name: projectName, origin },
-      keys: { liveKey, serverKey, canaryKey },
-      keyNotice: 'ARIX_LIVE is a publishable project identifier. Store ARIX_SECRET only in server-side environment variables. These credentials are shown once.'
-    });
+    return sendJson(res, 201, signupResponse(ownerId, projectId, name, email, projectName, origin, { liveKey, serverKey, canaryKey }));
   } catch (error) {
-    await deleteKeys(emailIndex);
+    if (!published) {
+      await Promise.allSettled([
+        deleteKeys(...recordKeys),
+        revokeAllUserSessions(ownerId),
+        compareAndDeleteString(emailIndex, reservation || ownerId),
+        ...(pendingRegistrationId ? [deleteKeys(`arix:signup:pending:${pendingRegistrationId}`, `arix:signup:attempts:${pendingRegistrationId}`)] : [])
+      ]);
+    }
     throw error;
   }
+}
+
+async function beginEmailVerifiedSignup({ email, emailHash, name, projectName, origin, passwordRecord }, req, res) {
+  if (!signupEmailConfig()) return sendJson(res, 503, { error: 'New account registration is temporarily unavailable. Email ownership verification is required; configure ARIX_RESEND_API_KEY and ARIX_EMAIL_FROM.' });
+  const registrationId = randomToken(24);
+  const reservation = `pending:${registrationId}`;
+  const emailIndex = `arix:user-email:${emailHash}`;
+  if (await setString(emailIndex, reservation, SIGNUP_VERIFICATION_TTL_SECONDS, true) !== 'OK') return sendJson(res, 409, { error: 'An account with this email already exists or is being registered. Sign in or try again later.' });
+  const pendingKey = `arix:signup:pending:${registrationId}`;
+  try {
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const mac = Buffer.from(await hmacSha256(getMasterSecret(), `arix-signup-otp-v1:${registrationId}:${emailHash}:${code}`)).toString('hex');
+    const pending = {
+      schema: 1, registrationId, email, emailHash, name, projectName, origin,
+      ownerId: `usr_${randomToken(12)}`, projectId: `prj_${randomToken(9)}`,
+      passwordRecord, codeMac: mac, createdAt: Date.now(),
+      expiresAt: Date.now() + SIGNUP_VERIFICATION_TTL_SECONDS * 1000
+    };
+    if (await setJson(pendingKey, pending, SIGNUP_VERIFICATION_TTL_SECONDS, true) !== 'OK') throw new Error('Could not create the temporary registration record.');
+    await deliverSignupVerificationEmail({ email, name, code });
+    return sendJson(res, 202, { ok: true, verificationRequired: true, email, expiresInSeconds: SIGNUP_VERIFICATION_TTL_SECONDS, message: 'A one-time verification code has been sent to your email. Verify ownership to create your account and receive project credentials.' });
+  } catch (error) {
+    await Promise.allSettled([deleteKeys(pendingKey), compareAndDeleteString(emailIndex, reservation)]);
+    throw error;
+  }
+}
+
+async function verifySignupEmail(body, req, res) {
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const code = String(body.code ?? '').trim();
+  if (!EMAIL_RE.test(email) || email.length > 254 || !/^\d{6}$/.test(code)) return sendJson(res, 400, { error: 'The verification code is invalid or expired.' });
+  const emailHash = await sha256Hex(email);
+  const emailIndex = `arix:user-email:${emailHash}`;
+  const reservation = await getString(emailIndex);
+  if (typeof reservation !== 'string' || !reservation.startsWith('pending:')) return sendJson(res, 400, { error: 'The verification code is invalid or expired.' });
+  const registrationId = reservation.slice('pending:'.length);
+  if (!/^[A-Za-z0-9_-]{24,64}$/.test(registrationId)) return sendJson(res, 400, { error: 'The verification code is invalid or expired.' });
+  const pendingKey = `arix:signup:pending:${registrationId}`;
+  const pending = await getJson(pendingKey);
+  if (!pending || pending.schema !== 1 || pending.registrationId !== registrationId || pending.emailHash !== emailHash || pending.expiresAt < Date.now()) {
+    return sendJson(res, 410, { error: 'The verification code expired. Start registration again.' });
+  }
+  const attempts = await incrementWithExpiry(`arix:signup:attempts:${registrationId}`, SIGNUP_VERIFICATION_TTL_SECONDS);
+  if (attempts > SIGNUP_VERIFICATION_ATTEMPTS) {
+    await Promise.allSettled([deleteKeys(pendingKey), compareAndDeleteString(emailIndex, reservation)]);
+    return sendJson(res, 429, { error: 'Too many incorrect verification attempts. Start registration again.' });
+  }
+  const suppliedMac = Buffer.from(await hmacSha256(getMasterSecret(), `arix-signup-otp-v1:${registrationId}:${emailHash}:${code}`));
+  const expectedMac = Buffer.from(String(pending.codeMac || ''), 'hex');
+  if (expectedMac.length !== 32 || !constantTimeEqual(suppliedMac, expectedMac)) return sendJson(res, 400, { error: 'The verification code is invalid or expired.' });
+
+  const lockKey = `arix:signup:verify-lock:${registrationId}`;
+  if (await setString(lockKey, randomToken(16), 30, true) !== 'OK') return sendJson(res, 409, { error: 'Verification is already being completed. Retry shortly.' });
+  try {
+    const currentPending = await getJson(pendingKey);
+    if (!currentPending || currentPending.codeMac !== pending.codeMac || await getString(emailIndex) !== reservation) return sendJson(res, 410, { error: 'The verification code expired. Start registration again.' });
+    return await persistNewAccount(pending, req, res, { reservation, pendingRegistrationId: registrationId });
+  } finally {
+    await deleteKeys(lockKey).catch(() => {});
+  }
+}
+
+async function provisionAccount(body, req, res) {
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = String(body.password ?? '');
+  const name = String(body.name ?? '').trim();
+  const projectName = String(body.projectName ?? 'My Project').trim();
+  const origin = normalizeOrigin(body.origin);
+  if (!EMAIL_RE.test(email) || email.length > 254) return sendJson(res, 400, { error: 'Enter a valid email address.' });
+  if (!validName(name) || !validName(projectName) || !origin) return sendJson(res, 400, { error: 'Provide your name, a project name and an HTTPS site origin (localhost is allowed for development).' });
+  const passwordCheck = await validatePasswordPolicy(password, { email, projectName });
+  if (!passwordCheck.valid) return sendJson(res, 400, { error: passwordCheck.message, code: passwordCheck.code });
+  const emailHash = await sha256Hex(email);
+  const passwordRecord = await derivePassword(password);
+  const registration = { email, emailHash, name, projectName, origin, passwordRecord };
+  if (emailVerificationRequired()) return beginEmailVerifiedSignup(registration, req, res);
+  return persistNewAccount(registration, req, res);
 }
 
 async function issueLoginPowChallenge(res, emailHash, subnet) {
@@ -432,12 +573,12 @@ async function handler(req, res) {
   try {
     const body = await readJson(req, 12000);
     const action = String(body.action || 'unknown').slice(0, 48);
-    const publicCredentialActions = new Set(['signup', 'login', 'passkey-login-options', 'passkey-login', 'recover-mfa']);
+    const publicCredentialActions = new Set(['signup', 'verify-email', 'login', 'passkey-login-options', 'passkey-login', 'recover-mfa']);
     const session = publicCredentialActions.has(action) ? null : await getSession(req);
     let limitKey;
     let limitCount;
     let limitWindowMs;
-    if (action === 'login' || action === 'signup' || action === 'recover-mfa') {
+    if (action === 'login' || action === 'signup' || action === 'verify-email' || action === 'recover-mfa') {
       // Signup/recovery remain tightly account-scoped. Login uses a broad account
       // ceiling plus the subnet envelope and one-use PoW after failed attempts;
       // a low per-email request ceiling would let an unauthenticated attacker
@@ -445,8 +586,8 @@ async function handler(req, res) {
       const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
       const emailScope = EMAIL_RE.test(email) ? await sha256Hex(email) : await sha256Hex(`invalid:${clientRateKey(req)}`);
       limitKey = `${action}:email:${emailScope}`;
-      limitCount = action === 'login' ? 12000 : 5;
-      limitWindowMs = action === 'login' ? 15 * 60 * 1000 : 60 * 60 * 1000;
+      limitCount = action === 'login' ? 12000 : action === 'verify-email' ? 10 : 5;
+      limitWindowMs = action === 'login' ? 15 * 60 * 1000 : action === 'verify-email' ? 10 * 60 * 1000 : 60 * 60 * 1000;
     } else if (session?.ownerId) {
       limitKey = `account:${session.ownerId}:${action}`;
       limitCount = 120;
@@ -458,9 +599,30 @@ async function handler(req, res) {
       limitCount = 3000;
       limitWindowMs = 60000;
     }
-    const limit = await rateLimit({ key: `arix:auth:limit:${await sha256Hex(limitKey)}`, algorithm: 'SLIDING_WINDOW', limit: limitCount, windowMs: limitWindowMs });
+    const limitDimensions = [{ key: `arix:auth:limit:${await sha256Hex(limitKey)}`, limit: limitCount, windowMs: limitWindowMs }];
+    if (action === 'signup' || action === 'verify-email') {
+      const trustedIp = trustedClientIp(req);
+      const networkPrefix = trustedClientNetworkPrefix(req);
+      if (trustedIp) limitDimensions.push({
+        key: `arix:auth:network-ip:${action}:${await sha256Hex(trustedIp)}`,
+        limit: action === 'signup' ? 20 : 30,
+        windowMs: action === 'signup' ? 60 * 60 * 1000 : 10 * 60 * 1000
+      });
+      if (networkPrefix) limitDimensions.push({
+        key: `arix:auth:network-prefix:${action}:${await sha256Hex(networkPrefix)}`,
+        limit: action === 'signup' ? 60 : 120,
+        windowMs: action === 'signup' ? 60 * 60 * 1000 : 10 * 60 * 1000
+      });
+      if (action === 'signup') {
+        const configuredGlobalLimit = Number(process.env.ARIX_SIGNUP_GLOBAL_LIMIT_PER_HOUR);
+        const globalLimit = Number.isSafeInteger(configuredGlobalLimit) && configuredGlobalLimit >= 1 && configuredGlobalLimit <= 100000 ? configuredGlobalLimit : 10000;
+        limitDimensions.push({ key: 'arix:auth:global:signup', limit: globalLimit, windowMs: 60 * 60 * 1000 });
+      }
+    }
+    const limit = await rateLimitMulti({ dimensions: limitDimensions });
     if (!limit.allowed) return sendJson(res, 429, { error: 'Too many account requests for this account or endpoint. Try again shortly.' }, { 'Retry-After': String(Math.ceil(limit.retryAfterMs / 1000)) });
     if (body.action === 'signup') return await provisionAccount(body, req, res);
+    if (body.action === 'verify-email') return await verifySignupEmail(body, req, res);
     if (body.action === 'login') return await loginAccount(body, req, res);
     if (body.action === 'recover-mfa') return await recoverMfaAccount(body, req, res);
     if (body.action === 'change-password') return await changePassword(body, req, res, session);

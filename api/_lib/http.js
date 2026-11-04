@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
+import { formatIpPrefix } from './cidr.js';
 
 export function sendJson(res, status, body, extraHeaders = {}) {
   res.statusCode = status;
@@ -105,6 +106,42 @@ export function getNetworkHints(req) {
   return { ip, country, city, asn, ja3, ja4, ...(hasCoordinates ? { latitude: latValue, longitude: lonValue } : {}) };
 }
 
+/**
+ * Return the network peer supplied by the hosting ingress, never an arbitrary
+ * forwarding header from an untrusted direct caller. Vercel overwrites these
+ * ingress headers; self-hosted deployments use the socket peer unless they
+ * terminate behind a separately trusted proxy and explicitly adapt this helper.
+ */
+export function trustedClientIp(req) {
+  if (process.env.VERCEL === '1') {
+    // Vercel documents x-real-ip as the platform-overwritten client address.
+    // Require one bare IP: accepting a comma-separated list and choosing its
+    // first item would reintroduce spoofing ambiguity through proxy chains.
+    const raw = req?.headers?.['x-real-ip'];
+    if (typeof raw === 'string' && raw.length <= 64 && raw === raw.trim() && !raw.includes(',')) {
+      const candidate = raw.replace(/^\[|\]$/g, '');
+      if (candidate && isIP(candidate)) return candidate;
+    }
+    // On Vercel, the socket peer is platform infrastructure, not the end user.
+    // Return unknown rather than collapsing unrelated clients into one proxy IP.
+    return null;
+  }
+  // Do not trust X-Forwarded-For or x-vercel-forwarded-for on non-Vercel
+  // deployments. Self-hosted proxies must adapt this helper at their trusted edge.
+  const peer = String(req?.socket?.remoteAddress || '').trim().replace(/^\[|\]$/g, '');
+  return peer && isIP(peer) ? peer : null;
+}
+
+/**
+ * Privacy-preserving shared rate-limit identity. IPv4 uses /24; IPv6 uses /64
+ * so temporary privacy addresses from one ordinary subnet share one budget.
+ */
+export function trustedClientNetworkPrefix(req) {
+  const ip = trustedClientIp(req);
+  if (!ip) return null;
+  return formatIpPrefix(ip, isIP(ip) === 6 ? 64 : 24);
+}
+
 function decodeURIComponentSafe(value) {
   try { return decodeURIComponent(value); } catch { return value; }
 }
@@ -113,19 +150,7 @@ export function clientRateKey(req) {
   // Trust IP headers only when the request is known to have crossed Vercel's
   // ingress. Everywhere else, use the direct socket peer and ignore forwarding
   // headers that a client can forge.
-  let ip = '';
-  if (process.env.VERCEL === '1') {
-    for (const header of ['x-real-ip', 'x-vercel-forwarded-for']) {
-      const raw = req.headers?.[header];
-      if (typeof raw !== 'string') continue;
-      const candidate = raw.split(',')[0].trim();
-      if (candidate && isIP(candidate)) { ip = candidate; break; }
-    }
-  }
-  if (!ip) {
-    const peer = String(req.socket?.remoteAddress || '').trim();
-    ip = peer && isIP(peer) ? peer : 'unknown';
-  }
+  const ip = trustedClientIp(req) || 'unknown';
   const agent = typeof req.headers?.['user-agent'] === 'string' ? req.headers['user-agent'].slice(0, 160) : 'unknown';
   return `${ip.slice(0, 64)}:${agent}`;
 }

@@ -21,8 +21,8 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:118 -->
-<!-- ARIX-MANIFEST-ROOT:8fdf76e0f7a56613170ef4db2681114baf6cd85444ed0b3f41feedeb014bd4a4 -->
+<!-- ARIX-MANIFEST-FILE-COUNT:119 -->
+<!-- ARIX-MANIFEST-ROOT:a677b1f7257e8db2260b8f1cef0b83a6295029d8988eca410ba06913c00fba43 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -31,9 +31,10 @@ Runtime: Node.js v22.16.0, Linux x64. Results are local and deterministic unless
 
 | Verification | Result |
 |---|---:|
-| `npm test` | **208 passed, 0 failed, 0 skipped**; 183 top-level TAP tests; ~5.8 seconds |
-| `npm run check` | **114 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 117-file manifest verified** |
-| `node scripts/build.mjs` | **Controlled production build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifests reset to unsigned afterwards |
+| `npm test` (latest follow-up tree) | **231 passed, 0 failed, 0 skipped**; 206 top-level TAP test records; ~11.9 seconds |
+| `npm run check` (latest follow-up tree) | **116 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 119-file source manifest verified** |
+| `node scripts/build.mjs` (latest follow-up tree) | **Controlled production build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifest reset to unsigned afterwards |
+| `npm audit --omit=dev --audit-level=low` | **Not available: `ENOLOCK`**, because this repository still lacks `package-lock.json`; see `docs/DEPENDENCY-LOCKFILE.md` and `AUDIT-FOLLOWUP-REMEDIATION.md` |
 | `npm run audit:verify` | Not run; requires a real signed audit bundle and production signing secret |
 | Compose deployment profiles | Not run; Docker/Podman was unavailable |
 | Customer infrastructure / production PKI / database | Not available; not tested |
@@ -107,3 +108,10 @@ The follow-up audit identified defects in decrypted browser-clearance inspection
 - Controlled `node scripts/build.mjs` preflight: passed with isolated, disposable local test settings; all 223 tests passed inside the build.
 
 These local results are not proof of zero vulnerabilities. No live Upstash Redis, production PostgreSQL instance, actual Vercel deployment, external webhook receiver, or real-device WebAuthn ceremony was available. Rich-text SQL grammar exclusions remain intentional and are documented in `AUDIT-11-REMEDIATION.md`; non-SQL WAF checks still apply to those fields. A production-like staging test and independent security assessment remain release gates.
+
+
+## Follow-up independent audit (2026-11-03)
+
+A second independent review identified four further concerns. The browser quota now has per-DPoP, trusted-network and project-wide dimensions, including the `clearance-key` bootstrap action; client-side automation signals are explicitly treated as forgeable risk inputs rather than proof of humanity; new production signups require email OTP before credentials are created and use atomic email-index publication/cleanup; and the signup path has a shared service-wide rate budget. The follow-up tests pass **231/231**.
+
+**Open supply-chain item:** no lockfile was generated because npm registry resolution was unavailable in this environment. The attempted `npm audit --omit=dev --audit-level=low` returned `ENOLOCK`. No lockfile with guessed transitive dependencies or fabricated integrity hashes was added. Generate and commit a registry-resolved `package-lock.json` in a trusted network-connected environment, then run `npm ci` and `npm audit` before release. See `AUDIT-FOLLOWUP-REMEDIATION.md` for exact dispositions and the remaining limitations.

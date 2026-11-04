@@ -24,6 +24,7 @@
             <div class="field login-field hidden"><label for="totp-code">Authenticator code (when MFA is enabled)</label><input id="totp-code" name="totpCode" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit code"><small class="muted-note">Leave blank when authenticator MFA is not enabled.</small></div>
             <div class="field signup-field"><label for="project-name">Project name</label><input id="project-name" name="projectName" maxlength="80" required></div>
             <div class="field signup-field"><label for="origin">Website origin</label><input id="origin" name="origin" type="url" placeholder="https://example.com" required><small class="muted-note">Enter the exact origin (scheme + host, no path). This is checked for browser telemetry.</small></div>
+            <div class="field signup-verify-field hidden"><label for="email-verification-code">Email verification code</label><input id="email-verification-code" name="verificationCode" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6"><small class="muted-note">Enter the six-digit code sent to your email. It expires in 10 minutes and can be used once.</small></div>
             <div class="notice" id="auth-notice" role="status"></div>
             <button class="btn btn-primary" id="auth-submit" type="submit">Create account & project</button>
             <button class="btn btn-secondary login-field hidden" id="passkey-login" type="button">Sign in with a passkey</button>

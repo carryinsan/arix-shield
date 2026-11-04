@@ -72,7 +72,7 @@
   async function initDeveloper() {
     const form = $('#auth-form'); if (!form) return;
     const tabs = $$('[data-auth-mode]'); const nameField = $('#full-name'); const projectField = $('#project-name'); const originField = $('#origin'); const passField = $('#password'); const submit = $('#auth-submit'); const notice = $('#auth-notice'); const keysPanel = $('#keys-panel'); const passkeyLogin = $('#passkey-login');
-    let authMode = 'signup'; let activeKeys = { liveKey: '', serverKey: '', canaryKey: '' };
+    let authMode = 'signup'; let activeKeys = { liveKey: '', serverKey: '', canaryKey: '' }; let verificationPending = false; let pendingSignupEmail = '';
     const updateSnippet = () => {
       const target = $('#snippet-code'); const type = $('#snippet-type')?.value || 'html'; const base = location.origin; const live = activeKeys.liveKey || 'ARIX_LIVE_PROJECT_IDENTIFIER'; const secret = activeKeys.serverKey || 'ARIX_SECRET_SERVER_ONLY';
       const snippets = {
@@ -127,6 +127,12 @@ def arix_telemetry(response):
       if (target) target.textContent = snippets[type];
     };
     const changeMode = (mode) => {
+      if (mode !== 'signup' && verificationPending) {
+        verificationPending = false; pendingSignupEmail = '';
+        $('.signup-verify-field')?.classList.add('hidden');
+        $('#email-verification-code').required = false; $('#email-verification-code').value = '';
+        [nameField, projectField, originField].forEach((field) => { if (field) field.disabled = false; });
+      }
       authMode = mode; tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.authMode === mode)); $$('.signup-field').forEach((element) => element.classList.toggle('hidden', mode !== 'signup')); $$('.login-field').forEach((element) => element.classList.toggle('hidden', mode !== 'login'));
       [nameField, projectField, originField].forEach((field) => { if (field) field.required = mode === 'signup'; }); if (passField) passField.autocomplete = mode === 'signup' ? 'new-password' : 'current-password'; submit.textContent = mode === 'signup' ? 'Create account & project' : 'Sign in'; hideNotice(notice);
     };
@@ -146,7 +152,7 @@ def arix_telemetry(response):
       finally { passkeyLogin.disabled = false; }
     });
     form.addEventListener('submit', async (event) => {
-      event.preventDefault(); hideNotice(notice); submit.disabled = true; submit.textContent = authMode === 'signup' ? 'Creating secure project…' : 'Signing in…'; const data = Object.fromEntries(new FormData(form).entries()); data.action = authMode;
+      event.preventDefault(); hideNotice(notice); submit.disabled = true; submit.textContent = verificationPending ? 'Verifying email…' : authMode === 'signup' ? 'Creating secure project…' : 'Signing in…'; const data = verificationPending ? { action: 'verify-email', email: pendingSignupEmail, code: String($('#email-verification-code')?.value || '').trim() } : Object.fromEntries(new FormData(form).entries()); if (!verificationPending) data.action = authMode;
       try {
         let result;
         try { result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) }); }
@@ -159,9 +165,19 @@ def arix_telemetry(response):
           result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify(data) });
         }
         if (authMode === 'login') { showNotice(notice, `Welcome back, ${result.user.name}. Opening your dashboard…`, 'success'); location.href = '/dashboard'; return; }
+        if (!verificationPending && result.verificationRequired === true) {
+          verificationPending = true; pendingSignupEmail = String(result.email || data.email || '').trim().toLowerCase();
+          $$('.signup-field').forEach((element) => element.classList.add('hidden'));
+          [nameField, projectField, originField, passField].forEach((field) => { if (field) { field.disabled = true; field.required = false; } });
+          $('.signup-verify-field')?.classList.remove('hidden'); $('#email-verification-code').required = true; $('#email-verification-code').disabled = false; $('#email-verification-code').focus();
+          submit.textContent = 'Verify email & create project';
+          showNotice(notice, `A verification code was sent to ${pendingSignupEmail}. Enter it to create your account and receive project credentials.`, 'info');
+          return;
+        }
+        verificationPending = false;
         activeKeys = result.keys; $('#live-key').textContent = result.keys.liveKey; $('#server-key').textContent = result.keys.serverKey; $('#canary-key').textContent = result.keys.canaryKey; keysPanel.classList.add('show'); changeMode('login'); form.classList.add('hidden'); updateSnippet(); showNotice(notice, 'Account and project created successfully.', 'success');
       } catch (error) { showNotice(notice, error.message, 'error'); }
-      finally { submit.disabled = false; if (authMode === 'login') submit.textContent = 'Sign in'; }
+      finally { submit.disabled = false; if (authMode === 'login') submit.textContent = 'Sign in'; else if (verificationPending) submit.textContent = 'Verify email & create project'; else submit.textContent = 'Create account & project'; }
     });
     $('#snippet-type')?.addEventListener('change', updateSnippet);
     $('#copy-snippet')?.addEventListener('click', async () => { try { await copyText($('#snippet-code').textContent); showNotice(notice, 'Snippet copied.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); } });
