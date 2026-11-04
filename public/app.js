@@ -69,6 +69,14 @@
     return { passkeyChallenge: options.challenge, passkeyCredential: serializeWebAuthnCredential(credential) };
   }
 
+  async function collectAccountStepUp(security, title, description) {
+    const proof = await requestStepUp({ title, description, requirePassword: true, requireTotp: security?.totpEnabled === true });
+    if (!proof) return null;
+    const passkeys = Array.isArray(security?.passkeys) ? security.passkeys : [];
+    if (security?.totpEnabled !== true && passkeys.length > 0) return { ...proof, ...await collectPasskeyStepUp() };
+    return proof;
+  }
+
   async function initDeveloper() {
     const form = $('#auth-form'); if (!form) return;
     const tabs = $$('[data-auth-mode]'); const nameField = $('#full-name'); const projectField = $('#project-name'); const originField = $('#origin'); const passField = $('#password'); const submit = $('#auth-submit'); const notice = $('#auth-notice'); const keysPanel = $('#keys-panel'); const passkeyLogin = $('#passkey-login');
@@ -323,8 +331,7 @@ def arix_telemetry(response):
             const row = document.createElement('div'); row.className = 'inline-form';
             const label = document.createElement('span'); label.textContent = `Passkey ${index + 1} · last used ${item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : 'not yet used'}`;
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-secondary'; remove.textContent = 'Remove'; remove.addEventListener('click', async () => {
-              let proof = await requestStepUp({ title: 'Remove passkey', description: 'Re-authenticate before removing this passkey.', requirePassword: true, requireTotp: securityState.totpEnabled === true }); if (!proof) return;
-              if (!securityState.totpEnabled && Array.isArray(securityState.passkeys) && securityState.passkeys.length) { try { proof = { ...proof, ...await collectPasskeyStepUp() }; } catch (error) { showNotice(notice, error.message, 'error'); return; } }
+              let proof; try { proof = await collectAccountStepUp(securityState, 'Remove passkey', 'Re-authenticate before removing this passkey.'); } catch (error) { showNotice(notice, error.message, 'error'); return; } if (!proof) return;
               try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-remove', credentialId: item.credentialId, password: proof.password, totpCode: proof.totpCode, ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) }); showNotice(notice, 'Passkey removed.', 'success'); await refreshSecurity(); }
               catch (error) { showNotice(notice, error.message, 'error'); }
             }); row.append(label, remove); passkeyList.append(row);
@@ -336,15 +343,22 @@ def arix_telemetry(response):
 
       $('#totp-start')?.addEventListener('click', async () => {
         totpStart.disabled = true;
-        try { const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-enroll' }) });
-          $('#totp-secret').textContent = result.secret; $('#totp-uri').value = result.otpauthUri; enrollment.classList.remove('hidden'); showNotice(notice, 'Add this secret to your authenticator app, then enter its current code to confirm. The enrollment expires in 10 minutes.', 'info');
+        try {
+          const proof = await collectAccountStepUp(securityState, 'Set up authenticator MFA', 'Verify your current account credentials before starting a new authenticator enrollment.');
+          if (!proof) return;
+          const result = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-enroll', password: proof.password, stepUpTotpCode: proof.totpCode, ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) });
+          $('#totp-secret').textContent = result.secret; $('#totp-uri').value = result.otpauthUri; enrollment.classList.remove('hidden'); showNotice(notice, 'Add this secret to your authenticator app, then verify your identity again and enter its current code to confirm. The enrollment expires in 10 minutes.', 'info');
         } catch (error) { showNotice(notice, error.message, 'error'); }
         finally { totpStart.disabled = false; }
       });
       $('#totp-confirm')?.addEventListener('click', async () => {
         const totpCode = $('#totp-confirm-code').value.trim();
-        try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-confirm', totpCode }) }); enrollment.classList.add('hidden'); $('#totp-confirm-code').value = ''; showNotice(notice, 'Authenticator MFA enabled. Other sessions were revoked; this browser has been issued a fresh session.', 'success'); await refreshSecurity(); }
-        catch (error) { showNotice(notice, error.message, 'error'); }
+        try {
+          const proof = await collectAccountStepUp(securityState, 'Confirm authenticator MFA', 'Verify your current account credentials before enabling this authenticator.');
+          if (!proof) return;
+          await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-confirm', totpCode, password: proof.password, stepUpTotpCode: proof.totpCode, ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) });
+          enrollment.classList.add('hidden'); $('#totp-confirm-code').value = ''; showNotice(notice, 'Authenticator MFA enabled. Other sessions were revoked; this browser has been issued a fresh session.', 'success'); await refreshSecurity();
+        } catch (error) { showNotice(notice, error.message, 'error'); }
       });
       $('#totp-disable')?.addEventListener('click', async () => {
         try { await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'totp-disable', password: $('#totp-disable-password').value, totpCode: $('#totp-disable-code').value.trim() }) }); $('#totp-disable-password').value = ''; $('#totp-disable-code').value = ''; showNotice(notice, 'Authenticator MFA disabled. Other sessions were revoked; this browser has a fresh session.', 'success'); await refreshSecurity(); }
@@ -354,11 +368,13 @@ def arix_telemetry(response):
         const button = $('#passkey-add'); button.disabled = true;
         try {
           if (!window.isSecureContext || !navigator.credentials?.create) throw new Error('Passkey enrollment requires a supported browser on HTTPS or localhost.');
+          const proof = await collectAccountStepUp(securityState, 'Add a passkey', 'Verify your current account credentials before adding a persistent sign-in method.');
+          if (!proof) return;
           const options = await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-register-options' }) });
           const publicKey = { ...options.publicKey, challenge: b64urlToBytes(options.publicKey.challenge), user: { ...options.publicKey.user, id: b64urlToBytes(options.publicKey.user.id) }, excludeCredentials: (options.publicKey.excludeCredentials || []).map((item) => ({ ...item, id: b64urlToBytes(item.id) })) };
           const credential = await navigator.credentials.create({ publicKey });
           if (!credential) throw new Error('Passkey enrollment was cancelled.');
-          await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-register', challenge: options.challenge, credential: serializeWebAuthnCredential(credential) }) });
+          await jsonFetch('/api/auth', { method: 'POST', body: JSON.stringify({ action: 'passkey-register', challenge: options.challenge, credential: serializeWebAuthnCredential(credential), password: proof.password, totpCode: proof.totpCode, ...(proof.passkeyChallenge ? { passkeyChallenge: proof.passkeyChallenge, passkeyCredential: proof.passkeyCredential } : {}) }) });
           showNotice(notice, 'Passkey registered. Store a recovery method before removing other credentials.', 'success'); await refreshSecurity();
         } catch (error) { showNotice(notice, error.message, 'error'); }
         finally { button.disabled = false; }

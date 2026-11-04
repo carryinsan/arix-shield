@@ -88,7 +88,16 @@ export function verifyWebAuthnRegistration(credential, challengeRecord, { requir
   };
 }
 
-export function verifyWebAuthnAssertion(credential, challengeRecord, storedCredential, { requireUserVerification = true } = {}) {
+
+/** A positive authenticator counter must strictly increase and may not reset to zero. */
+export function isWebAuthnCounterRegression(priorCount, nextCount) {
+  const prior = priorCount == null ? 0 : Number(priorCount);
+  const next = Number(nextCount);
+  if (!Number.isInteger(prior) || !Number.isInteger(next) || prior < 0 || next < 0 || prior > 0xffffffff || next > 0xffffffff) return true;
+  return prior > 0 && (next === 0 || next <= prior);
+}
+
+export function verifyWebAuthnAssertion(credential, challengeRecord, storedCredential, { requireUserVerification = true, deferCounterCheck = false } = {}) {
   const response = credential?.response || {};
   const { data: clientData, bytes: clientDataBytes } = parseClientData(response.clientDataJSON, 'webauthn.get', challengeRecord.challenge);
   if (clientData.origin !== challengeRecord.origin) throw new Error('WebAuthn origin mismatch.');
@@ -96,13 +105,13 @@ export function verifyWebAuthnAssertion(credential, challengeRecord, storedCrede
   if (credentialId !== storedCredential.credentialId) throw new Error('WebAuthn credential is not registered to this account.');
   const authData = decodeB64url(response.authenticatorData, 65536);
   const authState = verifyAuthenticatorData(authData, challengeRecord.rpId, requireUserVerification);
-  const priorCount = Number(storedCredential.signCount) || 0;
-  if (priorCount > 0 && authState.signCount > 0 && authState.signCount <= priorCount) throw new Error('WebAuthn authenticator counter did not increase.');
+  const priorCount = storedCredential.signCount == null ? 0 : Number(storedCredential.signCount);
   const signature = decodeB64url(response.signature, 4096);
   const clientHash = createHash('sha256').update(clientDataBytes).digest();
   const signed = Buffer.concat([authData, clientHash]);
   const publicKey = createPublicKey({ key: storedCredential.publicKeyJwk, format: 'jwk' });
   if (!verifySignature('sha256', signed, publicKey, signature)) throw new Error('WebAuthn assertion signature is invalid.');
+  if (!deferCounterCheck && isWebAuthnCounterRegression(priorCount, authState.signCount)) throw new Error('WebAuthn authenticator counter regressed or did not increase.');
   return { signCount: authState.signCount, credentialId };
 }
 

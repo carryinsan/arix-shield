@@ -1,7 +1,7 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { randomInt } from 'node:crypto';
 import { sendJson, readJson, methodNotAllowed, setSessionCookie, clearSessionCookie, sameOriginRequest, normalizeOrigin, clientRateKey, trustedClientIp, trustedClientNetworkPrefix } from './_lib/http.js';
-import { rateLimit, rateLimitMulti, getJson, getJsonOnce, getString, setJson, setString, compareAndSetString, compareAndDeleteString, deleteKeys, incrementWithExpiry, setMaxStringWithExpiry } from './_lib/redis.js';
+import { rateLimit, rateLimitMulti, getJson, getJsonOnce, getString, setJson, setString, compareAndSetString, compareAndDeleteString, deleteKeys, incrementWithExpiry, setMaxStringWithExpiry, advanceWebAuthnCounter } from './_lib/redis.js';
 import { derivePassword, verifyPassword, randomToken, sha256Hex, hashCredential, createSignedToken, verifySignedToken, hmacSha256, constantTimeEqual, getMasterSecret } from './_lib/crypto-trap.js';
 import { LEGACY_PBKDF2_ITERATIONS } from './_lib/security-constants.js';
 import { createSession, getSession, listUserSessions, revokeUserSession, revokeAllUserSessions, rotateSession } from './_lib/session.js';
@@ -311,8 +311,8 @@ async function recoverMfaAccount(body, req, res) {
   user.mfaRecoveredAt = new Date().toISOString();
   await setJson(`arix:user:${ownerId}`, user);
   if (credentialIds.length) {
-    const keys = await Promise.all(credentialIds.map(async (id) => `arix:webauthn:credential:${await sha256Hex(id)}`));
-    await deleteKeys(...keys);
+    const keys = await Promise.all(credentialIds.map(async (id) => { const hash = await sha256Hex(id); return [`arix:webauthn:credential:${hash}`, `arix:webauthn:counter:${hash}`]; }));
+    await deleteKeys(...keys.flat());
   }
   await revokeAllUserSessions(ownerId);
   const fresh = await createSession(ownerId, projectId, req);
@@ -499,8 +499,13 @@ async function createWebAuthnChallenge({ purpose, origin, rpId, ownerId = null, 
 async function registerPasskey(body, req, res) {
   const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to register a passkey.' });
   const origin = getWebAuthnOrigin(req); if (!origin) return sendJson(res, 403, { error: 'WebAuthn origin is not allowed.' });
-  const [user, project] = await Promise.all([getJson(`arix:user:${session.ownerId}`), getJson(`arix:project:${session.projectId}`)]);
-  if (!user || !project || project.ownerId !== session.ownerId) return sendJson(res, 403, { error: 'Account ownership could not be verified.' });
+  const [currentUser, project] = await Promise.all([getJson(`arix:user:${session.ownerId}`), getJson(`arix:project:${session.projectId}`)]);
+  if (!currentUser || !project || project.ownerId !== session.ownerId) return sendJson(res, 403, { error: 'Account ownership could not be verified.' });
+  // A live session alone is not sufficient to add a persistent authenticator.
+  // Require the current password plus an already-enrolled factor where present.
+  const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: String(body.password || ''), totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
+  if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, challengeType: stepUp.challengeType });
+  const user = stepUp.user;
   const challenge = String(body.challenge || '');
   const recordKey = `arix:webauthn:challenge:${await sha256Hex(challenge)}`;
   const challengeRecord = await getJsonOnce(recordKey);
@@ -542,9 +547,10 @@ async function loginWithPasskey(body, req, res) {
   const index = credentials.findIndex((item) => item.credentialId === credentialId);
   if (index < 0) return sendJson(res, 401, { error: 'Passkey authentication failed.' });
   let assertion;
-  try { assertion = verifyWebAuthnAssertion(body.credential, challengeRecord, credentials[index], { requireUserVerification: true }); }
+  try { assertion = verifyWebAuthnAssertion(body.credential, challengeRecord, credentials[index], { requireUserVerification: true, deferCounterCheck: true }); }
   catch { return sendJson(res, 401, { error: 'Passkey authentication failed.' }); }
-  credentials[index] = { ...credentials[index], signCount: assertion.signCount, lastUsedAt: Date.now() };
+  if (!await advanceWebAuthnCounter(credentialHash, credentials[index].signCount ?? 0, assertion.signCount)) return sendJson(res, 401, { error: 'Passkey authentication failed.' });
+  credentials[index] = { ...credentials[index], signCount: Math.max(credentials[index].signCount ?? 0, assertion.signCount), lastUsedAt: Date.now() };
   user.passkeys = credentials;
   await setJson(`arix:user:${user.id}`, user);
   const emailHash = typeof user.email === 'string' ? await sha256Hex(user.email.toLowerCase()) : '';
@@ -660,20 +666,27 @@ async function handler(req, res) {
       if (index < 0) return sendJson(res, 404, { error: 'Passkey not found.' });
       const [removed] = user.passkeys.splice(index, 1);
       if (user.passkeys.length === 0 && user.totpEnabled !== true) { delete user.recoveryCodes; delete user.recoveryCodesIssuedAt; }
-      await Promise.all([setJson(`arix:user:${session.ownerId}`, user), deleteKeys(`arix:webauthn:credential:${await sha256Hex(removed.credentialId)}`)]);
+      const credentialHash = await sha256Hex(removed.credentialId);
+      await Promise.all([setJson(`arix:user:${session.ownerId}`, user), deleteKeys(`arix:webauthn:credential:${credentialHash}`, `arix:webauthn:counter:${credentialHash}`)]);
       return sendJson(res, 200, { ok: true, removed: true });
     }
     if (body.action === 'totp-enroll') {
       const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to enroll an authenticator.' });
-      const user = await getJson(`arix:user:${session.ownerId}`); if (!user) return sendJson(res, 401, { error: 'Account not found.' });
-      if (user.totpEnabled === true) return sendJson(res, 409, { error: 'An authenticator is already enabled.' });
+      const currentUser = await getJson(`arix:user:${session.ownerId}`); if (!currentUser) return sendJson(res, 401, { error: 'Account not found.' });
+      if (currentUser.totpEnabled === true) return sendJson(res, 409, { error: 'An authenticator is already enabled.' });
+      const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: String(body.password || ''), totpCode: body.stepUpTotpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, challengeType: stepUp.challengeType });
+      const user = stepUp.user;
       const generated = generateTotpSecret(); user.totpSecret = generated.encrypted; user.totpEnabled = false; user.totpEnrolledAt = Date.now();
       await setJson(`arix:user:${session.ownerId}`, user);
       return sendJson(res, 200, { ok: true, secret: generated.secret, otpauthUri: totpProvisioningUri(generated.secret, user.email), expiresInSeconds: 600 });
     }
     if (body.action === 'totp-confirm') {
       const session = await getSession(req); if (!session) return sendJson(res, 401, { error: 'Sign in to confirm authenticator enrollment.' });
-      const user = await getJson(`arix:user:${session.ownerId}`); if (!user?.totpSecret) return sendJson(res, 400, { error: 'Start authenticator enrollment first.' });
+      const pendingUser = await getJson(`arix:user:${session.ownerId}`); if (!pendingUser?.totpSecret) return sendJson(res, 400, { error: 'Start authenticator enrollment first.' });
+      const stepUp = await verifyStepUpCredentials({ ownerId: session.ownerId, projectId: session.projectId, password: String(body.password || ''), totpCode: body.stepUpTotpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, challengeType: stepUp.challengeType });
+      const user = stepUp.user;
       if (Date.now() - Number(user.totpEnrolledAt || 0) > 10 * 60 * 1000) { delete user.totpSecret; delete user.totpEnrolledAt; await setJson(`arix:user:${session.ownerId}`, user); return sendJson(res, 410, { error: 'Authenticator enrollment expired. Start again.' }); }
       let secret; try { secret = decryptTotpSecret(user.totpSecret); } catch { return sendJson(res, 503, { error: 'Authenticator secret could not be opened.' }); }
       if (!await verifyAndConsumeTotp(session.ownerId, secret, body.totpCode)) return sendJson(res, 400, { error: 'Authenticator code is invalid or has already been used.' });

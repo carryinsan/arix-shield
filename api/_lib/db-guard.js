@@ -24,6 +24,71 @@ function driverName(client, options) {
   return '';
 }
 
+
+function mysqlSqlFromArgs(args) {
+  const first = args[0];
+  if (typeof first === 'string') return first;
+  if (first && typeof first.sql === 'string') return first.sql;
+  if (Array.isArray(first) && Array.isArray(first.raw)) return first.join('?');
+  throw Object.assign(new TypeError('MySQL tenant-scoped raw queries require inspectable SQL text.'), { code: 'ARIX_SQL_REJECTED' });
+}
+
+function assertMysqlTenantScopedQuery(args) {
+  const sql = mysqlSqlFromArgs(args);
+  if (!sql || sql.length > 1_000_000) throw Object.assign(new TypeError('MySQL tenant-scoped queries require bounded SQL text.'), { code: 'ARIX_SQL_REJECTED' });
+  // Quoted values are removed before checking control syntax. This adapter
+  // intentionally rejects raw session-variable access and stored-program
+  // invocation: these can mutate or bypass transaction-local tenant context.
+  const scrubbed = sql.replace(/'(?:''|\\.|[^'])*'|"(?:""|\\.|[^"])*"|`(?:``|[^`])*`/gs, ' ');
+  const blocked = /;|@\s*(?:arix_tenant_id|arix_user_id)\b|\b(?:SET|RESET|USE|BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|CALL|DO|PREPARE|EXECUTE|DEALLOCATE|LOCK|UNLOCK|GRANT|REVOKE|ALTER|DROP|TRUNCATE|LOAD)\b/i;
+  if (blocked.test(scrubbed)) throw Object.assign(new Error('ARIX_SQL_CONTROL_BLOCKED: MySQL transaction control, tenant variables, stored programs and multi-statement SQL are reserved to ArixShield.'), { code: 'ARIX_SQL_CONTROL_BLOCKED' });
+}
+
+function mysqlScopedFacade(connection) {
+  const facade = {
+    query: (...args) => { assertMysqlTenantScopedQuery(args); return connection.query(...args); }
+  };
+  if (typeof connection.execute === 'function') facade.execute = (...args) => { assertMysqlTenantScopedQuery(args); return connection.execute(...args); };
+  return Object.freeze(facade);
+}
+
+function prismaSqlText(args) {
+  const first = args[0];
+  if (typeof first === 'string') return first;
+  if (first && typeof first.sql === 'string') return first.sql;
+  if (Array.isArray(first) && Array.isArray(first.raw)) return first.join('?');
+  throw Object.assign(new TypeError('Prisma raw query must provide inspectable SQL text.'), { code: 'ARIX_SQL_REJECTED' });
+}
+
+function prismaScopedFacade(tx, provider) {
+  const wrappers = new Map();
+  const rawNames = new Set(['$queryRaw', '$queryRawUnsafe', '$executeRaw', '$executeRawUnsafe']);
+  return new Proxy(tx, {
+    get(target, property) {
+      if (property === 'then') return undefined;
+      if (typeof property === 'string' && property.startsWith('$') && !rawNames.has(property)) return undefined;
+      if (rawNames.has(property)) {
+        if (wrappers.has(property)) return wrappers.get(property);
+        const original = Reflect.get(target, property, target);
+        if (typeof original !== 'function') return undefined;
+        const wrapped = (...args) => {
+          const sql = prismaSqlText(args);
+          if (provider === 'postgresql') assertTenantScopedQuery([sql]);
+          else if (provider === 'mysql') assertMysqlTenantScopedQuery([sql]);
+          else throw new TypeError('Raw Prisma queries are not available for SQLite tenant callbacks.');
+          return Reflect.apply(original, target, args);
+        };
+        wrappers.set(property, wrapped);
+        return wrapped;
+      }
+      return Reflect.get(target, property, target);
+    },
+    set() { return false; },
+    defineProperty() { return false; },
+    deleteProperty() { return false; }
+  });
+}
+
 async function pgTransaction(client, ctx, fn, options) {
   const isPool = options.pool === true || (typeof client.connect === 'function' && Number.isInteger(client.totalCount));
   const connection = isPool ? await client.connect() : client;
@@ -56,7 +121,7 @@ async function mysqlTransaction(client, ctx, fn, options) {
   try {
     await connection.beginTransaction(); began = true;
     await connection.query('SET @arix_tenant_id = ?, @arix_user_id = ?', [ctx.tenantId, ctx.userId]);
-    const result = await fn(connection);
+    const result = await fn(mysqlScopedFacade(connection));
     await connection.commit(); began = false;
     return result;
   } catch (error) {
@@ -103,6 +168,9 @@ async function prismaTransaction(client, ctx, fn, options) {
   await client.$transaction(async (tx) => {
     if (provider === 'postgresql') {
       if (typeof tx.$queryRawUnsafe !== 'function') throw new TypeError('Prisma PostgreSQL transaction client does not expose $queryRawUnsafe.');
+      const roleRows = await tx.$queryRawUnsafe('SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user');
+      const role = Array.isArray(roleRows) ? roleRows[0] : roleRows?.rows?.[0];
+      if (!role || role.rolsuper === true || role.rolbypassrls === true) throw Object.assign(new Error('RLS transaction refused: Prisma runtime role is missing, superuser, or BYPASSRLS.'), { code: 'ARIX_RLS_PRIVILEGED_ROLE' });
       await tx.$queryRawUnsafe("SELECT set_config('arix.tenant_id', $1, true), set_config('arix.user_id', $2, true)", ctx.tenantId, ctx.userId);
     } else if (provider === 'mysql') {
       if (typeof tx.$executeRawUnsafe !== 'function') throw new TypeError('Prisma MySQL transaction client does not expose $executeRawUnsafe.');
@@ -113,9 +181,10 @@ async function prismaTransaction(client, ctx, fn, options) {
       await adapter(tx, Object.freeze({ ...ctx }));
     }
     if (provider === 'mysql') {
-      try { result = await fn(tx); }
+      try { result = await fn(prismaScopedFacade(tx, provider)); }
       finally { await tx.$executeRawUnsafe('SET @arix_tenant_id = NULL, @arix_user_id = NULL'); }
-    } else result = await fn(tx);
+    } else if (provider === 'postgresql') result = await fn(prismaScopedFacade(tx, provider));
+    else result = await fn(tx);
   }, options.transactionOptions || {});
   return result;
 }

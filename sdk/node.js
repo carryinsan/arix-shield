@@ -14,7 +14,7 @@ import { rewriteCapabilityRequest, verifySignedToken, verifyRequestDpopProof, sh
 import { formatIpPrefix } from '../api/_lib/cidr.js';
 import { runWithCircuit } from '../api/_lib/circuit-breaker.js';
 import { arixSafeFetch } from './safe-fetch.js';
-import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, consumeLocalOutageRead, validateWorkflowRequest } from './security-runtime.js';
+import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, validateWorkflowRequest } from './security-runtime.js';
 import { validatePayloadSchema, isOpenApiOperation } from '../api/_lib/schema.js';
 import { watermarkPayloadWithMarker, spliceCanaryRow, getChameleonRowIdentifier } from '../api/_lib/watermark.js';
 import { findOwnershipMismatch, sealResourceIdsInPayload } from '../api/_lib/crypto-trap.js';
@@ -400,9 +400,24 @@ export function createArixShield(options = {}) {
       const lowRiskRead = method === 'GET' && /\/(?:docs|catalog)(?:\/|$)/i.test(pathname);
       if (!lowRiskRead) return sendDecision(res, 503, { error: 'ArixShield distributed quota service is unavailable.' });
       const challenge = requestHeader(req, 'x-arix-outage-pow');
-      if (!await verifyOutageProof(challenge, method, pathname)) { const issued = await makeOutageChallenge({ method, pathname, difficulty: options.outagePowDifficulty ?? 12 }); return sendDecision(res, 428, { error: 'Control plane unavailable; proof-of-work required.', challenge: issued }); }
-      quota = consumeLocalOutageRead({ key: `${endpoint}:${identity}:${pathname}`, limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000 });
-      if (!quota.allowed) return sendDecision(res, 429, { error: 'Degraded-mode read quota exceeded.' });
+      const outageProject = String(options.projectId || `${endpoint}:${hashHex(serverKey).slice(0, 24)}` || 'default');
+      const outageRequester = formatIpPrefix(clientIp) || 'unknown';
+      const outageWindowMs = options.rateLimitWindowMs ?? 60000;
+      const outageProof = await verifyOutageProof(challenge, method, pathname, {
+        projectId: outageProject,
+        requesterKey: outageRequester,
+        quotaKey: `${outageProject}:${outageRequester}:${identity}:degraded-read`,
+        limit: quotaLimit,
+        windowMs: outageWindowMs
+      });
+      if (!outageProof.valid) {
+        if (outageProof.reason === 'OUTAGE_LOCAL_QUOTA') return sendDecision(res, 429, { error: 'Degraded-mode read quota exceeded.' });
+        if (['OUTAGE_REPLAY_CAPACITY', 'OUTAGE_QUOTA_STORE_CAPACITY'].includes(outageProof.reason)) return sendDecision(res, 503, { error: 'Degraded-mode local protection is at capacity.' });
+        if (outageProof.reason === 'OUTAGE_POW_REPLAY') return sendDecision(res, 429, { error: 'The degraded-mode proof has already been used.' });
+        const issued = await makeOutageChallenge({ method, pathname, difficulty: options.outagePowDifficulty ?? 12, projectId: outageProject, requesterKey: outageRequester });
+        return sendDecision(res, 428, { error: 'Control plane unavailable; proof-of-work required.', challenge: issued });
+      }
+      quota = outageProof.quota;
     }
     const findings = [...inspection.findings];
     if (shadowCatalogEnabled && options.openapiDocument && !isOpenApiOperation(options.openapiDocument, method, pathname)) findings.push({ id: 'SHADOW_API_ROUTE', category: 'SHADOW_API', severity: 'medium', detail: `Observed route is not declared in the supplied OpenAPI document: ${method} ${pathname}`.slice(0, 180) });

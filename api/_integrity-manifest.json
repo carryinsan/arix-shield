@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 122,
-  "rootDigest": "bf91ab4077572ed87847c2e1a4e453802c1c3a17bb2feb5c13fa93aa12633d88",
+  "fileCount": 126,
+  "rootDigest": "701f361a29a5622a8e45da837011132a3dc57c95669402d829ae52a681977b41",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -38,6 +38,10 @@
       "sha256": "bdc38ea33bcfdeefa898148ca0f48c4fdaf6b49e0b198297474b80923d78786b"
     },
     {
+      "path": "api/_lib/bounded-replay-cache.js",
+      "sha256": "d81a2a565ff2541042b82b55a6c3047163ea87ad313933714af7196d37739ee3"
+    },
+    {
       "path": "api/_lib/breach-filter.js",
       "sha256": "9a4c36fb9723afe0f36fbeec156806a4527961bc9ddc2653e6fa0e3cf79d20f3"
     },
@@ -55,11 +59,11 @@
     },
     {
       "path": "api/_lib/crypto-trap.js",
-      "sha256": "7af14b3ed2b26abcae86477f7423a1ee21b32e16fbe317c5d14008ddfb1c6f9a"
+      "sha256": "dba07a6000b954cdd243bfbb929325dd500cfaad7a2814de0421b6d20dd6629f"
     },
     {
       "path": "api/_lib/db-guard.js",
-      "sha256": "97ca5510682cfc983511b1df4ca6deb9142d19cad9d56f52906962cb6ab5fb60"
+      "sha256": "fb78ecfd517c8f50f9d1998f1b54aaa076c5245e7f084254394aa59e363446db"
     },
     {
       "path": "api/_lib/db.js",
@@ -123,7 +127,7 @@
     },
     {
       "path": "api/_lib/postgres-rls.js",
-      "sha256": "ec7af5a4ac9f48e4e440c3b1317dc12af01ebe646577cc3d0edbfe3ac0764994"
+      "sha256": "3da02631d92a121d33a2b5895a5cc01a7a662faef1a3080e580384d2ec7d7c45"
     },
     {
       "path": "api/_lib/recovery-codes.js",
@@ -131,7 +135,7 @@
     },
     {
       "path": "api/_lib/redis.js",
-      "sha256": "0ae90e54fb4ef300fa869d87e01bcc4090d556a5a3a792ab5396b2ce2bb8f6c3"
+      "sha256": "74535bbcb6097f6b258c3ddafce6de34997c6cf2f55cfd147a5be4a091557cb4"
     },
     {
       "path": "api/_lib/reputation.js",
@@ -155,7 +159,7 @@
     },
     {
       "path": "api/_lib/session.js",
-      "sha256": "4f918a37ee01c5d550fc419a27b4b76fcdaba486fb93e9cfcc39cbb0263271b8"
+      "sha256": "17e901a45fc218affc6d51a4b7f924a45c16e528c8be31f588581535ea2d5196"
     },
     {
       "path": "api/_lib/soc-engine.js",
@@ -163,7 +167,7 @@
     },
     {
       "path": "api/_lib/step-up.js",
-      "sha256": "066de71b36c58c9d322b2382afd5ba6ceda83875b71b1ef92c6d4c4e1f5f3553"
+      "sha256": "7b42604f9178878c9b9275a96afd6781f86b65e38c4685be1cbc9e2ffc4d4d6f"
     },
     {
       "path": "api/_lib/threat-intel.js",
@@ -171,11 +175,11 @@
     },
     {
       "path": "api/_lib/vercel-handler.js",
-      "sha256": "e8eacbbb3bd2b220a2a2201dbcbf897c1108cb4ce4168df2ade4a7ea25936355"
+      "sha256": "b0b36cada6a3477923b5894f8db1262a9b49f7754d91b30733446401e94f45e2"
     },
     {
       "path": "api/_lib/waf-engine.js",
-      "sha256": "8bb6960c68c79a0019e5636a8cc78fcf5da59ce1dab16d2a8991fc685d0c1dc3"
+      "sha256": "3d9b67aa7842c26bb333446f660fb8d45342609af4c113bcf2ad8dbd25a9eae3"
     },
     {
       "path": "api/_lib/watermark.js",
@@ -183,11 +187,11 @@
     },
     {
       "path": "api/_lib/webauthn.js",
-      "sha256": "c5f3f5f8f2f9b9e1a179e3c790e6390e7344d8e9ccd12330d1672e6c2442a7a8"
+      "sha256": "549dde883c602bc099addadbacaeea27a0e336596b5812c9d0da4de2d1a655e6"
     },
     {
       "path": "api/auth.js",
-      "sha256": "1d815bed8b362b21e46575b6eb8f9679f6c412482adad3ea57ac123eea0e75e1"
+      "sha256": "20c6cd964bfd2f49bc98588c156cf87a9cde65928edcaf6093f489be9d50a29c"
     },
     {
       "path": "api/cron/analytics-flush.js",
@@ -243,7 +247,7 @@
     },
     {
       "path": "public/app.js",
-      "sha256": "6aaa53594a5a3d2fd4937657a30333dc2b4fb60cba5b1c586fdf8618dc7e20da"
+      "sha256": "59d7a6cbf3eab7143aaa13fd61096a545eca2dfa2f90349d815912619ebda94e"
     },
     {
       "path": "public/arix-client.js",
@@ -279,7 +283,7 @@
     },
     {
       "path": "scripts/build.mjs",
-      "sha256": "1561b449da0a118c989bb52893d072d1096cf8de5f0b507c1ef9654030e3f9e3"
+      "sha256": "7ff03808846e7c3889d63495e449353324fabb906940a43cdd1daea0b88730cf"
     },
     {
       "path": "scripts/check.mjs",
@@ -347,15 +351,15 @@
     },
     {
       "path": "sdk/local-rate-limit.js",
-      "sha256": "5ce427b48e9636ae96fc57fdffd28e635b22baa7ebf132d00cb9208f30a973a6"
+      "sha256": "7248863993299d53a8bee09bed73e547ea4ae180ef834c668b89c1920ab5d420"
     },
     {
       "path": "sdk/next.js",
-      "sha256": "dd4c16b9034d19291dcdc9ff85585e48fdf99393eb0972a25f5c1153b1b2b1c9"
+      "sha256": "88b7c219fa4f89d90093a11189560e476764f954ab6c1897700ef77ee7bc5490"
     },
     {
       "path": "sdk/node.js",
-      "sha256": "d7f3c02a268d2c84df738ec8b7cc1b2067975e37f677156ac69ed28185a30179"
+      "sha256": "d451594f63ef4a4adeae8d9fc6f7ea3a337183e2686dae79066c508d0c942b64"
     },
     {
       "path": "sdk/process-egress-firewall.js",
@@ -367,11 +371,11 @@
     },
     {
       "path": "sdk/safe-fetch.js",
-      "sha256": "a20faf92d836ec0ca14a656452a001f13bde7e9dd0729464ff3706898b7f8b4f"
+      "sha256": "d203dbdf6a217a5178b85e506264350cdd65764cb36443d5373ca56b10bf38cb"
     },
     {
       "path": "sdk/security-runtime.js",
-      "sha256": "ad62cb3b9bb9a3813fdffe0a595e056307347c4ff990693ebe55ab62023d10f0"
+      "sha256": "01e96dbcec9cdc4d931b40eec5d58a9adf4d22b27e03d8f86cb7e310cbbd88bf"
     },
     {
       "path": "state/replicated-state-server.mjs",
@@ -383,7 +387,7 @@
     },
     {
       "path": "test/adversarial-lab.test.js",
-      "sha256": "cf10be37cb83efd20c7676f0ea83f241e679513f88d0bf065a3a862c8ec07cc2"
+      "sha256": "773797d9ad7541daa055f795ecd9c191d23ee99b5d1fbcbf30ab422d224b9117"
     },
     {
       "path": "test/asvs-verifier.test.js",
@@ -391,7 +395,11 @@
     },
     {
       "path": "test/audit-11-regressions.test.js",
-      "sha256": "4c10e781deb53f6059cc452a33ff657857cea32f3b5bd6b57b9a893c402c2047"
+      "sha256": "cae1f4a181a6fce94780e0f23d3443bd4399b44fa24a1bc4e342493e583b0547"
+    },
+    {
+      "path": "test/audit-latest-regressions.test.js",
+      "sha256": "5573d9f0bd5128d66243e8c00179afbf673f58c39613b76db85cd424f573791b"
     },
     {
       "path": "test/auth-recovery.test.js",
@@ -415,7 +423,7 @@
     },
     {
       "path": "test/crypto.test.js",
-      "sha256": "5662b46ab0ae3d7d6634e5141a8133d73729814e7e41a0a6557a05489447dd3d"
+      "sha256": "e1fc492b051e33b65616478c4a3e6178cd573ffd0d101bc6d48e6b8b2b53276c"
     },
     {
       "path": "test/customer-record-encryption.test.js",
@@ -439,7 +447,7 @@
     },
     {
       "path": "test/hardening-regressions.test.js",
-      "sha256": "69ab943772f00029e713c8b21a463c524da53af4ebd518a36cef08d586ede5bd"
+      "sha256": "12b2ba6681800f5c288d3c8b5fc929d98ef418ffc6d12002348f7d002a986272"
     },
     {
       "path": "test/host-attestation.test.js",
@@ -455,7 +463,7 @@
     },
     {
       "path": "test/local-rate-limit-isolation.test.js",
-      "sha256": "b8b11a27840c202345c50855aadbb0278164381964c1113e25803820bad5be7d"
+      "sha256": "4f440ecce6a1ccb2f6b8771a418e3e583c6628e2896579227c42eff288736e5d"
     },
     {
       "path": "test/new-domain-primitives.test.js",
@@ -463,11 +471,15 @@
     },
     {
       "path": "test/postgres-rls.test.js",
-      "sha256": "85133692404ae2ac8cd9cfe972263f489e07fd38852bba640a8c04d8fabcbf5b"
+      "sha256": "6f0a85879241acaf0aa64ae6419d8c5b5842d70df6e1c0f846aee472be95eb71"
     },
     {
       "path": "test/process-egress-firewall.test.js",
-      "sha256": "82bd92539f84ac98025a9912a9414ac78208620c80d47174cee676499f44c6cc"
+      "sha256": "04c5c4c6a13d6040330cbbc5eb030611cdec5863ff47bb7ae2715faae5be77eb"
+    },
+    {
+      "path": "test/replay-cache-hardening.test.js",
+      "sha256": "db14c585db1f25f53486ce75be9e7a7002347563d1fae7857599523a9484823d"
     },
     {
       "path": "test/runtime-invariants-25.test.js",
@@ -492,6 +504,10 @@
     {
       "path": "test/vercel-routing-middleware.test.js",
       "sha256": "b0344f878cfe447e56081297e69bce9b751c7760d2186ae1a6265ffb6f1463bb"
+    },
+    {
+      "path": "test/webauthn-enrollment-stepup.test.js",
+      "sha256": "892d93f57b3451e3a5203ee2158ab97847352aff87931d2e4023b9468c4a34b9"
     }
   ],
   "signature": null

@@ -42,7 +42,7 @@ test('browser PoW is bound to the DPoP thumbprint and atomically single-use', as
   assert.equal(claims.thumbprint, thumbprint);
   assert.equal(await validatePow(projectId, token, '0', signals, 'different-thumbprint'), false);
   let solution = '';
-  for (let candidate = 0; candidate < 200000; candidate++) {
+  for (let candidate = 0; candidate < 1000000; candidate++) {
     const digest = createHash('sha256').update(`${claims.nonce}:${claims.binding}:${candidate}`).digest();
     if (digest[0] === 0 && digest[1] === 0) { solution = String(candidate); break; }
   }

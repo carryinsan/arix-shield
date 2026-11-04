@@ -10,15 +10,90 @@ function identifier(value, label) {
 }
 
 function normalizePolicyExpression(value) {
-  return String(value || '').toLowerCase().replaceAll('"', '').replace(/'([^']*)'::text/g, "'$1'").replace(/\s+/g, '').replace(/[()]/g, '');
+  // Canonicalize pg_get_expr output without erasing PostgreSQL's distinction
+  // between unquoted lowercase identifiers and case-sensitive quoted names.
+  // In particular, tenantid and "TenantId" must never compare equal.
+  const source = String(value || '');
+  const tokens = [];
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (/\s/.test(char) || char === '(' || char === ')') { index++; continue; }
+
+    if (char === '"') {
+      let end = index + 1;
+      let identifierValue = '';
+      let closed = false;
+      while (end < source.length) {
+        if (source[end] === '"') {
+          if (source[end + 1] === '"') { identifierValue += '"'; end += 2; continue; }
+          closed = true; end++; break;
+        }
+        identifierValue += source[end++];
+      }
+      if (!closed) return null;
+      // A quoted lowercase identifier has the same catalog name as the same
+      // unquoted identifier. Preserve all other quoted case exactly.
+      tokens.push(`id:${identifierValue}`);
+      index = end;
+      continue;
+    }
+
+    if (char === "'") {
+      let end = index + 1;
+      let literal = '';
+      let closed = false;
+      while (end < source.length) {
+        if (source[end] === "'") {
+          if (source[end + 1] === "'") { literal += "'"; end += 2; continue; }
+          closed = true; end++; break;
+        }
+        literal += source[end++];
+      }
+      if (!closed) return null;
+      tokens.push(`str:${JSON.stringify(literal)}`);
+      // PostgreSQL commonly decorates string constants emitted by pg_get_expr
+      // with ::text. The generated policy is semantically identical without
+      // that parser-added coercion, so normalize only this literal cast.
+      const suffix = /^\s*::\s*text\b/i.exec(source.slice(end));
+      index = suffix ? end + suffix[0].length : end;
+      continue;
+    }
+
+    const identifierMatch = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(source.slice(index));
+    if (identifierMatch) {
+      tokens.push(`id:${identifierMatch[0].toLowerCase()}`);
+      index += identifierMatch[0].length;
+      continue;
+    }
+
+    const numberMatch = /^\d+(?:\.\d+)?/.exec(source.slice(index));
+    if (numberMatch) {
+      tokens.push(`num:${numberMatch[0]}`);
+      index += numberMatch[0].length;
+      continue;
+    }
+
+    if (source.startsWith('::', index)) { tokens.push('cast'); index += 2; continue; }
+    tokens.push(`sym:${char}`);
+    index++;
+  }
+  return tokens.join('|');
 }
 
 function isExpectedTenantPolicy(policy, column) {
   if (!policy || policy.permissive !== false || policy.command !== '*' || policy.roles !== '{0}') return false;
-  const expected = normalizePolicyExpression(`(${column}::text = NULLIF(current_setting('arix.tenant_id', true), ''))`);
+  // PostgreSQL catalog dependencies identify the actual attribute numbers
+  // referenced by USING and WITH CHECK. Text normalization alone is not an
+  // authoritative proof of which case-sensitive column the policy uses.
+  const expectedAttnum = Number(policy.expectedTenantAttnum);
+  const referencedAttnums = Array.isArray(policy.referencedAttnums) ? policy.referencedAttnums.map(Number) : [];
+  if (!Number.isInteger(expectedAttnum) || expectedAttnum < 1 || referencedAttnums.length !== 1 || referencedAttnums[0] !== expectedAttnum) return false;
+  const expectedColumnSql = identifier(column, 'tenant column');
+  const expected = normalizePolicyExpression(`(${expectedColumnSql}::text = NULLIF(current_setting('arix.tenant_id', true), ''))`);
   const using = normalizePolicyExpression(policy.usingExpression);
   const check = normalizePolicyExpression(policy.checkExpression);
-  return using === expected && check === expected;
+  return expected !== null && using === expected && check === expected;
 }
 
 function splitSqlStatementsOutsideLiterals(sql) {
@@ -92,7 +167,14 @@ export function assertTenantScopedQuery(args) {
     const trimmed = statement.trim();
     if (!trimmed) continue;
     if (/^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|SET|RESET|DISCARD|DO|CALL|EXECUTE|PREPARE|DEALLOCATE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COMMENT|VACUUM|ANALYZE|CLUSTER|REFRESH|LOCK|COPY|LISTEN|UNLISTEN|NOTIFY|LOAD)\b/i.test(trimmed)
-      || /(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)*"?set_config"?\s*\(/i.test(trimmed)) {
+      || /(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)*"?set_config"?\s*\(/i.test(trimmed)
+      // PostgreSQL U&"..." identifiers can spell set_config using Unicode
+      // escapes. Reject this syntax in tenant-scoped application SQL rather
+      // than trying to duplicate PostgreSQL's identifier decoder.
+      || /\bU\s*&\s*"/i.test(trimmed)
+      // These helpers evaluate caller-supplied SQL strings inside the server;
+      // string-literal blanking must not hide their nested tenant mutations.
+      || /\b(?:query_to_xml(?:_and_xmlschema)?|cursor_to_xml(?:schema)?|table_to_xml(?:schema)?|schema_to_xml|database_to_xml|dblink(?:_exec)?)\s*\(/i.test(trimmed)) {
       throw Object.assign(new Error('ARIX_RLS_CONTEXT_MUTATION_BLOCKED: transaction control and tenant-context mutation are reserved to ArixShield.'), { code: 'ARIX_RLS_CONTEXT_MUTATION_BLOCKED' });
     }
   }
@@ -146,8 +228,8 @@ export async function provisionPostgresTenantRls(client, tables) {
       await client.query(`ALTER TABLE ${qualifiedTable} FORCE ROW LEVEL SECURITY`);
 
       const existingResult = await client.query(
-        `SELECT p.polpermissive AS permissive, p.polcmd AS command, p.polroles::text AS roles, pg_get_expr(p.polqual, p.polrelid) AS "usingExpression", pg_get_expr(p.polwithcheck, p.polrelid) AS "checkExpression" FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND p.polname = $3`,
-        [item.schema, item.table, POLICY_NAME]
+        `SELECT p.polpermissive AS permissive, p.polcmd AS command, p.polroles::text AS roles, pg_get_expr(p.polqual, p.polrelid) AS "usingExpression", pg_get_expr(p.polwithcheck, p.polrelid) AS "checkExpression", (SELECT a.attnum::int FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = $4 AND a.attnum > 0 AND NOT a.attisdropped) AS "expectedTenantAttnum", ARRAY(SELECT DISTINCT d.refobjsubid::int FROM pg_depend d WHERE d.classid = 'pg_policy'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_class'::regclass AND d.refobjid = c.oid AND d.refobjsubid > 0 ORDER BY d.refobjsubid::int) AS "referencedAttnums" FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND p.polname = $3`,
+        [item.schema, item.table, POLICY_NAME, item.column]
       );
       if (existingResult?.rows?.length) {
         if (existingResult.rows.length !== 1 || !isExpectedTenantPolicy(existingResult.rows[0], item.column)) {

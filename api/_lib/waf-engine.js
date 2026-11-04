@@ -38,12 +38,12 @@ function mayContainSqlGrammar(input) {
     // unbroken identifier (common in maximum-body performance probes).
     if (match[0].length > 16) continue;
     const token = match[0].toUpperCase();
-    if (SQL_KEYWORDS.has(token) || DANGEROUS_FUNCTIONS.has(token)) return true;
+    if (SQL_KEYWORDS.has(token) || SQL_OPERATORS.has(token) || DANGEROUS_FUNCTIONS.has(token)) return true;
   }
   return false;
 }
 const SYMBOLS = new Set(["'", '"', ';', '(', ')', '{', '}', '$', '\\', '`', '<', '>', '=', '|', '&']);
-const SQL_GRAMMAR_PUNCTUATION = /['"`;=]|--|#|\/\*/;
+const SQL_GRAMMAR_PUNCTUATION = /['"`;=<>!|]|--|#|\/\*/;
 const SQL_GRAMMAR_WORDS = /[a-z_][a-z0-9_$]*/gi;
 const NON_SQL_CANDIDATE_NEEDLES = Object.freeze({
   XSS_SCRIPT: ['script', 'javascript', 'on'],
@@ -125,7 +125,7 @@ function normalizeOnePass(input) {
   // entity, comment, quote-concatenation or delimiter syntax to decode.
   if (!/[\\%&\/'"`+|]/.test(output)) {
     if (!/[\s\u0000-\u001f\u007f]/.test(output)) return output;
-    return output.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim();
+    return collapseSecurityWhitespace(output);
   }
 
   const hasEscapes = output.includes('\\');
@@ -164,7 +164,18 @@ function normalizeOnePass(input) {
   }
   if (needsRenormalize) output = output.normalize('NFKC');
   if (!/[\s\u0000-\u001f\u007f]/.test(output)) return output;
-  return output.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim();
+  return collapseSecurityWhitespace(output);
+}
+
+// Preserve line boundaries: SQL -- and # comments terminate at a newline.
+// Other control characters and horizontal whitespace are safely collapsed.
+function collapseSecurityWhitespace(value) {
+  return String(value)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .replace(/[\t\v\f \u00a0]+/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .trim();
 }
 
 /** Decode at most three layers. Still-changing input is suspicious, not silently truncated. */
@@ -180,7 +191,7 @@ export function canonicalizeSecurityText(value) {
 
 function tokenizeGrammar(input) {
   const tokens = [];
-  const matcher = /--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/|'(?:''|\\.|[^'])*'|"(?:""|\\.|[^"])*"|0x[0-9a-f]+|\b\d+(?:\.\d+)?\b|[a-z_][a-z0-9_$]*|!=|<>|<=|>=|\|\||&&|[=<>]|[^\s]/gi;
+  const matcher = /--[^\r\n]*|#[^\r\n]*|\/\*[\s\S]*?\*\/|'(?:''|\\.|[^'])*'|"(?:""|\\.|[^"])*"|0x[0-9a-f]+|\b\d+(?:\.\d+)?\b|[a-z_][a-z0-9_$]*|!=|<>|<=|>=|\|\||&&|[=<>]|[^\s]/gi;
   let match;
   while ((match = matcher.exec(input)) !== null) {
     const raw = match[0];
@@ -264,6 +275,9 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
         // still attacker-controlled bytes. Keep the high-confidence non-SQL
         // checks (XSS, SSRF, SSTI, LDAP, XXE, command/deserialization markers)
         // active so a field-name exemption cannot suppress those controls.
+        // Inspect the raw representation before canonicalization can replace binary
+        // signature bytes such as Java serialization's AC ED 00 05 header.
+        for (const finding of scanNonSqlTextInChunks(value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Opaque field: ${path.slice(0, 70)}.`);
         const canonical = canonicalizeSecurityText(value);
         if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form in opaque field at ${path.slice(0, 70)}.`);
         for (const finding of scanNonSqlTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Opaque field: ${path.slice(0, 70)}.`);
@@ -274,6 +288,9 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
       const bytes = Buffer.byteLength(value, 'utf8');
       const allowedLong = Array.isArray(options.allowedLongFields) && options.allowedLongFields.some((name) => path === name || path.endsWith(`.${name}`));
       if (bytes > options.maxLeafBytes && !allowedLong) add('BODY_LEAF_SIZE', 'PROTOCOL', 'high', `String leaf at ${path.slice(0, 80)} exceeds ${options.maxLeafBytes} bytes.`);
+      // Raw scan is required for byte signatures that canonicalization may
+      // normalize away (for example NUL/control bytes in serialization headers).
+      for (const finding of scanNonSqlTextInChunks(value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Field: ${path.slice(0, 80)}.`);
       const canonical = canonicalizeSecurityText(value);
       if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form at ${path.slice(0, 80)}.`);
       const text = canonical.value;
@@ -341,7 +358,7 @@ function scanDuplicateJsonKeys(input) {
     throw new Error('Unterminated JSON string.');
   };
   const parseValue = (depth = 0) => {
-    if (++nodes > 12000 || depth > 64) throw new Error('JSON structure limit exceeded.');
+    if (++nodes > 12000 || depth > 64) throw Object.assign(new Error('JSON structure limit exceeded.'), { limitExceeded: true });
     whitespace();
     const ch = source[index];
     if (ch === '{') {
@@ -390,7 +407,8 @@ function scanDuplicateJsonKeys(input) {
       valid: false,
       duplicate: Boolean(error?.duplicateKey),
       key: error?.duplicateKey || null,
-      nonFiniteNumber: error?.nonFiniteNumber || null
+      nonFiniteNumber: error?.nonFiniteNumber || null,
+      limitExceeded: error?.limitExceeded === true
     };
   }
 }
@@ -631,7 +649,8 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
     const duplicateScan = scanDuplicateJsonKeys(rawJson);
     if (duplicateScan.duplicate) add('JSON_DUPLICATE_KEY', 'PROTOCOL', 'high', `Duplicate JSON object key detected${duplicateScan.key ? `: ${duplicateScan.key}` : ''}.`);
     if (duplicateScan.nonFiniteNumber) add('JSON_NON_FINITE_NUMBER', 'PROTOCOL', 'high', 'JSON numeric value overflows the finite JavaScript number range.');
-    if (!duplicateScan.valid && !duplicateScan.duplicate && !duplicateScan.nonFiniteNumber) add('JSON_MALFORMED', 'PROTOCOL', 'high', 'Raw JSON could not be parsed consistently.');
+    if (duplicateScan.limitExceeded) add('JSON_COMPLEXITY_LIMIT', 'PROTOCOL', 'high', 'Raw JSON exceeds the duplicate-key scanner node or depth limit.');
+    else if (!duplicateScan.valid && !duplicateScan.duplicate && !duplicateScan.nonFiniteNumber) add('JSON_MALFORMED', 'PROTOCOL', 'high', 'Raw JSON could not be parsed consistently.');
   }
   if (body !== null && (typeof body === 'number' || (typeof body === 'object' && !ArrayBuffer.isView(body)))) {
     const state = { nodes: 0, tooDeep: false, tooMany: false };
@@ -640,6 +659,7 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
     if (state.tooMany) add('JSON_NODES', 'PROTOCOL', 'high', `JSON object exceeds ${MAX_NODES} nodes.`);
   } else if (typeof body === 'string' && body !== '') {
     if (/\/\*!\s*\d{5,}\s*(?:UNION|SELECT|INSERT|UPDATE|DELETE|DROP|SLEEP)\b/i.test(body)) add('SQLI_VERSIONED_COMMENT', 'SQL_INJECTION', 'high', 'Executable MySQL versioned comment containing SQL instructions detected.');
+    for (const finding of matchingNonSqlRuleFindings(body)) add(finding.id, finding.category, finding.severity, finding.detail);
     const canonical = canonicalizeSecurityText(body);
     if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', 'Repeated encoding did not reach a canonical form.');
     for (const finding of matchingNonSqlRuleFindings(canonical.value)) add(finding.id, finding.category, finding.severity, finding.detail);

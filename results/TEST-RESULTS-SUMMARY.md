@@ -30,3 +30,23 @@ Rich-text SQL grammar heuristics remain intentionally excluded to avoid treating
 - No independent SAST/SCA, DAST, third-party penetration test, formal ASVS assessment, or infrastructure review was performed.
 
 **Conclusion:** The repository passes its 223-test suite, static integrity checks, a controlled production-build preflight, and the stated local WAF/endurance experiments. This is a substantially hardened local release candidate, not proof of zero vulnerabilities, production deployment correctness, global DDoS resistance, or OWASP ASVS 5.0.0 Level 3 compliance.
+
+---
+
+## Latest WebAuthn/MFA remediation verification — 2026-11-04 (F-14 / F-15)
+
+This section supersedes the older historical test totals above for the current archive. The older sections remain as a record of earlier verification stages.
+
+- `npm test`: **270 passed, 0 failed, 0 skipped** (245 top-level TAP tests; nested assertions included in the total).
+- Focused `test/webauthn-enrollment-stepup.test.js`: **4 passed, 0 failed**. It includes an actual generated ES256-signed WebAuthn assertion and verifies the positive-to-zero counter rollback is rejected after signature verification.
+- `npm run check`: passed; **121 JavaScript/MJS syntax checks, 67 API/SDK imports**, static scanner passed; **124-entry source-integrity manifest** verified.
+- `npm run build`: passed with temporary build-only secrets, a temporary RSA-3072 clearance key, and placeholder Redis-shaped configuration. No temporary keys or values are included in the archive.
+- After build verification, the signed test manifest was reset to unsigned form using `npm run integrity:update` with production secrets unset. Both API and documentation manifests agree and have `signature: null`; trusted CI must sign with the production `ARIX_MASTER_SECRET`.
+- The complete `npm test` output is retained in `results/f14-f15-full-test.tap.txt`; the controlled build output is retained in `results/f14-f15-build.tap.txt`.
+
+### Release limitations
+
+- No real hardware authenticator or live browser WebAuthn ceremony was available; regression coverage uses generated ES256 credentials and API-handler tests.
+- No live Upstash Redis or production Vercel deployment was available. The Redis Lua counter update is covered by implementation/static checks and local counter concurrency tests, but not live provider execution.
+- `package-lock.json` is still absent. Lockfile generation failed because `registry.npmjs.org` returned `EAI_AGAIN`; no lockfile was fabricated. `npm ci` and `npm audit --omit=dev --audit-level=low` remain release gates.
+- These checks do not prove zero undiscovered defects or formal security certification.

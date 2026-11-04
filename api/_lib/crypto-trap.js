@@ -2,11 +2,27 @@ import { webcrypto, timingSafeEqual, createHmac, scrypt as scryptCallback } from
 import { promisify } from 'node:util';
 import { PASSWORD_KDF } from './security-constants.js';
 import { setString } from './redis.js';
+import { BoundedReplayCache } from './bounded-replay-cache.js';
 
 const cryptoApi = globalThis.crypto ?? webcrypto;
 const scryptAsync = promisify(scryptCallback);
 const encoder = new TextEncoder();
-const dpopReplayRing = globalThis.__ARIX_DPOP_REPLAY_RING__ ??= new Map();
+// Per-process fallback is hard-bounded globally and partitioned by project and
+// DPoP key thumbprint. Active replay records are never evicted; expired records
+// are pruned from a min-heap instead of scanning the complete cache per request.
+const DPOP_REPLAY_WINDOW_MS = 91_000; // Covers the inclusive +/-45s iat window, including second-boundary rounding.
+const DPOP_REPLAY_CACHE_MAX = 131_072;
+const existingDpopReplayCache = globalThis.__ARIX_DPOP_REPLAY_CACHE__;
+const dpopReplayCache = existingDpopReplayCache && typeof existingDpopReplayCache.consume === 'function' && typeof existingDpopReplayCache.stats === 'function'
+  ? existingDpopReplayCache
+  : (globalThis.__ARIX_DPOP_REPLAY_CACHE__ = new BoundedReplayCache({ maxEntries: DPOP_REPLAY_CACHE_MAX, maxPerNamespace: 32768, maxPerPartition: 16384 }));
+
+function consumeLocalDpopReplay(key, projectId, thumbprint, ttlMs) {
+  const namespace = String(projectId || 'default').slice(0, 180);
+  const result = dpopReplayCache.consume(key, { namespace, partition: thumbprint, ttlMs });
+  if (result.accepted) return null;
+  return result.reason === 'REPLAY' ? 'DPOP_REPLAY' : 'DPOP_REPLAY_CACHE_FULL';
+}
 
 export function base64urlEncode(input) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
@@ -129,7 +145,10 @@ export function verifyResourceId(sealedId, identity, requiredMode = 'read') {
 
 function looksLikeId(value) {
   const text = String(value);
-  return /^\d{1,20}$/.test(text) || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text) || /^[A-Za-z0-9_-]{20,128}$/.test(text);
+  return /^\d{1,20}$/.test(text)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)
+    || /^[A-Za-z0-9_-]{20,128}$/.test(text)
+    || /^(?:usr|prj|org|acct|doc|inv|pay|res|rec|cus|file|proj)_[A-Za-z0-9_-]{4,120}$/i.test(text);
 }
 
 export function sealResourceIdsInPayload(payload, identity, depth = 0, mode = 'read') {
@@ -152,17 +171,42 @@ export function findOwnershipMismatch(payload, identity, additionalFields = []) 
   const fields = new Set([...OWNER_ID_KEYS, ...(Array.isArray(additionalFields) ? additionalFields.map((field) => String(field).toLowerCase()) : [])]);
   const emailIdentity = subject.includes('@');
   if (emailIdentity) fields.add('email');
-  const candidates = [payload, ...(Array.isArray(payload.data) ? payload.data.slice(0, 100) : []), ...(Array.isArray(payload.records) ? payload.records.slice(0, 100) : [])];
-  for (const record of candidates) {
-    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
-    for (const [key, value] of Object.entries(record)) {
-      if (!fields.has(key.toLowerCase()) || value === null || value === undefined || typeof value === 'object') continue;
-      const left = String(value).trim();
-      const matches = key.toLowerCase() === 'email' ? left.toLowerCase() === subject.toLowerCase() : left === subject;
-      if (!matches) return { field: key, expectedIdentity: subject.slice(0, 80) };
+  const visited = new WeakSet();
+  let nodes = 0;
+  let structureExceeded = false;
+  const walk = (value, depth = 0) => {
+    if (depth > 24 || ++nodes > 10_000) { structureExceeded = true; return null; }
+    if (value === null || typeof value !== 'object') return null;
+    if (visited.has(value)) return null;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index++) {
+        const mismatch = walk(value[index], depth + 1);
+        if (mismatch) return mismatch;
+        if (structureExceeded) return null;
+      }
+      return null;
     }
-  }
-  return null;
+    let entries;
+    try { entries = Object.entries(value); } catch { structureExceeded = true; return null; }
+    for (const [key, child] of entries) {
+      const lower = key.toLowerCase();
+      if (fields.has(lower) && child !== null && child !== undefined && (typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean')) {
+        const left = String(child).trim();
+        const matches = lower === 'email' ? left.toLowerCase() === subject.toLowerCase() : left === subject;
+        if (!matches) return { field: key, expectedIdentity: subject.slice(0, 80) };
+      } else {
+        const mismatch = walk(child, depth + 1);
+        if (mismatch) return mismatch;
+        if (structureExceeded) return null;
+      }
+    }
+    return null;
+  };
+  const mismatch = walk(payload);
+  // An oversized/cyclic response is not accepted as ownership-safe: the caller
+  // treats any returned marker as a mismatch and can fail closed.
+  return mismatch || (structureExceeded ? { field: '[structure-limit]', expectedIdentity: subject.slice(0, 80) } : null);
 }
 
 function requiredModeForMethod(method) {
@@ -234,17 +278,33 @@ export function rewriteCapabilityRequest(url, body, identity, { requireSealed = 
   }
   parsed.pathname = segments.join('/');
   const permittedArrays = new Set(arrayQueryFields.map((v) => String(v).toLowerCase()));
-  const queryKeys = new Set();
-  for (const key of parsed.searchParams.keys()) {
+  const queryGroups = new Map();
+  for (const [key, value] of parsed.searchParams.entries()) {
     const lower = key.toLowerCase();
-    if (queryKeys.has(lower) && !permittedArrays.has(lower)) invalid = true;
-    queryKeys.add(lower);
+    const group = queryGroups.get(lower) || { keys: new Set(), values: [] };
+    group.keys.add(key);
+    group.values.push(value);
+    queryGroups.set(lower, group);
+  }
+  for (const [lower, group] of queryGroups) {
+    if (group.values.length > 1 && !permittedArrays.has(lower)) invalid = true;
     if (!RESOURCE_ID_KEYS.has(lower)) continue;
-    const values = parsed.searchParams.getAll(key);
-    if (values.length !== 1) { invalid = true; continue; }
-    const clean = verifyResourceId(values[0], identity, mode);
-    if (clean === null) { if (requireSealed || values[0].includes('~')) invalid = true; }
-    else { parsed.searchParams.set(key, clean); verifiedResourceIds++; }
+    if (!permittedArrays.has(lower) && group.values.length !== 1) { invalid = true; continue; }
+    if (group.values.length > 100) { invalid = true; continue; }
+    const rewritten = [];
+    for (const raw of group.values) {
+      const clean = verifyResourceId(raw, identity, mode);
+      if (clean === null) {
+        if (requireSealed || raw.includes('~')) invalid = true;
+        rewritten.push(raw);
+      } else {
+        verifiedResourceIds++;
+        rewritten.push(clean);
+      }
+    }
+    const canonicalKey = group.keys.values().next().value;
+    for (const key of group.keys) parsed.searchParams.delete(key);
+    for (const clean of rewritten) parsed.searchParams.append(canonicalKey, clean);
   }
   const bodyResult = rewriteBodyCapabilities(body, identity, mode, { requireSealed });
   invalid ||= bodyResult.invalid;
@@ -323,14 +383,8 @@ export async function verifyDpopProof({ proof, method, url, projectId, redisGetS
     const verified = await cryptoApi.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, signature, signingInput);
     if (!verified) return { valid: false, reason: 'DPOP_SIGNATURE_INVALID' };
     const jtiHash = await sha256Hex(payload.jti);
-    const localReplayKey = `${projectId}:${jtiHash}`;
-    const nowMs = Date.now();
-    for (const [key, expiry] of dpopReplayRing) if (expiry <= nowMs) dpopReplayRing.delete(key);
-    if (dpopReplayRing.has(localReplayKey)) return { valid: false, reason: 'DPOP_REPLAY' };
-    dpopReplayRing.set(localReplayKey, nowMs + 15000);
-    if (dpopReplayRing.size > 4096) dpopReplayRing.delete(dpopReplayRing.keys().next().value);
     const replayKey = `arix:dpop:${projectId}:${jtiHash}`;
-    const inserted = await redisGetSet(replayKey, '1', 120, true);
+    const inserted = await redisGetSet(replayKey, '1', 121, true); // Covers inclusive +/-60s iat window plus sub-second rounding.
     if (inserted !== 'OK') return { valid: false, reason: 'DPOP_REPLAY' };
     return { valid: true, thumbprint };
   } catch {
@@ -339,7 +393,7 @@ export async function verifyDpopProof({ proof, method, url, projectId, redisGetS
 }
 
 /** Verify a body-bound DPoP proof for customer API requests without a control-plane lookup. */
-export async function verifyRequestDpopProof({ proof, method, url, bodyBytes = new Uint8Array(), expectedThumbprint = null, clearanceNonce = null, projectId = 'arix' }) {
+export async function verifyRequestDpopProof({ proof, method, url, bodyBytes = new Uint8Array(), expectedThumbprint = null, clearanceNonce = null, projectId = 'arix', consumeReplay = null }) {
   try {
     if (typeof proof !== 'string' || proof.length > 12000) return { valid: false, reason: 'MISSING_OR_OVERSIZED_DPOP' };
     const parts = proof.split('.');
@@ -361,13 +415,19 @@ export async function verifyRequestDpopProof({ proof, method, url, bodyBytes = n
     const verified = await cryptoApi.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, base64urlDecode(parts[2]), encoder.encode(`${parts[0]}.${parts[1]}`));
     if (!verified) return { valid: false, reason: 'DPOP_SIGNATURE_INVALID' };
     const jtiHash = await sha256Hex(payload.jti);
+    if (typeof consumeReplay === 'function') {
+      let consumed;
+      try { consumed = await consumeReplay(jtiHash); }
+      catch { return { valid: false, reason: 'DPOP_REPLAY_SERVICE_UNAVAILABLE', unavailable: true }; }
+      if (!consumed) return { valid: false, reason: 'DPOP_REPLAY' };
+      return { valid: true, thumbprint, jtiHash, replayConsumed: true };
+    }
+    // Standalone/local fallback is bounded and partitioned. Production clearance
+    // validation supplies the durable replay consumer instead (see below).
     const replayKey = `${projectId}:${jtiHash}`;
-    const nowMs = Date.now();
-    for (const [key, expiry] of dpopReplayRing) if (expiry <= nowMs) dpopReplayRing.delete(key);
-    if (dpopReplayRing.has(replayKey)) return { valid: false, reason: 'DPOP_REPLAY' };
-    dpopReplayRing.set(replayKey, nowMs + 15000);
-    if (dpopReplayRing.size > 4096) dpopReplayRing.delete(dpopReplayRing.keys().next().value);
-    return { valid: true, thumbprint, jtiHash };
+    const localReplayFailure = consumeLocalDpopReplay(replayKey, projectId, thumbprint, DPOP_REPLAY_WINDOW_MS);
+    if (localReplayFailure) return { valid: false, reason: localReplayFailure };
+    return { valid: true, thumbprint, jtiHash, replayConsumed: false };
   } catch {
     return { valid: false, reason: 'DPOP_VALIDATION_ERROR' };
   }

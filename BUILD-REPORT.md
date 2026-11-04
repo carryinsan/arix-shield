@@ -21,8 +21,8 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:122 -->
-<!-- ARIX-MANIFEST-ROOT:bf91ab4077572ed87847c2e1a4e453802c1c3a17bb2feb5c13fa93aa12633d88 -->
+<!-- ARIX-MANIFEST-FILE-COUNT:126 -->
+<!-- ARIX-MANIFEST-ROOT:701f361a29a5622a8e45da837011132a3dc57c95669402d829ae52a681977b41 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -31,15 +31,15 @@ Runtime: Node.js v22.16.0, Linux x64. Results are local and deterministic unless
 
 | Verification | Result |
 |---|---:|
-| `npm test` (latest follow-up tree) | **231 passed, 0 failed, 0 skipped**; 206 top-level TAP test records; ~11.9 seconds |
-| `npm run check` (latest follow-up tree) | **116 JS/MJS syntax checks, 66 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 119-file source manifest verified** |
-| `node scripts/build.mjs` (latest follow-up tree) | **Controlled production build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; manifest reset to unsigned afterwards |
+| `npm test` (current replay-cache final tree) | **276 passed, 0 failed, 0 skipped**; 251 top-level TAP test records; ~16.0 seconds on clean extraction |
+| `npm run check` (current replay-cache final tree) | **123 JS/MJS syntax checks, 68 API/SDK imports; static scanner passed; exact dependency allowlist passed (`@vercel/functions@3.10.5`); 126-file source manifest verified** |
+| `node scripts/build.mjs` (current replay-cache final tree) | **Controlled production build preflight passed** with disposable test-only secrets, a generated temporary RSA-3072 key and a dummy Upstash-shaped HTTPS URL/token; the isolated test subprocess removed Redis credentials; all 276 tests passed; manifest reset to unsigned afterwards |
 | `npm audit --omit=dev --audit-level=low` | **Not available: `ENOLOCK`**, because this repository still lacks `package-lock.json`; see `docs/DEPENDENCY-LOCKFILE.md` and `AUDIT-FOLLOWUP-REMEDIATION.md` |
 | `npm run audit:verify` | Not run; requires a real signed audit bundle and production signing secret |
 | Compose deployment profiles | Not run; Docker/Podman was unavailable |
 | Customer infrastructure / production PKI / database | Not available; not tested |
 | Vercel Routing Middleware | **10 targeted local regression tests passed**; real Vercel deployment/runtime package installation not executed |
-| Supplied brutal test pack v1.0.0 | **Previous backend candidate clean-extraction run: 30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS race workers; 256 KiB inspection p50 2.41 ms / p99 4.54 ms / max 32.20 ms (5 ms p99 gate). Not rerun after the dashboard-only JavaScript correction. One earlier local run measured 5.05 ms and missed only this host-sensitive timing gate; it was not relaxed. Event-loop p99 53.90 ms raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed |
+| Supplied brutal test pack v1.0.0 | **Previous backend candidate clean-extraction run: 30 passed, 0 failed, 0 skipped**; 50,000 soak operations; 12 OS race workers; 256 KiB inspection p50 2.41 ms / p99 4.54 ms / max 32.20 ms (5 ms p99 gate). Not rerun after the latest replay-cache changes; treat these stress figures as historical, not current validation. One earlier local run measured 5.05 ms and missed only this host-sensitive timing gate; it was not relaxed. Event-loop p99 53.90 ms raised `EVENT_LOOP_LAG`; authenticated-traffic preservation passed |
 | Independent ASVS / penetration assessment | Not performed |
 
 A current test transcript and fuller limitations are in `results/TEST-RESULTS-SUMMARY.md` and `results/full-test.tap.txt`. Historical lab/endurance files in `results/` are retained as historical evidence and were not rerun on this v1.4.4 consolidation.
@@ -125,3 +125,55 @@ A second independent review identified four further concerns. The browser quota 
 - `npm run build` passed using disposable build-fixture secrets and key material; the complete build test suite passed. Fixture secrets were not packaged and the source manifests were reset unsigned for the operator's deployment secret.
 - Dependency lockfile remains an outstanding release gate: npm registry DNS resolution returned `EAI_AGAIN`, and `npm audit --omit=dev --audit-level=low` returned `ENOLOCK`. No fabricated lockfile was added.
 - See `AUDIT-LATEST-FOLLOWUP-REMEDIATION.md` for detailed findings, assumptions, test scope and outstanding production checks.
+
+
+## Latest independent audit remediation — 2026-11-04 (F-11 to F-13)
+
+The latest code review reported three additional implementation defects. The supplied source reproduced all three:
+
+- **Authenticated local quota path bypass:** the authenticated local quota key previously included HTTP method and pathname. The local fallback now uses one stable actor bucket across all methods and paths. This avoids both path-based quota resets and route-key churn for authenticated actors. Anonymous network-prefix and optional verified-device controls remain unchanged.
+- **PostgreSQL RLS quoted-column false acceptance:** policy-expression normalization previously lowercased and removed all identifier quotes, conflating case-sensitive quoted identifiers with lowercase unquoted names. The normalizer now preserves quoted identifier spelling, and the migration's idempotence check additionally queries `pg_depend` / `pg_attribute` to verify the actual referenced tenant-column attribute number. A mismatching existing policy fails closed as a conflict.
+- **Configured egress response-size cap ignored:** `arixSafeFetch` now validates the `maxResponseBytes` option and its HTTPS response reader checks both a declared Content-Length and streamed bytes, aborting the request immediately when the configured cap is exceeded. The process egress firewall already forwarded this option; the safe transport now enforces it.
+
+Regression coverage includes authenticated path/method churn through both Node and Next SDKs, quoted mixed-case RLS tenant-column false-match and catalog-dependency verification, and response streaming at, below, and above the configured byte ceiling. Focused regression tests passed before the full suite.
+
+**Production qualification:** PostgreSQL catalog behavior was validated by SQL-shape and mocked migration-client tests, not a live PostgreSQL instance. No network-backed HTTPS response integration was run; the streaming enforcement helper and firewall option propagation were tested locally. The dependency lockfile remains absent, so npm SCA audit and reproducible `npm ci` remain open release gates. Production Vercel deployment was not performed. These changes do not establish that the repository is bug-free or formally certified.
+
+### Final follow-up verification — 2026-11-04 (F-11 to F-13)
+
+- Full repository test suite: **266 passed, 0 failed, 0 skipped** (`npm test`).
+- Targeted local-quota, PostgreSQL RLS and process-egress regression group: **33 passed, 0 failed**.
+- `npm run check`: passed; **120** JavaScript/MJS syntax checks, **67** API/SDK imports, static scanner passed, **123** source entries in the verified manifest.
+- `npm run build`: passed with disposable, locally generated test credentials and a temporary RSA-3072 clearance key. The temporary signing secret/key and fake Upstash values were not included in the archive. The build's signed manifest was reset to unsigned for trusted CI signing before packaging.
+- Final follow-up tests cover authenticated SDK local quota aggregation across unique paths in both adapters, exact quoted PostgreSQL tenant-column matching plus `pg_depend` catalog checks, and configured egress response-size enforcement during streaming.
+- A genuine lockfile generation was attempted with Node.js 22/npm 10, but `registry.npmjs.org` returned `EAI_AGAIN`. No lockfile was fabricated; `npm ci` and `npm audit --omit=dev --audit-level=low` remain open release gates.
+- No live Vercel deployment, real Upstash instance, or PostgreSQL server was used. See `AUDIT-F11-F13-REMEDIATION.md` for scope and limitations.
+
+## Latest independent WebAuthn/MFA follow-up — 2026-11-04 (F-14 to F-15)
+
+- Passkey registration now requires server-side fresh password proof plus an existing enrolled factor where configured. TOTP enrollment start and confirmation receive equivalent protection. The dashboard collects password/TOTP or password/existing-passkey proof; the API remains the enforcement authority.
+- WebAuthn counter policy now rejects positive-to-zero, equal, or decreasing transitions. A per-credential atomic counter update is applied after cryptographic signature verification in login and passkey step-up paths. Authenticators that continually report zero remain compatible; once an authenticator reports a positive counter, it must continue increasing.
+- Counter keys are removed when the associated passkey is removed or MFA recovery resets passkeys.
+- New focused regressions: 4 passed, including a genuinely signed ES256 WebAuthn assertion with positive-to-zero rollback, API-handler checks for passkey/TOTP enrollment step-up, and concurrent counter-update checks.
+- `npm test`: **270 passed, 0 failed, 0 skipped**.
+- `npm run check`: passed; **121** JavaScript/MJS syntax checks, **67** imports, static scanner passed, **124** integrity source entries verified.
+- Controlled `npm run build`: passed with disposable build-only credentials and a temporary RSA-3072 key. Temporary credentials were not packaged; manifests were reset to unsigned form for trusted production signing.
+- No live Vercel, Upstash, or physical WebAuthn authenticator was available. The atomic Redis Lua path still requires staging confirmation.
+- Dependency release gate remains open: no `package-lock.json` is present, so `npm ci` and `npm audit --omit=dev --audit-level=low` have not been completed. See `docs/DEPENDENCY-LOCKFILE.md`.
+- Full disposition, code paths, tests, and limitations are in `AUDIT-F14-F15-REMEDIATION.md`.
+
+## Latest independent replay-cache audit remediation — 2026-11-04
+
+The latest independent review identified an unbounded degraded-mode outage-proof replay map and a process-wide DPoP replay cache that performed a full-map expiry scan and had no per-project fairness.
+
+- Degraded-mode outage proofs are now signed with project and trusted requester-prefix scope binding. Proof-of-work validation checks signature, target, expiry and difficulty before admission. The local read quota is synchronously admitted before the replay record is inserted; a quota-denied proof does not consume replay-cache capacity. Duplicate proofs return HTTP 429, and replay/quota-store capacity exhaustion fails closed with HTTP 503.
+- Outage replay storage is hard-bounded at 32,768 records globally, 8,192 per project and 256 per project/requester prefix. It retains every unexpired replay record and refuses new entries when a cap is reached; it never evicts live proofs.
+- Expiry cleanup uses a min-heap rather than scanning the entire replay map on each request. The degraded-mode read quota store is also bounded at 20,000 buckets globally and 4,000 per project, with expiry-driven cleanup and fail-closed capacity handling.
+- DPoP replay records use a bounded expiry-heap cache with 131,072 global, 32,768 per-project and 16,384 per-project/key-thumbprint limits for local verification fallback. Active entries are never evicted to make room. Local request-bound fallback retains entries for 91 seconds; Redis-backed standard DPoP replay records use a 121-second TTL to cover inclusive timestamp boundaries.
+- The Redis-backed DPoP verifier relies on Redis atomic one-use consumption instead of duplicating every durable replay record in the process-local map. Production clearance verification passes its durable replay-consumption callback into request-bound DPoP verification. The process-local fallback remains for standalone/local verification and is documented as process-specific.
+- Regression coverage added in `test/replay-cache-hardening.test.js`: hard-cap enforcement, per-project/requester fairness, expiry pruning, replay rejection, proof-to-project/requester binding, quota-before-insertion, bounded local quota buckets, and durable DPoP callback behavior. The adversarial test's Redis fake now models atomic `SET NX` semantics rather than returning `OK` for every duplicate.
+- `npm test`: **276 passed, 0 failed, 0 skipped**.
+- `npm run check`: passed; **123** JavaScript/MJS syntax checks, **68** API/SDK imports, static scanner passed, and **126** integrity-manifest source entries verified.
+- Controlled `npm run build`: passed with disposable build-only secrets, a temporary RSA-3072 clearance key and dummy Upstash-shaped HTTPS configuration. The build runs all 276 tests in an isolated local test environment. Temporary values were not packaged; manifests were reset to unsigned form for trusted CI signing.
+
+**Remaining release gates:** no `package-lock.json` is included; `npm ci` and `npm audit --omit=dev --audit-level=low` remain outstanding. No live Vercel deployment, Upstash instance, PostgreSQL server, or external replay/cache cluster was exercised. The replay caches described here are process-local protections; distributed replay correctness depends on the production Redis callback and must be checked in staging.

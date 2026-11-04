@@ -71,14 +71,17 @@ function rejectOrigin(response, result, requestId) {
   response.end(JSON.stringify({ error: result.unavailable ? 'Origin proof verification is unavailable.' : 'Direct origin access denied.', code: 'ORIGIN_LOCK_FAILED' }));
 }
 
-function makeResponseShim() {
+export function makeResponseShim() {
   const headers = new Headers();
   let body = '';
   const response = {
     statusCode: 200,
     headersSent: false,
     setHeader(name, value) {
-      if (Array.isArray(value)) headers.set(name, value.join(', '));
+      if (Array.isArray(value) && String(name).toLowerCase() === 'set-cookie') {
+        headers.delete('set-cookie');
+        for (const item of value) headers.append('set-cookie', String(item));
+      } else if (Array.isArray(value)) headers.set(name, value.join(', '));
       else headers.set(name, String(value));
     },
     getHeader(name) { return headers.get(name); },

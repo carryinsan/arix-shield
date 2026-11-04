@@ -1,4 +1,4 @@
-import { getJson, getJsonOnce, setJson, setString } from './redis.js';
+import { getJson, getJsonOnce, setJson, setString, advanceWebAuthnCounter } from './redis.js';
 import { verifyPassword, sha256Hex } from './crypto-trap.js';
 import { decryptTotpSecret, matchTotpCounter } from './mfa.js';
 import { sameOriginRequest } from './http.js';
@@ -24,9 +24,11 @@ async function verifyPasskeyStepUp({ ownerId, projectId, req, challenge, credent
   const index = credentials.findIndex((item) => item?.credentialId === credentialId);
   if (index < 0) return false;
   let assertion;
-  try { assertion = verifyWebAuthnAssertion(credential, record, credentials[index], { requireUserVerification: true }); }
+  try { assertion = verifyWebAuthnAssertion(credential, record, credentials[index], { requireUserVerification: true, deferCounterCheck: true }); }
   catch { return false; }
-  credentials[index] = { ...credentials[index], signCount: assertion.signCount, lastUsedAt: Date.now() };
+  const credentialHash = await sha256Hex(credentialId);
+  if (!await advanceWebAuthnCounter(credentialHash, credentials[index].signCount ?? 0, assertion.signCount)) return false;
+  credentials[index] = { ...credentials[index], signCount: Math.max(credentials[index].signCount ?? 0, assertion.signCount), lastUsedAt: Date.now() };
   user.passkeys = credentials;
   await setJson(`arix:user:${ownerId}`, user);
   return true;

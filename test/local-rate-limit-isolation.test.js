@@ -16,6 +16,35 @@ test('anonymous local quota identity is stable across per-request random IDs and
   assert.equal(localNetworkPrefix('not-an-ip'), 'unknown');
 });
 
+
+test('authenticated local quota is aggregate across methods and paths', () => {
+  const store = new LocalQuotaStore({ maxBuckets: 32 });
+  const makeDimensions = (pathname, method) => buildLocalQuotaDimensions({
+    scope: `${testScope}-authenticated-aggregate`,
+    identity: 'user:user-aggregate',
+    actorIdentity: 'user:user-aggregate',
+    authenticated: true,
+    networkIp: '198.51.100.120',
+    method,
+    pathname,
+    actorLimit: 10,
+    routeLimit: 10
+  });
+
+  const first = makeDimensions('/api/path-0', 'GET');
+  const second = makeDimensions('/api/path-1', 'POST');
+  assert.equal(first.length, 1, 'authenticated users receive a stable aggregate actor dimension');
+  assert.equal(first[0].key, second[0].key, 'method/path changes do not create new actor buckets');
+  for (let index = 0; index < 10; index++) {
+    assert.equal(store.consume(makeDimensions(`/api/churn-${index}`, index % 2 ? 'GET' : 'POST')).allowed, true);
+  }
+  for (let index = 10; index < 30; index++) {
+    const result = store.consume(makeDimensions(`/api/churn-${index}`, index % 2 ? 'GET' : 'POST'));
+    assert.equal(result.allowed, false, 'the aggregate user quota rejects requests on newly selected paths');
+  }
+  assert.equal(store.size, 1, 'authenticated path churn cannot allocate per-route buckets');
+});
+
 test('anonymous local quota also charges the verified device dimension when present', () => {
   const dimensions = buildLocalQuotaDimensions({ scope: testScope, identity: 'anonymous', actorIdentity: 'device:thumbprint-one', authenticated: false, networkIp: '203.0.113.20', method: 'GET', pathname: '/api/data', dpopVerified: true, actorLimit: 20, routeLimit: 10, networkLimit: 100 });
   assert.equal(dimensions.length, 3);
@@ -78,6 +107,48 @@ test('Next.js SDK local fallback limits anonymous requests from the same IP desp
   }
   assert.equal(allowed, 10);
   assert.equal(rejected, 30);
+});
+
+
+test('Node SDK authenticated local fallback shares one quota across unique paths', async () => {
+  const { createArixShield } = await import('../sdk/node.js');
+  const middleware = createArixShield({
+    serverKey: 'ARIX_SECRET_AUTH_NODE_QUOTA_TEST', projectId: `node-auth-local-${Date.now()}`,
+    mode: 'ENFORCE', rateLimitPerMinute: 10, globalRateLimit: false,
+    abuseProtection: false, reputationProtection: false,
+    getIdentity: () => 'authenticated-user-1'
+  });
+  let allowed = 0; let rejected = 0;
+  for (let index = 0; index < 20; index++) {
+    const res = {
+      statusCode: 200, headers: {}, body: '',
+      setHeader(name, value) { this.headers[String(name).toLowerCase()] = value; },
+      end(value = '') { this.body = String(value); }
+    };
+    await middleware({ method: index % 2 ? 'GET' : 'POST', url: `/api/path-${index}`, originalUrl: `/api/path-${index}`, headers: { host: 'app.example.test' }, socket: { remoteAddress: '198.51.100.44' } }, res, () => { allowed++; });
+    if (res.statusCode === 429) rejected++;
+  }
+  assert.equal(allowed, 10);
+  assert.equal(rejected, 10);
+});
+
+test('Next.js SDK authenticated local fallback shares one quota across unique paths', async () => {
+  const { protectRequest } = await import('../sdk/next.js');
+  const options = {
+    projectId: `next-auth-local-${Date.now()}`, mode: 'ENFORCE', rateLimitPerMinute: 10,
+    globalRateLimit: false, reputationProtection: false, abuseProtection: false,
+    getIdentity: () => 'authenticated-user-2', getClientIp: () => '198.51.100.44'
+  };
+  let allowed = 0; let rejected = 0;
+  for (let index = 0; index < 20; index++) {
+    const request = new Request(`https://app.example.test/api/path-${index}`, { method: index % 2 ? 'GET' : 'POST' });
+    const result = await protectRequest(request, options);
+    if (result.allowed) allowed++;
+    else if (result.status === 429) rejected++;
+    else assert.fail(`Unexpected SDK decision ${result.status}: ${result.response ? await result.response.text() : ''}`);
+  }
+  assert.equal(allowed, 10);
+  assert.equal(rejected, 10);
 });
 
 test('anonymous network quota aggregates across different paths and methods', () => {

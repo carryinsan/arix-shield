@@ -11,7 +11,7 @@ function fakeMigrationClient({ role = { rolsuper: false, rolbypassrls: false }, 
       calls.push({ sql, values });
       if (sql.startsWith('SELECT rolsuper')) return { rows: [role] };
       if (sql.startsWith('SELECT 1 FROM information_schema.columns')) return { rows: [{ '?column?': 1 }] };
-      if (sql.includes('FROM pg_policy')) return { rows: existingPolicy ? [existingPolicy] : [] };
+      if (sql.includes('FROM pg_policy')) return { rows: existingPolicy ? [{ expectedTenantAttnum: 4, referencedAttnums: [4], ...existingPolicy }] : [] };
       if (sql.includes('FROM pg_class')) return { rows: [{ enabled: true, forced: true }] };
       return { rows: [] };
     }
@@ -35,6 +35,33 @@ test('PostgreSQL RLS provisioner is idempotent for an exact restrictive policy',
   const result = await provisionPostgresTenantRls(client, [{ table: 'orders' }]);
   assert.equal(result.applied, 1);
   assert.equal(client.calls.some(({ sql }) => sql.startsWith('CREATE POLICY')), false);
+});
+
+
+test('PostgreSQL RLS provisioner distinguishes case-sensitive quoted tenant columns', async () => {
+  const lowerCasePolicy = String.raw`((tenantid)::text = NULLIF(current_setting('arix.tenant_id'::text, true), ''::text))`;
+  const wrongClient = fakeMigrationClient({ existingPolicy: {
+    permissive: false, command: '*', roles: '{0}',
+    usingExpression: lowerCasePolicy, checkExpression: lowerCasePolicy,
+    expectedTenantAttnum: 5, referencedAttnums: [4]
+  } });
+  await assert.rejects(() => provisionPostgresTenantRls(wrongClient, [{ table: 'orders', tenantColumn: 'TenantId' }]), /Conflicting/i);
+  const catalogCheck = wrongClient.calls.find(({ sql }) => sql.includes('FROM pg_policy'));
+  assert.match(catalogCheck.sql, /pg_depend/);
+  assert.match(catalogCheck.sql, /pg_attribute/);
+  assert.deepEqual(catalogCheck.values, ['public', 'orders', 'arix_tenant_scope_v1', 'TenantId']);
+  assert.equal(wrongClient.calls.at(-1).sql, 'ROLLBACK');
+  assert.equal(wrongClient.calls.some(({ sql }) => sql.startsWith('CREATE POLICY')), false);
+
+  const quotedPolicy = String.raw`(("TenantId")::text = NULLIF(current_setting('arix.tenant_id'::text, true), ''::text))`;
+  const correctClient = fakeMigrationClient({ existingPolicy: {
+    permissive: false, command: '*', roles: '{0}',
+    usingExpression: quotedPolicy, checkExpression: quotedPolicy,
+    expectedTenantAttnum: 5, referencedAttnums: [5]
+  } });
+  const result = await provisionPostgresTenantRls(correctClient, [{ table: 'orders', tenantColumn: 'TenantId' }]);
+  assert.equal(result.applied, 1);
+  assert.equal(correctClient.calls.some(({ sql }) => sql.startsWith('CREATE POLICY')), false);
 });
 
 test('PostgreSQL RLS provisioner rejects privileged roles and rolls back', async () => {

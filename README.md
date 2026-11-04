@@ -80,3 +80,8 @@ The replicated state service is not a full Redis/Lua replacement and is not enab
 ## Chat 5 targeted remediation
 
 The `arix-shield-chat5.zip` archive includes targeted fixes and regression coverage for slow-drip request-body deadlines, ZIP local-record aliasing, non-finite JSON numeric values, and large-body inspection latency. See [docs/CHAT5-REMEDIATION.md](docs/CHAT5-REMEDIATION.md) for exact scope and verification limitations. The supplied stress pack's 5 ms p99 measurement is host-sensitive and is reported from the executed run, not assumed from a median.
+
+
+## 2026-11-04 follow-up hardening
+
+The local authenticated fallback limiter now aggregates by stable actor independent of route/method. PostgreSQL RLS idempotence checks preserve quoted-identifier case and validate the actual tenant-column catalog dependency. The HTTPS egress transport now enforces its configured response-byte cap during streaming. See `AUDIT-F11-F13-REMEDIATION.md` for details and test limitations.

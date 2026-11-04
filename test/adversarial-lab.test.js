@@ -145,6 +145,8 @@ test('100-way quota leases and DPoP replay/outage chaos fail closed under concur
   const results = await Promise.all(proofs.map((proof, index) => verifyDpopProof({ proof, method: 'POST', url: 'https://service.example.test/api/lease', projectId: `lab-${index}`, redisGetSet: async () => { if (index % 7 === 0) throw new Error('injected mid-flight Redis timeout'); return 'OK'; } })));
   assert.equal(results.filter((result) => result.valid).length, 85, 'Redis timeout cases must fail closed; reachable cases must validate');
   const replayPair = await makeDpopProof(pair, 'concurrent-replay-jti-0001');
-  const replayResults = await Promise.all(Array.from({ length: 100 }, () => verifyDpopProof({ proof: replayPair, method: 'POST', url: 'https://service.example.test/api/lease', projectId: 'same-actor', redisGetSet: async () => 'OK' })));
+  // Model Redis SET NX atomically; a stub that always returns OK is not a replay store.
+  const replayStore = new Set();
+  const replayResults = await Promise.all(Array.from({ length: 100 }, () => verifyDpopProof({ proof: replayPair, method: 'POST', url: 'https://service.example.test/api/lease', projectId: 'same-actor', redisGetSet: async (key) => replayStore.has(key) ? null : (replayStore.add(key), 'OK') })));
   assert.equal(replayResults.filter((result) => result.valid).length, 1, 'a concurrent DPoP replay must be accepted at most once in one process');
 });

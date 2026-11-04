@@ -159,20 +159,31 @@ test('dashboard uses a masked native dialog for security re-authentication', asy
 });
 
 
-test('rotated session replay revokes the replacement session family', async () => {
+test('rotated session replay revokes the replacement family only after the concurrency grace period', async () => {
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
   if (process.env.NODE_ENV === 'production') process.env.NODE_ENV = 'test';
   globalThis.__ARIXSHIELD_LOCAL_REDIS__?.clear?.();
   const { createSession, getSession, rotateSession } = await import('../api/_lib/session.js');
-  const original = await createSession('family-owner', 'family-project');
-  const replacement = await rotateSession('family-owner', 'family-project', original.tokenHash);
-  assert.ok(replacement?.token);
-  assert.equal(replacement.familyId, original.familyId);
-  const replayed = await getSession({ headers: { cookie: `arix_session=${original.token}` } });
-  assert.equal(replayed, null);
-  const replacementAfterReplay = await getSession({ headers: { cookie: `arix_session=${replacement.token}` } });
-  assert.equal(replacementAfterReplay, null);
+  const originalNow = Date.now;
+  const now = originalNow();
+  try {
+    Date.now = () => now;
+    const original = await createSession('family-owner', 'family-project');
+    const replacement = await rotateSession('family-owner', 'family-project', original.tokenHash);
+    assert.ok(replacement?.token);
+    assert.equal(replacement.familyId, original.familyId);
+    Date.now = () => now + 1_000;
+    const inFlightOldRequest = await getSession({ headers: { cookie: `arix_session=${original.token}` } });
+    assert.equal(inFlightOldRequest, null, 'old token is never accepted during grace');
+    const replacementDuringGrace = await getSession({ headers: { cookie: `arix_session=${replacement.token}` } });
+    assert.ok(replacementDuringGrace, 'in-flight old requests do not revoke the replacement family');
+    Date.now = () => now + 16_000;
+    const replayed = await getSession({ headers: { cookie: `arix_session=${original.token}` } });
+    assert.equal(replayed, null);
+    const replacementAfterReplay = await getSession({ headers: { cookie: `arix_session=${replacement.token}` } });
+    assert.equal(replacementAfterReplay, null, 'post-grace replay revokes its family');
+  } finally { Date.now = originalNow; }
 });
 
 

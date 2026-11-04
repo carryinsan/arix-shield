@@ -43,8 +43,12 @@ export function buildLocalQuotaDimensions({
   const dimensions = [];
   const makeKey = (kind, value, routeBound = true) => `arix-local:${digest(`${namespace}\0${kind}\0${value}${routeBound ? `\0${verb}\0${route}` : ''}`)}`;
 
-  if (authenticated && actorIdentity && !actorIdentity.startsWith('anonymous:')) {
-    dimensions.push({ key: makeKey('actor', actorIdentity || identity), limit: actorLimit });
+  if (authenticated && typeof actorIdentity === 'string' && actorIdentity && !actorIdentity.startsWith('anonymous:')) {
+    // Match the distributed actor quota: an authenticated principal has one
+    // aggregate budget across methods and paths. A route-derived local key
+    // would let the same principal obtain a fresh bucket for every URL and
+    // would also let path churn consume the bounded process-local store.
+    dimensions.push({ key: makeKey('actor', actorIdentity, false), limit: actorLimit });
     return dimensions;
   }
 

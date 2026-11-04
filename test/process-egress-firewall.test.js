@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
+import { readBoundedResponseBody, arixSafeFetch } from '../sdk/safe-fetch.js';
 import { installProcessEgressFirewall } from '../sdk/process-egress-firewall.js';
 
 test('process fetch egress guard routes URL fetches through the injected safe transport and restores cleanly', async () => {
@@ -30,6 +32,51 @@ test('process fetch egress guard routes URL fetches through the injected safe tr
   assert.equal(guard.uninstall(), true);
   assert.equal(target.fetch, original);
   assert.equal(guard.uninstall(), false);
+});
+
+
+test('process fetch egress guard forwards the configured response byte ceiling', async () => {
+  let captured;
+  const target = { fetch: async () => new Response('original') };
+  const guard = installProcessEgressFirewall({
+    target,
+    maxResponseBytes: 1024,
+    safeFetch: async (url, options) => {
+      captured = { url, options };
+      return new Response('ok');
+    }
+  });
+  await target.fetch('https://api.example.test/limited');
+  assert.equal(captured.options.maxResponseBytes, 1024);
+  guard.uninstall();
+});
+
+test('safe fetch response reader enforces configured streaming byte ceilings', async () => {
+  const exactResponse = Readable.from([Buffer.alloc(512, 0x61), Buffer.alloc(512, 0x62)]);
+  exactResponse.headers = {};
+  const exact = await readBoundedResponseBody(exactResponse, { destroy() {} }, 1024);
+  assert.equal(exact.length, 1024);
+
+  const tooLargeResponse = Readable.from([Buffer.alloc(700), Buffer.alloc(325)]);
+  tooLargeResponse.headers = {};
+  let destroyed = false;
+  await assert.rejects(
+    readBoundedResponseBody(tooLargeResponse, { destroy() { destroyed = true; } }, 1024),
+    /configured 1024-byte limit/
+  );
+  assert.equal(destroyed, true, 'oversized response aborts the underlying request');
+
+  const declaredLargeResponse = Readable.from([]);
+  declaredLargeResponse.headers = { 'content-length': '2048' };
+  await assert.rejects(
+    readBoundedResponseBody(declaredLargeResponse, { destroy() {} }, 1024),
+    /configured 1024-byte limit/
+  );
+});
+
+test('safe fetch validates direct maxResponseBytes configuration before network access', async () => {
+  await assert.rejects(arixSafeFetch('https://example.com/', { maxResponseBytes: 1023 }), /maxResponseBytes/);
+  await assert.rejects(arixSafeFetch('https://example.com/', { maxResponseBytes: 8 * 1024 * 1024 + 1 }), /maxResponseBytes/);
 });
 
 test('process fetch egress guard supports Request inputs and enforces method policy', async () => {

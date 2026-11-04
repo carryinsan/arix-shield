@@ -74,5 +74,5 @@ const testEnv = { ...env, NODE_ENV: 'test' };
 delete testEnv.UPSTASH_REDIS_REST_URL;
 delete testEnv.UPSTASH_REDIS_REST_TOKEN;
 delete testEnv.VERCEL_ENV;
-run(['--test', ...tests], `run ${tests.length} deterministic security test files (isolated in-memory state)`, testEnv);
+run(['--test', '--test-concurrency=1', ...tests], `run ${tests.length} deterministic security test files serially (isolated in-memory state)`, testEnv);
 process.stdout.write('[build] Production source/configuration gates and local regression suite passed. Live infrastructure and independent compliance assessment remain separate release gates.\n');

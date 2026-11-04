@@ -5,6 +5,7 @@ import { readCookie } from './http.js';
 const IDLE_TTL_MS = 30 * 60 * 1000;
 const ABSOLUTE_TTL_MS = 24 * 60 * 60 * 1000;
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
+const SESSION_ROTATION_GRACE_MS = 15_000;
 const MAX_FAMILY_SESSIONS = 2000;
 
 function clientHints(req) {
@@ -63,7 +64,14 @@ export async function getSession(req) {
   const tokenHash = await sha256Hex(token);
   const spent = await getJson(`arix:session-spent:${tokenHash}`);
   if (spent?.familyId) {
-    await revokeSessionFamily(spent.familyId);
+    const spentAt = Number(spent.spentAt);
+    // In-flight requests may still carry the just-rotated cookie. They are
+    // rejected, but do not revoke the replacement family during a short grace
+    // window. Reuse after the grace interval is treated as replay and revokes
+    // the family. No spent token is ever accepted during this window.
+    if (!Number.isFinite(spentAt) || Date.now() - spentAt > SESSION_ROTATION_GRACE_MS) {
+      await revokeSessionFamily(spent.familyId);
+    }
     return null;
   }
   const key = `arix:session:${tokenHash}`;
@@ -164,12 +172,13 @@ export async function rotateSession(ownerId, projectId, oldTokenHash, req = null
   const fresh = await createSession(ownerId, projectId, req, { familyId });
   const marked = await setJson(`arix:session-spent:${oldTokenHash}`, { familyId, ownerId, spentAt: Date.now() }, SESSION_TTL_SECONDS, true);
   if (marked !== 'OK') {
+    // Another concurrent request already rotated this exact token. Retire only
+    // this losing replacement; do not revoke the family containing the winner.
     await revokeUserSession(ownerId, fresh.tokenHash).catch(() => {});
-    await revokeSessionFamily(familyId).catch(() => {});
     return null;
   }
   await revokeUserSession(ownerId, oldTokenHash);
-  await revokeUserSessionsExcept(ownerId, fresh.tokenHash);
+  // Rotation is family-scoped. Other device families remain active.
   return fresh;
 }
 

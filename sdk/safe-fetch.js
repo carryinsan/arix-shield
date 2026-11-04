@@ -12,6 +12,7 @@ const BLOCKED_NETWORKS = [
   '2001:db8::/32', '2002::/16', '3fff::/20', 'fc00::/7', 'fe80::/10', 'fec0::/10', 'ff00::/8'
 ];
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MIN_RESPONSE_BYTES = 1024;
 
 export function assertPublicIp(address) {
   const family = isIP(address);
@@ -99,6 +100,45 @@ function toBuffer(body) {
   throw new TypeError('arixSafeFetch only accepts bounded string or binary bodies.');
 }
 
+/** Read an HTTPS response while enforcing the caller's byte ceiling. */
+export function readBoundedResponseBody(response, request, maxResponseBytes) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let size = 0;
+    const chunks = [];
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      try { response.destroy?.(); } catch { /* best effort stream teardown */ }
+      try { request?.destroy?.(error); } catch { /* best effort socket teardown */ }
+      reject(error);
+    };
+
+    const declaredLength = response?.headers?.['content-length'];
+    if (typeof declaredLength === 'string' && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxResponseBytes) {
+      fail(new Error(`Outbound response exceeds configured ${maxResponseBytes}-byte limit.`));
+      return;
+    }
+    response.on('data', (chunk) => {
+      if (settled) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > maxResponseBytes) {
+        fail(new Error(`Outbound response exceeds configured ${maxResponseBytes}-byte limit.`));
+        return;
+      }
+      chunks.push(bytes);
+    });
+    response.on('aborted', () => fail(new Error('Outbound response was aborted before completion.')));
+    response.on('error', fail);
+    response.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks, size));
+    });
+  });
+}
+
 function requestPinned(url, options, address, signal) {
   return new Promise((resolve, reject) => {
     const headers = new Headers(options.headers || {});
@@ -121,32 +161,11 @@ function requestPinned(url, options, address, signal) {
       timeout: Math.max(1000, Math.min(30000, Number(options.timeoutMs) || 10000)),
       maxHeaderSize: 16 * 1024,
       signal
-    }, (response) => {
-      const chunks = [];
-      let size = 0;
-      let settled = false;
-      const fail = (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      response.on('data', (chunk) => {
-        size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) {
-          const error = new Error('Outbound response exceeds 8 MiB limit.');
-          fail(error);
-          request.destroy(error);
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on('aborted', () => fail(new Error('Outbound response was aborted before completion.')));
-      response.on('error', fail);
-      response.on('end', () => {
-        if (settled) return;
-        settled = true;
-        resolve({ status: response.statusCode || 502, statusText: response.statusMessage || '', headers: response.headers, body: Buffer.concat(chunks) });
-      });
+    }, async (response) => {
+      try {
+        const responseBody = await readBoundedResponseBody(response, request, options.maxResponseBytes);
+        resolve({ status: response.statusCode || 502, statusText: response.statusMessage || '', headers: response.headers, body: responseBody });
+      } catch (error) { reject(error); }
     });
     request.on('timeout', () => request.destroy(new Error('Outbound request timed out.')));
     request.on('error', reject);
@@ -171,6 +190,11 @@ export async function arixSafeFetch(input, options = {}) {
   const rawTimeout = Number(options.timeoutMs ?? 10000);
   if (!Number.isFinite(rawTimeout) || rawTimeout <= 0) throw new RangeError('timeoutMs must be a positive finite number.');
   const timeoutMs = Math.max(1000, Math.min(30000, Math.floor(rawTimeout)));
+  const rawResponseLimit = Number(options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
+  if (!Number.isSafeInteger(rawResponseLimit) || rawResponseLimit < MIN_RESPONSE_BYTES || rawResponseLimit > MAX_RESPONSE_BYTES) {
+    throw new RangeError(`maxResponseBytes must be an integer from ${MIN_RESPONSE_BYTES} to ${MAX_RESPONSE_BYTES}.`);
+  }
+  const maxResponseBytes = rawResponseLimit;
   const allowedPorts = new Set((Array.isArray(options.allowedPorts) ? options.allowedPorts : [443]).map(Number));
   if (!allowedPorts.size || [...allowedPorts].some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) throw new RangeError('allowedPorts must contain valid TCP port numbers.');
   let currentMethod = String(options.method || 'GET').toUpperCase();
@@ -190,7 +214,7 @@ export async function arixSafeFetch(input, options = {}) {
       const addresses = await resolvePublicAddresses(current.hostname, deadline.signal);
       throwIfAborted(deadline.signal);
       const selected = addresses[0];
-      const result = await requestPinned(current, { ...options, headers: headersForHop, method: currentMethod, body: currentBody, timeoutMs }, selected, deadline.signal);
+      const result = await requestPinned(current, { ...options, headers: headersForHop, method: currentMethod, body: currentBody, timeoutMs, maxResponseBytes }, selected, deadline.signal);
       const location = result.headers.location;
       if ([301, 302, 303, 307, 308].includes(result.status) && location) {
         if (hop >= maxRedirects) throw new Error('Outbound redirect limit exceeded.');

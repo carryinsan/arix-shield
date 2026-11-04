@@ -467,6 +467,49 @@ export async function compareAndDeleteString(key, expected) {
   return Number(await command(['EVAL', STRING_COMPARE_AND_DELETE_LUA, '1', ...values])) === 1;
 }
 
+const WEBAUTHN_COUNTER_ADVANCE_LUA = `
+local prior = tonumber(ARGV[1])
+local next = tonumber(ARGV[2])
+if not prior or not next or prior < 0 or next < 0 or prior > 4294967295 or next > 4294967295 then return -1 end
+local raw = redis.call('GET', KEYS[1])
+local current = tonumber(raw)
+if raw and (not current or current < 0 or current > 4294967295) then return -1 end
+if not current or prior > current then current = prior end
+-- A previously incrementing authenticator may never silently reset to zero.
+if current > 0 and (next == 0 or next <= current) then return 0 end
+-- Authenticators that always report zero do not expose a usable counter.
+if next > 0 then redis.call('SET', KEYS[1], tostring(next)) end
+return 1
+`;
+
+/**
+ * Atomically accept a WebAuthn signature counter transition for one credential.
+ * `credentialHash` must be the SHA-256 hex digest of the credential ID. A
+ * positive counter must strictly increase; once positive, it may not return to
+ * zero. A zero-to-zero transition remains supported for authenticators that do
+ * not implement counters. The durable Redis key is removed with the credential.
+ */
+export async function advanceWebAuthnCounter(credentialHash, priorCount, nextCount) {
+  if (typeof credentialHash !== 'string' || !/^[a-f0-9]{64}$/i.test(credentialHash)) throw new TypeError('Invalid WebAuthn credential counter key.');
+  const prior = Number(priorCount); const next = Number(nextCount);
+  if (!Number.isInteger(prior) || !Number.isInteger(next) || prior < 0 || next < 0 || prior > 0xffffffff || next > 0xffffffff) return false;
+  const key = `arix:webauthn:counter:${credentialHash}`;
+  if (!redisConfigured()) {
+    if (!localModeAllowed()) throw new Error('ArixShield requires UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in production.');
+    warnFallback();
+    // Synchronous read/decision/write: atomic within this local Node isolate.
+    const item = getLocal(key);
+    if (item && item.type !== 'string') throw new Error('WebAuthn counter store has an invalid value type.');
+    const stored = item ? Number(item.value) : null;
+    if (item && (!Number.isInteger(stored) || stored < 0 || stored > 0xffffffff)) throw new Error('WebAuthn counter store is corrupt.');
+    const current = Math.max(prior, stored ?? 0);
+    if (current > 0 && (next === 0 || next <= current)) return false;
+    if (next > 0) setLocal(key, 'string', String(next), null);
+    return true;
+  }
+  return Number(await command(['EVAL', WEBAUTHN_COUNTER_ADVANCE_LUA, '1', key, String(prior), String(next)])) === 1;
+}
+
 export async function deleteKeys(...keys) { return keys.length ? command(['DEL', ...keys]) : 0; }
 export async function increment(key, amount = 1) { return command(['INCRBY', key, String(amount)]); }
 const INCREMENT_TTL_LUA = `
@@ -687,6 +730,67 @@ export async function getAuditChainSnapshot(projectId, limit = 250) {
   return { sequence, head, verified, rows, checkedAt: new Date().toISOString(), windowTruncated: sequence > rows.length, retainedCount: actualChainLength };
 }
 
+export async function processCriticalThreatEvent(projectId, safeEvent, {
+  appendAudit = recordAuditChainEvent,
+  readProject = getJson,
+  saveProject = setJson,
+  dispatchAlert = null,
+  queueAlert = enqueueIncidentAlert
+} = {}) {
+  let auditRow = null;
+  try {
+    auditRow = await appendAudit(projectId, safeEvent);
+  } catch (error) {
+    // A bounded audit-chain CAS failure must be visible, but must never
+    // prevent an independent critical containment action or alert enqueue.
+    console.error('[ArixShield] Threat audit-chain append failed:', String(error?.message || error).slice(0, 180));
+  }
+
+  const criticalTypes = new Set(['BOLA_200_LEAK_BLOCKED', 'CANARY_KEY_USED', 'GITHUB_SECRET_EXPOSURE', 'AUDIT_CHAIN_BROKEN', 'REDIS_CIRCUIT_OPEN', 'HONEYPOT_ROUTE_HIT', 'CANARY_RECORD_ACCESSED', 'CROSS_ENDPOINT_CORRELATION_ALERT']);
+  if (!criticalTypes.has(String(safeEvent?.type || ''))) return { auditRow, containmentApplied: false, alertQueued: false };
+
+  let project = null;
+  try { project = await readProject(`arix:project:${projectId}`); }
+  catch (error) { console.error('[ArixShield] Critical project policy could not be loaded:', String(error?.message || error).slice(0, 180)); }
+
+  let containmentApplied = false;
+  if (project?.policy?.autoContainmentEnabled === true && project.policy.mode === 'DRY_RUN') {
+    try {
+      const enforced = { ...project, policy: { ...project.policy, mode: 'ENFORCE' }, updatedAt: new Date().toISOString() };
+      await saveProject(`arix:project:${projectId}`, enforced);
+      project = enforced;
+      containmentApplied = true;
+    } catch (error) {
+      console.error('[ArixShield] Automatic enforcement transition failed:', String(error?.message || error).slice(0, 180));
+    }
+  }
+
+  if (typeof project?.policy?.alertWebhookUrl !== 'string' || !project.policy.alertWebhookUrl) {
+    return { auditRow, containmentApplied, alertQueued: false };
+  }
+  const incident = {
+    projectId: String(projectId), event: safeEvent, audit: auditRow,
+    auditUnavailable: auditRow === null,
+    containment: containmentApplied || project?.policy?.mode === 'ENFORCE'
+  };
+  try {
+    if (dispatchAlert) await dispatchAlert(project.policy.alertWebhookUrl, incident);
+    else {
+      const { dispatchIncidentAlert } = await import('./alerts.js');
+      await dispatchIncidentAlert(project.policy.alertWebhookUrl, incident);
+    }
+    return { auditRow, containmentApplied, alertQueued: false };
+  } catch (alertError) {
+    try {
+      await queueAlert(projectId, { ...incident, deliveryError: String(alertError?.message || alertError).slice(0, 160) });
+      return { auditRow, containmentApplied, alertQueued: true };
+    } catch (queueError) {
+      console.error('[ArixShield] Critical incident could not be queued:', String(queueError?.message || queueError).slice(0, 160));
+      return { auditRow, containmentApplied, alertQueued: false };
+    }
+  }
+}
+
 export async function recordProjectEvent(projectId, event, { threat = false, countRequest = true } = {}) {
   const keep = Math.max(100, Math.min(1000, Number(process.env.ARIX_EVENT_RETENTION) || 500));
   const kind = threat ? 'threat_logs' : 'live_visitors';
@@ -711,31 +815,7 @@ export async function recordProjectEvent(projectId, event, { threat = false, cou
   }
   // One durable Redis pipeline replaces multiple sequential REST round-trips.
   await pipeline(commands);
-  if (threat) {
-    const auditRow = await recordAuditChainEvent(projectId, safeEvent);
-    const criticalTypes = new Set(['BOLA_200_LEAK_BLOCKED', 'CANARY_KEY_USED', 'GITHUB_SECRET_EXPOSURE', 'AUDIT_CHAIN_BROKEN', 'REDIS_CIRCUIT_OPEN', 'HONEYPOT_ROUTE_HIT', 'CANARY_RECORD_ACCESSED', 'CROSS_ENDPOINT_CORRELATION_ALERT']);
-    if (criticalTypes.has(String(safeEvent.type || ''))) {
-      try {
-        const project = await getJson(`arix:project:${projectId}`);
-        if (project?.policy?.autoContainmentEnabled === true && project.policy.mode === 'DRY_RUN') {
-          project.policy.mode = 'ENFORCE';
-          project.updatedAt = new Date().toISOString();
-          await setJson(`arix:project:${projectId}`, project);
-        }
-        if (typeof project?.policy?.alertWebhookUrl === 'string' && project.policy.alertWebhookUrl) {
-          const { dispatchIncidentAlert } = await import('./alerts.js');
-          try {
-            await dispatchIncidentAlert(project.policy.alertWebhookUrl, { projectId: String(projectId), event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
-          } catch (alertError) {
-            await enqueueIncidentAlert(projectId, { event: safeEvent, audit: auditRow, containment: project?.policy?.autoContainmentEnabled === true });
-            throw alertError;
-          }
-        }
-      } catch (error) {
-        console.warn('[ArixShield] Incident alert/containment workflow did not complete:', String(error?.message || error).slice(0, 180));
-      }
-    }
-  }
+  if (threat) await processCriticalThreatEvent(projectId, safeEvent);
 }
 
 export async function recordApiTelemetryEvent(projectId, event) {

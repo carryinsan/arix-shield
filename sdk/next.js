@@ -1,7 +1,7 @@
 import { inspectRequest, redactSensitiveText } from '../api/_lib/waf-engine.js';
 import { authorizeRequest, filterReadFields, filterWriteFields, isMutatingMethod, normalizeSecurityPath, scopeQuery } from '../api/_lib/authorization.js';
 import { rewriteCapabilityRequest } from '../api/_lib/crypto-trap.js';
-import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, consumeLocalOutageRead, validateWorkflowRequest } from './security-runtime.js';
+import { validateClearanceRequest, routeRequiresClearance, quotaDimensions, makeOutageChallenge, verifyOutageProof, validateWorkflowRequest } from './security-runtime.js';
 import { randomUUID } from 'node:crypto';
 import { sanitizeArixIdentity } from './identity.js';
 import { runWithArixContext, hasScopedDataReceipt } from './context.js';
@@ -337,12 +337,24 @@ export async function protectRequest(request, options = {}) {
     const lowRiskRead = method === 'GET' && (/\/(?:docs|catalog)(?:\/|$)/i.test(pathname));
     if (!lowRiskRead || !options.endpoint || !options.serverKey) return failure(503, 'ArixShield distributed quota service is unavailable.');
     const powHeader = request.headers.get('x-arix-outage-pow');
-    if (!await verifyOutageProof(powHeader, method, pathname)) {
-      const challenge = await makeOutageChallenge({ method, pathname, difficulty: options.outagePowDifficulty ?? 12 });
+    const outageProject = String(options.projectId || cacheIdentity(options) || 'default');
+    const outageRequester = formatIpPrefix(ip) || 'unknown';
+    const outageWindowMs = options.rateLimitWindowMs ?? 60000;
+    const outageProof = await verifyOutageProof(powHeader, method, pathname, {
+      projectId: outageProject,
+      requesterKey: outageRequester,
+      quotaKey: `${outageProject}:${outageRequester}:${subject}:degraded-read`,
+      limit: quotaLimit,
+      windowMs: outageWindowMs
+    });
+    if (!outageProof.valid) {
+      if (outageProof.reason === 'OUTAGE_LOCAL_QUOTA') return failure(429, 'Degraded-mode read quota exceeded.');
+      if (['OUTAGE_REPLAY_CAPACITY', 'OUTAGE_QUOTA_STORE_CAPACITY'].includes(outageProof.reason)) return failure(503, 'Degraded-mode local protection is at capacity.');
+      if (outageProof.reason === 'OUTAGE_POW_REPLAY') return failure(429, 'The degraded-mode proof has already been used.');
+      const challenge = await makeOutageChallenge({ method, pathname, difficulty: options.outagePowDifficulty ?? 12, projectId: outageProject, requesterKey: outageRequester });
       return { allowed: false, status: 428, response: Response.json({ error: 'Control plane unavailable; proof-of-work required.', challenge }, { status: 428, headers: { 'Cache-Control': 'no-store' } }), findings: [] };
     }
-    quota = consumeLocalOutageRead({ key: `${cacheIdentity(options)}:${subject}:${pathname}`, limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000 });
-    if (!quota.allowed) return failure(429, 'Degraded-mode read quota exceeded.');
+    quota = outageProof.quota;
   }
 
   const findings = [...inspection.findings];

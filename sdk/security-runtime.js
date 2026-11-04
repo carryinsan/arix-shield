@@ -1,8 +1,20 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { verifySignedToken, verifyRequestDpopProof, createSignedToken, sha256Hex } from '../api/_lib/crypto-trap.js';
+import { BoundedReplayCache, BoundedWindowQuotaStore } from '../api/_lib/bounded-replay-cache.js';
 
-const outageReplay = new Map();
-const outageBuckets = new Map();
+// The replay cache is process-local because this is the explicitly degraded-mode
+// path. It is hard-bounded globally and per project/requester, and never evicts
+// an unexpired proof. Expiry is heap-driven rather than a full Map scan.
+const existingOutageReplay = globalThis.__ARIX_OUTAGE_REPLAY_CACHE__;
+const outageReplay = existingOutageReplay && typeof existingOutageReplay.admit === 'function' && typeof existingOutageReplay.stats === 'function'
+  ? existingOutageReplay
+  : (globalThis.__ARIX_OUTAGE_REPLAY_CACHE__ = new BoundedReplayCache({ maxEntries: 32768, maxPerNamespace: 8192, maxPerPartition: 256 }));
+const existingOutageBuckets = globalThis.__ARIX_OUTAGE_QUOTA_STORE__;
+const outageBuckets = existingOutageBuckets && typeof existingOutageBuckets.consume === 'function'
+  ? existingOutageBuckets
+  : (globalThis.__ARIX_OUTAGE_QUOTA_STORE__ = new BoundedWindowQuotaStore({ maxEntries: 20000, maxPerNamespace: 4000 }));
+
+function outageScopeHash(value) { return createHash('sha256').update(String(value ?? 'unknown')).digest('hex'); }
 
 export function routeRequiresClearance(pathname, config = {}) {
   if (config === false || config?.enabled === false) return false;
@@ -25,10 +37,9 @@ export async function validateClearanceRequest({ headers, method, url, bodyBytes
   const maximumRisk = Math.max(0, Math.min(100, Number(botProtection.maxRiskScore ?? 50)));
   if (Number(claims.riskScore || 0) > maximumRisk) return { valid: false, reason: 'CLEARANCE_RISK_TOO_HIGH' };
   // JA4 is telemetry only; it must not invalidate a device-bound clearance.
-  const dpop = await verifyRequestDpopProof({ proof, method, url, bodyBytes, expectedThumbprint: claims.dpopThumbprint, clearanceNonce: claims.singleUseNonce, projectId });
-  if (!dpop.valid) return { valid: false, reason: dpop.reason };
   if (typeof consumeProofReplay !== 'function') return { valid: false, reason: 'DPOP_REPLAY_SERVICE_UNAVAILABLE', unavailable: true };
-  try { if (!await consumeProofReplay(dpop.jtiHash)) return { valid: false, reason: 'DPOP_REPLAY' }; } catch { return { valid: false, reason: 'DPOP_REPLAY_SERVICE_UNAVAILABLE', unavailable: true }; }
+  const dpop = await verifyRequestDpopProof({ proof, method, url, bodyBytes, expectedThumbprint: claims.dpopThumbprint, clearanceNonce: claims.singleUseNonce, projectId, consumeReplay: consumeProofReplay });
+  if (!dpop.valid) return { valid: false, reason: dpop.reason, unavailable: dpop.unavailable === true };
   if (botProtection.singleUse === true || /\/(?:signup|checkout)(?:\/|$)/i.test(new URL(url).pathname)) {
     if (typeof consumeSingleUse !== 'function') return { valid: false, reason: 'CLEARANCE_REPLAY_SERVICE_UNAVAILABLE', unavailable: true };
     try {
@@ -111,38 +122,67 @@ export function quotaDimensions({ actor, subnet, tenant, method, pathname, limit
   ];
 }
 
-export async function makeOutageChallenge({ method, pathname, difficulty = 12 }) {
+export async function makeOutageChallenge({ method, pathname, difficulty = 12, projectId = 'default', requesterKey = 'unknown' }) {
   const nonce = randomUUID();
   const normalizedDifficulty = Math.max(8, Math.min(20, Math.floor(Number(difficulty) || 12)));
-  const token = await createSignedToken({ nonce, method: String(method).toUpperCase(), pathname, difficulty: normalizedDifficulty, exp: Date.now() + 60000 }, 'arix-outage-pow');
+  const projectHash = outageScopeHash(projectId);
+  const requesterHash = outageScopeHash(requesterKey);
+  const token = await createSignedToken({ nonce, method: String(method).toUpperCase(), pathname, projectHash, requesterHash, difficulty: normalizedDifficulty, exp: Date.now() + 60000 }, 'arix-outage-pow');
   return { token, nonce, difficulty: normalizedDifficulty, expiresInSeconds: 60 };
 }
 
-export async function verifyOutageProof(headerValue, method, pathname) {
-  if (typeof headerValue !== 'string' || headerValue.length > 4300) return false;
+/**
+ * Verify a degraded-mode proof and consume it only after the local read quota
+ * admits the request. The callback inside BoundedReplayCache is synchronous,
+ * so quota admission and replay insertion cannot interleave within this process.
+ */
+export async function verifyOutageProof(headerValue, method, pathname, {
+  projectId = 'default', requesterKey = 'unknown', quotaKey, limit = 120, windowMs = 60000
+} = {}) {
+  if (typeof headerValue !== 'string' || headerValue.length > 4300) return { valid: false, reason: 'OUTAGE_POW_MALFORMED' };
   const split = headerValue.lastIndexOf(':');
-  if (split < 1) return false;
-  const token = headerValue.slice(0, split); const solution = headerValue.slice(split + 1);
-  if (!/^\d{1,16}$/.test(solution)) return false;
+  if (split < 1) return { valid: false, reason: 'OUTAGE_POW_MALFORMED' };
+  const token = headerValue.slice(0, split);
+  const solution = headerValue.slice(split + 1);
+  if (!/^\d{1,16}$/.test(solution)) return { valid: false, reason: 'OUTAGE_POW_SOLUTION_INVALID' };
   const claims = await verifySignedToken(token, 'arix-outage-pow');
-  if (!claims || claims.method !== String(method).toUpperCase() || claims.pathname !== pathname || !claims.nonce) return false;
-  const now = Date.now();
-  for (const [key, expiry] of outageReplay) if (expiry <= now) outageReplay.delete(key);
-  const replayKey = await sha256Hex(token);
-  if (outageReplay.has(replayKey)) return false;
+  if (!claims || claims.method !== String(method).toUpperCase() || claims.pathname !== pathname || !claims.nonce) return { valid: false, reason: 'OUTAGE_POW_INVALID' };
+  const projectHash = outageScopeHash(projectId);
+  const requesterHash = outageScopeHash(requesterKey);
+  // New challenges are bound to both project and trusted requester prefix.
+  if (claims.projectHash !== projectHash || claims.requesterHash !== requesterHash) return { valid: false, reason: 'OUTAGE_POW_SCOPE_MISMATCH' };
   const digest = await sha256Hex(`${claims.nonce}:${solution}`);
   const bits = Math.max(8, Math.min(20, Number(claims.difficulty) || 12));
-  const hexZeroes = Math.floor(bits / 4); const remaining = bits % 4;
-  if (!digest.startsWith('0'.repeat(hexZeroes)) || (remaining && (parseInt(digest[hexZeroes], 16) >> (4 - remaining)) !== 0)) return false;
-  outageReplay.set(replayKey, now + 60000);
-  return true;
+  const hexZeroes = Math.floor(bits / 4);
+  const remaining = bits % 4;
+  if (!digest.startsWith('0'.repeat(hexZeroes)) || (remaining && (parseInt(digest[hexZeroes], 16) >> (4 - remaining)) !== 0)) return { valid: false, reason: 'OUTAGE_POW_INVALID' };
+
+  const replayKey = await sha256Hex(token);
+  let quota = null;
+  const admission = outageReplay.admit(replayKey, {
+    namespace: projectHash,
+    partition: requesterHash,
+    ttlMs: 60000
+  }, () => {
+    quota = consumeLocalOutageRead({
+      key: String(quotaKey || `${projectHash}:${requesterHash}`).slice(0, 512),
+      namespace: projectHash,
+      limit,
+      windowMs
+    });
+    return quota.allowed;
+  });
+
+  if (!admission.accepted) {
+    if (admission.reason === 'ADMISSION_DENIED' && quota?.reason === 'STORE_CAPACITY') return { valid: false, reason: 'OUTAGE_QUOTA_STORE_CAPACITY', quota };
+    if (admission.reason === 'ADMISSION_DENIED') return { valid: false, reason: 'OUTAGE_LOCAL_QUOTA', quota };
+    if (admission.reason === 'REPLAY') return { valid: false, reason: 'OUTAGE_POW_REPLAY' };
+    if (admission.reason.endsWith('CAPACITY')) return { valid: false, reason: 'OUTAGE_REPLAY_CAPACITY' };
+    return { valid: false, reason: admission.reason || 'OUTAGE_REPLAY_UNAVAILABLE' };
+  }
+  return { valid: true, quota };
 }
 
-export function consumeLocalOutageRead({ key, limit, windowMs = 60000 }) {
-  const now = Date.now(); const capacity = Math.max(1, Math.floor(Number(limit) * 0.25));
-  const prior = outageBuckets.get(key) || { start: now, used: 0 };
-  if (now - prior.start >= windowMs) { prior.start = now; prior.used = 0; }
-  prior.used += 1; outageBuckets.set(key, prior);
-  if (outageBuckets.size > 20000) for (const [id, row] of outageBuckets) if (now - row.start > windowMs * 2) outageBuckets.delete(id);
-  return { allowed: prior.used <= capacity, remaining: Math.max(0, capacity - prior.used), capacity };
+export function consumeLocalOutageRead({ key, namespace = 'default', limit, windowMs = 60000 }) {
+  return outageBuckets.consume({ key, namespace, limit, windowMs });
 }
