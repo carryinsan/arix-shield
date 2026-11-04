@@ -63,6 +63,7 @@ No source-code change can honestly guarantee zero vulnerabilities, perfect bot d
 - Responses can report actual cost through `X-Arix-Actual-Cost`; the SDK reconciles additional quota weight after the response and records cost telemetry. This is an application-reported value and must not be trusted if untrusted clients can set the header; strip client-provided copies and set it only in trusted server code.
 - The Redis/control-plane circuit breaker trips after three failures or an operation reaching 450 ms, opens for 10 seconds and permits one half-open probe. State is process-local, so individual instances can be in different breaker states.
 - During control-plane outage, state-changing and other routes fail closed. Designated low-risk documentation/catalog GET routes may use a 25%-capacity local bucket plus a signed stateless PoW challenge. The local bucket is per process and is not globally consistent; this is a reduced-availability fallback, not equivalent to Redis-backed quotas.
+- The Node and Next.js SDK normal local fallback (when `globalRateLimit: false` or no control-plane endpoint is configured) combines a stable anonymous network-prefix bucket with route and optional verified-device buckets. It does not key anonymous quotas by per-request random IDs. Multi-dimensional admission is atomic, the process-local store is capped at 10,000 live dimensions, and denied path/device churn cannot allocate new counters. This remains per worker and resets on restart; it is not a global or volumetric defense.
 
 ## Production requirements
 

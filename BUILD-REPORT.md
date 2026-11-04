@@ -21,8 +21,8 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
-<!-- ARIX-MANIFEST-FILE-COUNT:119 -->
-<!-- ARIX-MANIFEST-ROOT:a677b1f7257e8db2260b8f1cef0b83a6295029d8988eca410ba06913c00fba43 -->
+<!-- ARIX-MANIFEST-FILE-COUNT:122 -->
+<!-- ARIX-MANIFEST-ROOT:bf91ab4077572ed87847c2e1a4e453802c1c3a17bb2feb5c13fa93aa12633d88 -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification
@@ -115,3 +115,13 @@ These local results are not proof of zero vulnerabilities. No live Upstash Redis
 A second independent review identified four further concerns. The browser quota now has per-DPoP, trusted-network and project-wide dimensions, including the `clearance-key` bootstrap action; client-side automation signals are explicitly treated as forgeable risk inputs rather than proof of humanity; new production signups require email OTP before credentials are created and use atomic email-index publication/cleanup; and the signup path has a shared service-wide rate budget. The follow-up tests pass **231/231**.
 
 **Open supply-chain item:** no lockfile was generated because npm registry resolution was unavailable in this environment. The attempted `npm audit --omit=dev --audit-level=low` returned `ENOLOCK`. No lockfile with guessed transitive dependencies or fabricated integrity hashes was added. Generate and commit a registry-resolved `package-lock.json` in a trusted network-connected environment, then run `npm ci` and `npm audit` before release. See `AUDIT-FOLLOWUP-REMEDIATION.md` for exact dispositions and the remaining limitations.
+
+## Latest independent audit follow-up — 2026-11-04
+
+- Anonymous Node and Next.js SDK local-fallback quotas now use stable network-prefix, route and verified-device dimensions; random request IDs are not quota identities. The process-local store is capped, atomically charges dimensions, and does not allocate per-route/device counters for denied requests. The documented process/worker limitation remains.
+- Every actual security-policy mutation now requires fresh password proof and the enrolled second factor (TOTP or passkey-only WebAuthn step-up), and successful policy changes are added to the audit chain without logging raw webhook URLs.
+- `npm run check` passed with 119 JavaScript/MJS syntax checks, 67 API/SDK imports, static scanner pass and 122 manifest entries.
+- `npm test` passed with 243 tests after the final 100 ms local-quota window compatibility regression was added.
+- `npm run build` passed using disposable build-fixture secrets and key material; the complete build test suite passed. Fixture secrets were not packaged and the source manifests were reset unsigned for the operator's deployment secret.
+- Dependency lockfile remains an outstanding release gate: npm registry DNS resolution returned `EAI_AGAIN`, and `npm audit --omit=dev --audit-level=low` returned `ENOLOCK`. No fabricated lockfile was added.
+- See `AUDIT-LATEST-FOLLOWUP-REMEDIATION.md` for detailed findings, assumptions, test scope and outstanding production checks.

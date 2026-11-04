@@ -5,7 +5,8 @@ import { installProcessEgressFirewall } from './process-egress-firewall.js';
 
 // Opt in before application handlers start; do not mutate global fetch by default.
 if (process.env.ARIX_PROCESS_EGRESS_FIREWALL === 'true') installProcessEgressFirewall();
-import { isIP } from 'node:net';
+import { trustedClientIp } from '../api/_lib/http.js';
+import { buildLocalQuotaDimensions, localNetworkPrefix, processLocalQuotaStore } from './local-rate-limit.js';
 import { inspectRequest, redactSensitiveText } from '../api/_lib/waf-engine.js';
 import { authorizeRequest, filterReadFields, filterWriteFields, normalizeSecurityPath, scopeQuery } from '../api/_lib/authorization.js';
 import { validateOpenApiRequest } from '../api/_lib/schema.js';
@@ -18,7 +19,7 @@ import { validatePayloadSchema, isOpenApiOperation } from '../api/_lib/schema.js
 import { watermarkPayloadWithMarker, spliceCanaryRow, getChameleonRowIdentifier } from '../api/_lib/watermark.js';
 import { findOwnershipMismatch, sealResourceIdsInPayload } from '../api/_lib/crypto-trap.js';
 
-const processBuckets = new Map(); const quotaLeases = new Map(); const policyCache = new Map(); const securitySnapshotCache = new Map(); const reputationCache = new Map(); const keyEpochCache = new Map();
+const quotaLeases = new Map(); const policyCache = new Map(); const securitySnapshotCache = new Map(); const reputationCache = new Map(); const keyEpochCache = new Map();
 const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
 
 async function remotePolicy(endpoint, serverKey) {
@@ -42,12 +43,6 @@ function snapshotBlocks(endpoint, serverKey, identity, _ip) {
   if (!snapshot || Date.now() - snapshot.at >= 30000 || !snapshot.complete || !snapshot.projectId) return null;
   const actorHash = identity && identity !== 'anonymous' ? hashHex(`${snapshot.projectId}:${String(identity).slice(0, 180)}`) : null;
   return Boolean(actorHash && snapshot.actorHashes?.includes(actorHash));
-}
-function localTokenBucket(key, capacity, windowMs, weight = 1) {
-  const now = Date.now(); const refillPerMs = capacity / windowMs; const item = processBuckets.get(key) ?? { tokens: capacity, updated: now };
-  item.tokens = Math.min(capacity, item.tokens + Math.max(0, now - item.updated) * refillPerMs); item.updated = now; const allowed = item.tokens >= weight; if (allowed) item.tokens -= weight; processBuckets.set(key, item);
-  if (processBuckets.size > 10000) for (const [bucketKey, bucket] of processBuckets) if (now - bucket.updated > windowMs * 3) processBuckets.delete(bucketKey);
-  return { allowed, remaining: Math.floor(item.tokens), retryAfterMs: allowed ? 0 : Math.ceil((weight - item.tokens) / refillPerMs) };
 }
 async function distributedTokenBucket({ endpoint, serverKey, scope, algorithm = 'TOKEN_BUCKET', limit, windowMs = 60000, weight = 1, leaseSize = 15, dimensions = null }) {
   const leaseKey = `${endpoint}:${serverKey.slice(-10)}:${algorithm}:${windowMs}:${scope}`;
@@ -95,8 +90,7 @@ async function cachedReputation(endpoint, serverKey, ip, userAgent, provider, ac
 }
 function resolveClientIp(req, options) {
   if (typeof options.getClientIp === 'function') { const value = options.getClientIp(req); return typeof value === 'string' && value.length <= 64 ? value : ''; }
-  if (process.env.VERCEL === '1' && typeof req.headers?.['x-real-ip'] === 'string') return req.headers['x-real-ip'].split(',')[0].trim().slice(0, 64);
-  return String(req.socket?.remoteAddress || req.connection?.remoteAddress || '').slice(0, 64);
+  return trustedClientIp(req) || '';
 }
 function getGeoHints(req) {
   const latitude = Number(req.headers?.['x-vercel-ip-latitude']); const longitude = Number(req.headers?.['x-vercel-ip-longitude']);
@@ -311,7 +305,8 @@ export function createArixShield(options = {}) {
       const valid = validateOpenApiRequest(options.openapiDocument, { method, url, headers: req.headers, body: workingBody });
       if (!valid.valid) return sendDecision(res, 400, { error: 'Request does not match the declared OpenAPI contract.' });
     }
-    const cacheKey = `${securityActor}:${method}:${pathname}`; const cachedUntil = localBlockCache.get(cacheKey) || 0;
+    const blockActor = identity === 'anonymous' && !userId ? `network:${localNetworkPrefix(clientIp)}` : securityActor;
+    const cacheKey = `${blockActor}:${method}:${pathname}`; const cachedUntil = localBlockCache.get(cacheKey) || 0;
     if (cachedUntil > Date.now()) return sendDecision(res, 429, { error: 'Request temporarily rate-limited by ArixShield.', retryAfterMs: cachedUntil - Date.now() });
     if (cachedUntil) localBlockCache.delete(cacheKey);
     let policy = { mode, rateLimitPerMinute: limit, blockDatacenterAsn: false, threatFeedEnabled: true };
@@ -392,8 +387,14 @@ export function createArixShield(options = {}) {
     if (weightProvider) { try { requestedWeight = await weightProvider(req, { body: workingBody, identity, ip: clientIp, method, path: pathname, policy }); } catch (error) { options.onPolicyError?.(error); if (options.failClosedRateLimitWeight === true) return sendDecision(res, 503, { error: 'ArixShield quota weight could not be calculated.' }); requestedWeight = 1; } }
     const weight = Math.max(1, Math.min(quotaLimit, Math.ceil(Number(requestedWeight) || 1)));
     const dimensions = quotaDimensions({ actor: securityActor, subnet: formatIpPrefix(clientIp), tenant: tenantId || options.projectId || endpoint, method, pathname, limit: quotaLimit });
+    const localDimensions = buildLocalQuotaDimensions({
+      scope: `${endpoint}\0${String(serverKey || '')}\0${tenantId || options.projectId || options.tenantId || ''}`,
+      identity, actorIdentity: securityActor, authenticated: Boolean(userId || identity !== 'anonymous'),
+      networkIp: clientIp, method, pathname, dpopVerified, actorLimit: quotaLimit, routeLimit: quotaLimit,
+      networkLimit: Math.max(quotaLimit, Math.min(100000, Math.floor(Number(options.anonymousNetworkRateLimitPerMinute) || baseQuotaLimit * 10)))
+    });
     let quota;
-    try { quota = useGlobalRateLimit ? await distributedTokenBucket({ endpoint, serverKey, scope: `${securityActor}:${method}:${pathname}`, algorithm: options.rateLimitAlgorithm ?? 'TOKEN_BUCKET', limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000, weight, dimensions }) : localTokenBucket(cacheKey, quotaLimit, options.rateLimitWindowMs ?? 60000, weight); }
+    try { quota = useGlobalRateLimit ? await distributedTokenBucket({ endpoint, serverKey, scope: `${securityActor}:${method}:${pathname}`, algorithm: options.rateLimitAlgorithm ?? 'TOKEN_BUCKET', limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000, weight, dimensions }) : processLocalQuotaStore.consume(localDimensions, options.rateLimitWindowMs ?? 60000, weight); }
     catch (error) {
       options.onTelemetryError?.(error);
       const lowRiskRead = method === 'GET' && /\/(?:docs|catalog)(?:\/|$)/i.test(pathname);

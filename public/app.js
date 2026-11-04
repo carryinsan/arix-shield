@@ -191,7 +191,7 @@ def arix_telemetry(response):
     // Bind dashboard-only elements explicitly; relying on implicit window globals for HTML IDs
     // breaks in strict mode and differs across browsers.
     const feedWarning = $('#threat-feed-warning'); const witnessStatus = $('#audit-witness-status'); const auditDownload = $('#download-audit-bundle');
-    let originsDirty = false; let dashboardTotpEnabled = false; let dashboardPasskeyRequired = false; let currentPolicyMode = 'ENFORCE';
+    let originsDirty = false; let dashboardTotpEnabled = false; let dashboardPasskeyRequired = false; let currentPolicyMode = 'ENFORCE'; let currentPolicy = {};
     const promptStepUp = async (purpose) => {
       const proof = await requestStepUp({ title: 'Confirm sensitive change', description: `Confirm your identity to ${purpose}.`, requirePassword: true, requireTotp: dashboardTotpEnabled });
       if (!proof) return null;
@@ -425,12 +425,35 @@ def arix_telemetry(response):
       const terminal = $('#threat-terminal'); terminal.replaceChildren(); if (!rows.length) { terminal.textContent = 'No threats recorded for this project.'; return; }
       rows.slice(0, 18).forEach((row) => { const line = document.createElement('div'); const time = row.timestamp ? new Date(row.timestamp).toLocaleTimeString() : '--:--:--'; const label = row.type || 'SECURITY_EVENT'; const detail = row.reason || (Array.isArray(row.findings) ? row.findings.map((item) => item.category).join(', ') : row.path || 'Event recorded'); line.textContent = `[${time}] ${label} :: ${detail}`; terminal.append(line); if (row.mirage) { const payload = document.createElement('div'); payload.textContent = ` !³ synthetic response ${JSON.stringify(row.mirage).slice(0, 360)}`; terminal.append(payload); } });
     }
-    function syncPolicy(policy) {
-      currentPolicyMode = policy.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE'; $('#policy-mode').value = currentPolicyMode; $('#policy-dc').checked = Boolean(policy.blockDatacenterAsn); $('#policy-deception').checked = policy.deceptionEnabled !== false; $('#policy-abuse').checked = policy.abuseProtectionEnabled === true; $('#policy-feeds').checked = policy.threatFeedEnabled !== false; $('#policy-geo').checked = policy.geoVelocityEnabled === true; $('#policy-shadow').checked = policy.shadowApiCatalogEnabled === true; $('#policy-forensic').checked = policy.forensicReplayEnabled === true; $('#policy-limit').value = Number(policy.rateLimitPerMinute) || 120; $('#policy-alert-webhook').value = policy.alertWebhookUrl || ''; $('#policy-auto-containment').checked = policy.autoContainmentEnabled === true;
+    function syncPolicy(policy = {}) {
+      currentPolicy = {
+        mode: policy.mode === 'DRY_RUN' ? 'DRY_RUN' : 'ENFORCE',
+        rateLimitPerMinute: Number(policy.rateLimitPerMinute) || 120,
+        blockDatacenterAsn: Boolean(policy.blockDatacenterAsn),
+        deceptionEnabled: policy.deceptionEnabled !== false,
+        abuseProtectionEnabled: policy.abuseProtectionEnabled === true,
+        threatFeedEnabled: policy.threatFeedEnabled !== false,
+        geoVelocityEnabled: policy.geoVelocityEnabled === true,
+        shadowApiCatalogEnabled: policy.shadowApiCatalogEnabled === true,
+        forensicReplayEnabled: policy.forensicReplayEnabled === true,
+        alertWebhookUrl: policy.alertWebhookUrl || '',
+        autoContainmentEnabled: policy.autoContainmentEnabled === true
+      };
+      currentPolicyMode = currentPolicy.mode; $('#policy-mode').value = currentPolicy.mode; $('#policy-dc').checked = currentPolicy.blockDatacenterAsn; $('#policy-deception').checked = currentPolicy.deceptionEnabled; $('#policy-abuse').checked = currentPolicy.abuseProtectionEnabled; $('#policy-feeds').checked = currentPolicy.threatFeedEnabled; $('#policy-geo').checked = currentPolicy.geoVelocityEnabled; $('#policy-shadow').checked = currentPolicy.shadowApiCatalogEnabled; $('#policy-forensic').checked = currentPolicy.forensicReplayEnabled; $('#policy-limit').value = currentPolicy.rateLimitPerMinute; $('#policy-alert-webhook').value = currentPolicy.alertWebhookUrl; $('#policy-auto-containment').checked = currentPolicy.autoContainmentEnabled;
     }
     $('#save-policy')?.addEventListener('click', async () => {
       const notice = $('#policy-notice'); const payload = { action: 'policy', mode: $('#policy-mode').value, blockDatacenterAsn: $('#policy-dc').checked, deceptionEnabled: $('#policy-deception').checked, abuseProtectionEnabled: $('#policy-abuse').checked, threatFeedEnabled: $('#policy-feeds').checked, geoVelocityEnabled: $('#policy-geo').checked, shadowApiCatalogEnabled: $('#policy-shadow').checked, forensicReplayEnabled: $('#policy-forensic').checked, rateLimitPerMinute: Number($('#policy-limit').value), alertWebhookUrl: $('#policy-alert-webhook').value.trim(), autoContainmentEnabled: $('#policy-auto-containment').checked };
-      try { if (payload.mode === 'DRY_RUN' && currentPolicyMode !== 'DRY_RUN') { const stepUp = await promptStepUp('switch enforcement to DRY_RUN'); if (!stepUp) { showNotice(notice, 'Policy change canceled.', 'info'); return; } Object.assign(payload, stepUp); } const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) }); syncPolicy(result.policy); showNotice(notice, 'Security policy saved.', 'success'); } catch (error) { showNotice(notice, error.message, 'error'); }
+      try {
+        const changedFields = ['mode', 'rateLimitPerMinute', 'blockDatacenterAsn', 'deceptionEnabled', 'abuseProtectionEnabled', 'threatFeedEnabled', 'geoVelocityEnabled', 'shadowApiCatalogEnabled', 'forensicReplayEnabled', 'alertWebhookUrl', 'autoContainmentEnabled'];
+        const changed = changedFields.some((key) => String(currentPolicy[key] ?? '') !== String(payload[key] ?? ''));
+        if (changed) {
+          const stepUp = await promptStepUp('change security policy');
+          if (!stepUp) { showNotice(notice, 'Policy change canceled.', 'info'); return; }
+          Object.assign(payload, stepUp);
+        }
+        const result = await jsonFetch('/api/telemetry', { method: 'POST', body: JSON.stringify(payload) });
+        syncPolicy(result.policy); showNotice(notice, result.auditRecorded === false ? 'Policy saved, but audit confirmation needs attention.' : 'Security policy saved and audited.', result.auditRecorded === false ? 'error' : 'success');
+      } catch (error) { showNotice(notice, error.message, 'error'); }
     });
     $('#decode-leak')?.addEventListener('click', async () => {
       const notice = $('#decode-notice'); const resultNode = $('#decode-result'); resultNode.classList.add('hidden');

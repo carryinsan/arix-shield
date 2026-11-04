@@ -2,8 +2,8 @@
   "schema": "arixshield.integrity.v1",
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
-  "fileCount": 119,
-  "rootDigest": "a677b1f7257e8db2260b8f1cef0b83a6295029d8988eca410ba06913c00fba43",
+  "fileCount": 122,
+  "rootDigest": "bf91ab4077572ed87847c2e1a4e453802c1c3a17bb2feb5c13fa93aa12633d88",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -223,7 +223,7 @@
     },
     {
       "path": "api/telemetry.js",
-      "sha256": "158ad392b5cbde4f702cef2a23c52a8db236cfc12050a0c51cef83f620540a36"
+      "sha256": "0639074838fee924992e5b7548ff88589f79dfc8869e6b6cda8c5eae26bdba81"
     },
     {
       "path": "edge/gateway.mjs",
@@ -243,7 +243,7 @@
     },
     {
       "path": "public/app.js",
-      "sha256": "fb661a849925b782eae68bec83fd247646a6c1308134184b4a4e99659671ab9a"
+      "sha256": "6aaa53594a5a3d2fd4937657a30333dc2b4fb60cba5b1c586fdf8618dc7e20da"
     },
     {
       "path": "public/arix-client.js",
@@ -346,12 +346,16 @@
       "sha256": "9ba545034c0ad1d8c26744351f3d15fd6bd1d48f78440d72ef3a79e215723da8"
     },
     {
+      "path": "sdk/local-rate-limit.js",
+      "sha256": "5ce427b48e9636ae96fc57fdffd28e635b22baa7ebf132d00cb9208f30a973a6"
+    },
+    {
       "path": "sdk/next.js",
-      "sha256": "7f736ec3f75185ab5d1aaa6b3001afa71874441fe923982ee0ffdb27d2059d39"
+      "sha256": "dd4c16b9034d19291dcdc9ff85585e48fdf99393eb0972a25f5c1153b1b2b1c9"
     },
     {
       "path": "sdk/node.js",
-      "sha256": "e07a57662de81d95361394b0a7e67f5dea39566de5f00695a2eea8a20e256f7f"
+      "sha256": "d7f3c02a268d2c84df738ec8b7cc1b2067975e37f677156ac69ed28185a30179"
     },
     {
       "path": "sdk/process-egress-firewall.js",
@@ -450,6 +454,10 @@
       "sha256": "39346b06536037fcc5fdfc93205278d77e3a4a5ab1de8ffaf675966f4c323f9b"
     },
     {
+      "path": "test/local-rate-limit-isolation.test.js",
+      "sha256": "b8b11a27840c202345c50855aadbb0278164381964c1113e25803820bad5be7d"
+    },
+    {
       "path": "test/new-domain-primitives.test.js",
       "sha256": "6e498bf9d269024973578f268ac8f5729b34fde6782ec9e04e794bcbeb00c7e0"
     },
@@ -472,6 +480,10 @@
     {
       "path": "test/security.test.js",
       "sha256": "a8d5a17142600e4582006f72eb05ac4b73b4d07c34f6a71964e965febbaa7c63"
+    },
+    {
+      "path": "test/telemetry-policy-stepup.test.js",
+      "sha256": "75dce94f7de9a70c58d090e3c3700b14ed2da9234382c8c4766f5e0bb2175512"
     },
     {
       "path": "test/tenant-isolation-attack-workflows.test.js",

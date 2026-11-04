@@ -13,8 +13,9 @@ import { arixSafeFetch } from './safe-fetch.js';
 import { validatePayloadSchema, isOpenApiOperation } from '../api/_lib/schema.js';
 import { watermarkPayloadWithMarker, spliceCanaryRow, getChameleonRowIdentifier } from '../api/_lib/watermark.js';
 import { findOwnershipMismatch, rewriteCapabilityPath, sealResourceIdsInPayload } from '../api/_lib/crypto-trap.js';
+import { buildLocalQuotaDimensions, localNetworkPrefix, processLocalQuotaStore } from './local-rate-limit.js';
 
-const buckets = new Map(); const quotaLeases = new Map(); const policyCache = new Map(); const securitySnapshotCache = new Map(); const reputationCache = new Map(); const blockCache = new Map(); const keyEpochCache = new Map();
+const quotaLeases = new Map(); const policyCache = new Map(); const securitySnapshotCache = new Map(); const reputationCache = new Map(); const blockCache = new Map(); const keyEpochCache = new Map();
 const DATA_CENTER_ASNS = new Set(['16509', '14618', '14061', '63949', '16276', '24940', '20473', '9009']);
 
 function cacheIdentity(options) { return `${String(options.endpoint || '')}:${String(options.serverKey || '').slice(-10)}`; }
@@ -57,11 +58,6 @@ async function snapshotBlocks(options, identity, _ip) {
   const actorHash = identity && identity !== 'anonymous' ? await digest(`${snapshot.projectId}:${String(identity).slice(0, 180)}`) : null;
   return Boolean(actorHash && snapshot.actorHashes?.includes(actorHash));
 }
-function consume(key, limit, windowMs) {
-  const now = Date.now(); const bucket = buckets.get(key) ?? { count: 0, start: now }; if (now - bucket.start >= windowMs) { bucket.count = 0; bucket.start = now; } bucket.count++; buckets.set(key, bucket);
-  if (buckets.size > 10000) for (const [id, item] of buckets) if (now - item.start > windowMs * 3) buckets.delete(id);
-  return { allowed: bucket.count <= limit, remaining: Math.max(0, limit - bucket.count), resetAt: bucket.start + windowMs };
-}
 async function distributedQuota(options, scope, { algorithm, limit, windowMs, weight, leaseSize = 15, dimensions = null }) {
   const leaseKey = `${options.endpoint}:${options.serverKey.slice(-10)}:${algorithm}:${windowMs}:${scope}`;
   const now = Date.now(); const cached = quotaLeases.get(leaseKey);
@@ -102,7 +98,12 @@ async function cachedReputation(options, ip, userAgent, provider, actorId = 'ano
 }
 function getClientIp(request, options) {
   if (typeof options.getClientIp === 'function') { const value = options.getClientIp(request); return typeof value === 'string' ? value.slice(0, 64) : ''; }
-  if (process.env.VERCEL === '1') return String(request.headers.get('x-real-ip') || request.headers.get('x-vercel-forwarded-for') || '').split(',')[0].trim().slice(0, 64);
+  if (process.env.VERCEL === '1') {
+    const raw = request.headers.get('x-real-ip') || '';
+    if (raw && raw === raw.trim() && !raw.includes(',') && localNetworkPrefix(raw) !== 'unknown') return raw;
+  }
+  // Self-hosted deployments must provide getClientIp from a trusted ingress.
+  // Without one, anonymous traffic shares the conservative `unknown` bucket.
   return '';
 }
 function geoHints(request) {
@@ -285,7 +286,8 @@ export async function protectRequest(request, options = {}) {
     if (subject === 'anonymous' && !authUserId && clearance.thumbprint) securityActor = `device:${clearance.thumbprint}`;
   }
 
-  const cacheKey = `${securityActor}:${method}:${pathname}`; const blockedUntil = blockCache.get(cacheKey) || 0;
+  const blockActor = subject === 'anonymous' && !authUserId ? `network:${localNetworkPrefix(clientIp)}` : securityActor;
+  const cacheKey = `${blockActor}:${method}:${pathname}`; const blockedUntil = blockCache.get(cacheKey) || 0;
   if (blockCache.size > 10000) for (const [id, expiry] of blockCache) if (expiry <= Date.now()) blockCache.delete(id);
   if (blockedUntil > Date.now()) return failure(429, 'Request temporarily rate-limited by ArixShield.');
   if (blockedUntil) blockCache.delete(cacheKey);
@@ -319,10 +321,16 @@ export async function protectRequest(request, options = {}) {
   const quotaLimit = Math.max(1, Math.min(10000, Math.floor(baseQuotaLimit * trustMultiplier)));
   const weight = Math.max(1, Math.min(quotaLimit, Math.ceil(Number(requestedWeight) || 1)));
   const dimensions = quotaDimensions({ actor: securityActor, subnet: formatIpPrefix(ip), tenant: tenantId || projectId || cacheIdentity(options), method, pathname, limit: quotaLimit });
+  const localDimensions = buildLocalQuotaDimensions({
+    scope: `${String(options.endpoint || '')}\0${String(options.serverKey || '')}\0${tenantId || projectId || ''}`,
+    identity: subject, actorIdentity: securityActor, authenticated: Boolean(authUserId || subject !== 'anonymous'),
+    networkIp: ip, method, pathname, dpopVerified, actorLimit: quotaLimit, routeLimit: quotaLimit,
+    networkLimit: Math.max(quotaLimit, Math.min(100000, Math.floor(Number(options.anonymousNetworkRateLimitPerMinute) || baseQuotaLimit * 10)))
+  });
   let quota;
   try {
     const useGlobalRateLimit = options.globalRateLimit !== false && Boolean(options.endpoint && options.serverKey);
-    quota = useGlobalRateLimit ? await distributedQuota(options, `${securityActor}:${method}:${pathname}`, { algorithm: options.rateLimitAlgorithm ?? 'TOKEN_BUCKET', limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000, weight, leaseSize: options.quotaLeaseSize ?? 15, dimensions }) : consume(cacheKey, quotaLimit, options.rateLimitWindowMs ?? 60000);
+    quota = useGlobalRateLimit ? await distributedQuota(options, `${securityActor}:${method}:${pathname}`, { algorithm: options.rateLimitAlgorithm ?? 'TOKEN_BUCKET', limit: quotaLimit, windowMs: options.rateLimitWindowMs ?? 60000, weight, leaseSize: options.quotaLeaseSize ?? 15, dimensions }) : processLocalQuotaStore.consume(localDimensions, options.rateLimitWindowMs ?? 60000, weight);
     if (!quota || typeof quota.allowed !== 'boolean') throw new Error('ArixShield returned an invalid distributed quota decision.');
   } catch (error) {
     options.onPolicyError?.(error);

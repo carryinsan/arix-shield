@@ -1,10 +1,10 @@
 import { createCompatibleHandler } from './_lib/vercel-handler.js';
 import { sendJson, readJson, methodNotAllowed, sameOriginRequest, getNetworkHints, normalizeOrigin } from './_lib/http.js';
 import { requireSession } from './_lib/session.js';
-import { getJson, setJson, getProjectDashboardSnapshot } from './_lib/redis.js';
+import { getJson, setJson, getProjectDashboardSnapshot, recordAuditChainEvent } from './_lib/redis.js';
 import { queryClickHouseSnapshot, queryTinybirdSnapshot } from './_lib/analytics.js';
 import { getThreatFeedStatus } from './_lib/reputation.js';
-import { createHmac } from 'node:crypto';
+import { createHmac, createHash } from 'node:crypto';
 import { verifyStepUpCredentials } from './_lib/step-up.js';
 
 function parseEvents(values) {
@@ -16,6 +16,29 @@ function parseEvents(values) {
       return [];
     }
   });
+}
+
+const AUDITED_POLICY_FIELDS = Object.freeze([
+  'mode', 'rateLimitPerMinute', 'blockDatacenterAsn', 'canaryRowsEnabled',
+  'deceptionEnabled', 'abuseProtectionEnabled', 'geoVelocityEnabled',
+  'threatFeedEnabled', 'shadowApiCatalogEnabled', 'forensicReplayEnabled',
+  'autoContainmentEnabled', 'alertWebhookUrl'
+]);
+
+function changedPolicyFields(previous, next) {
+  return AUDITED_POLICY_FIELDS.filter((key) => JSON.stringify(previous?.[key] ?? null) !== JSON.stringify(next?.[key] ?? null));
+}
+
+function policyAuditView(policy = {}) {
+  const view = {};
+  for (const key of AUDITED_POLICY_FIELDS) {
+    if (key === 'alertWebhookUrl') continue;
+    if (Object.hasOwn(policy, key)) view[key] = policy[key];
+  }
+  const webhook = typeof policy.alertWebhookUrl === 'string' ? policy.alertWebhookUrl : '';
+  view.alertWebhookConfigured = Boolean(webhook);
+  view.alertWebhookFingerprint = webhook ? createHash('sha256').update(webhook).digest('hex') : null;
+  return view;
 }
 
 function buildAllowedOrigins(body) {
@@ -195,14 +218,34 @@ async function handler(req, res) {
       }
     }
 
-    if (body.mode === 'DRY_RUN' && project.policy?.mode !== 'DRY_RUN') {
+    const previousPolicy = { ...(project.policy || {}) };
+    const changedFields = changedPolicyFields(previousPolicy, nextPolicy);
+    if (changedFields.length) {
       const stepUp = await verifyStepUpCredentials({ ownerId: auth.session?.ownerId || project.ownerId, projectId: project.id, password: body.password, totpCode: body.totpCode, passkeyChallenge: body.passkeyChallenge, passkeyCredential: body.passkeyCredential, req });
-      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error });
+      if (!stepUp.ok) return sendJson(res, stepUp.status, { error: stepUp.error, stepUpRequired: stepUp.stepUpRequired === true, ...(stepUp.challengeType ? { challengeType: stepUp.challengeType } : {}) });
+
+      // Persist the authorized policy change, then append the before/after
+      // transition to the tamper-evident chain. Never store the raw webhook URL
+      // in audit metadata; retain only a boolean and a one-way fingerprint.
+      project.policy = nextPolicy;
+      project.updatedAt = new Date().toISOString();
+      await setJson(`arix:project:${project.id}`, project);
+      try {
+        await recordAuditChainEvent(project.id, {
+          type: 'SECURITY_POLICY_CHANGED',
+          actorId: String(auth.session?.ownerId || project.ownerId),
+          changedFields,
+          previousPolicy: policyAuditView(previousPolicy),
+          updatedPolicy: policyAuditView(nextPolicy),
+          changedAt: project.updatedAt
+        });
+      } catch (error) {
+        console.error('[ArixShield] Security policy was saved but audit-chain confirmation failed:', String(error?.message || error).slice(0, 180));
+        return sendJson(res, 503, { error: 'Security policy was saved, but audit-chain confirmation failed. Verify the current policy before retrying.', saved: true, auditRecorded: false });
+      }
+      return sendJson(res, 200, { ok: true, policy: nextPolicy, auditRecorded: true });
     }
-    project.policy = nextPolicy;
-    project.updatedAt = new Date().toISOString();
-    await setJson(`arix:project:${project.id}`, project);
-    return sendJson(res, 200, { ok: true, policy: nextPolicy });
+    return sendJson(res, 200, { ok: true, policy: nextPolicy, auditRecorded: true, unchanged: true });
   } catch (error) {
     console.error('[ArixShield] /api/telemetry request failed:', error?.stack || error);
     const status = Number(error.statusCode) || 503;
