@@ -3,7 +3,7 @@
   "algorithm": "SHA-256",
   "generatedAt": "deterministic",
   "fileCount": 126,
-  "rootDigest": "e04cc3e36b13878c1bd3fb7f18a53ca88364431091bc61bb24031f3ab4f9a99c",
+  "rootDigest": "d6c8345ef4cc055a733e73a78af258efeeaff5d7d4a1983b9d20dbbb6f5268ad",
   "files": [
     {
       "path": "api/_lib/abuse.js",
@@ -179,7 +179,7 @@
     },
     {
       "path": "api/_lib/waf-engine.js",
-      "sha256": "3d9b67aa7842c26bb333446f660fb8d45342609af4c113bcf2ad8dbd25a9eae3"
+      "sha256": "97fa1b7fd961c16fce148fbe5a5ca2e1b24a5ab5b0c6ee204c9b8a954889be69"
     },
     {
       "path": "api/_lib/watermark.js",
@@ -491,7 +491,7 @@
     },
     {
       "path": "test/security.test.js",
-      "sha256": "a8d5a17142600e4582006f72eb05ac4b73b4d07c34f6a71964e965febbaa7c63"
+      "sha256": "4ffed85599f87a9e96ae68ec4ea80d1133a43384d4aaf12b43f758546cf9647f"
     },
     {
       "path": "test/telemetry-policy-stepup.test.js",

@@ -22,7 +22,7 @@ One pinned first-party runtime helper, `@vercel/functions@3.10.5`, is declared f
 The canonical source manifest is `docs/INTEGRITY-MANIFEST.json`, mirrored byte-for-byte at `api/_integrity-manifest.json`. The distributed files contain SHA-256 hashes but no HMAC signature; they are intentionally unsigned so the operator can sign them with the actual production master secret in trusted CI. `npm run check` validates the manifest, its mirror, imported modules, syntax, and the repository's static scanner. Do not manually edit the generated metadata markers.
 
 <!-- ARIX-MANIFEST-FILE-COUNT:126 -->
-<!-- ARIX-MANIFEST-ROOT:e04cc3e36b13878c1bd3fb7f18a53ca88364431091bc61bb24031f3ab4f9a99c -->
+<!-- ARIX-MANIFEST-ROOT:d6c8345ef4cc055a733e73a78af258efeeaff5d7d4a1983b9d20dbbb6f5268ad -->
 <!-- ARIX-SECURITY-CONSTANTS:RSA_MIN_BITS=3072;SCRYPT_N=32768;SCRYPT_R=8;SCRYPT_P=3;LEGACY_PBKDF2_ITERATIONS=600000;HIBP_LOOKUP_TIMEOUT_MS=400 -->
 
 ## Local verification

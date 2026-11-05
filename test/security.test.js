@@ -21,6 +21,50 @@ test('opaque credentials and rich-text SQL/Markdown do not trigger SQL heuristic
 });
 
 test('WAF detects representative SSRF and SQLi payloads', () => { const ssrf = inspectRequest({ method: 'GET', url: '/fetch?url=http://169.254.169.254/latest/meta-data' }); const sqli = inspectRequest({ method: 'POST', url: '/api/search', headers: { 'content-type': 'application/json' }, body: { q: "' OR 1=1" } }); assert.ok(ssrf.findings.some((finding) => finding.category === 'SSRF')); assert.ok(sqli.findings.some((finding) => finding.category === 'SQL_INJECTION')); });
+
+test('WAF does not classify ordinary prose or unrelated metadata as SSRF', () => {
+  const prose = 'For local development, localhost and 127.0.0.1 are common examples; cloud metadata is often at 169.254.169.254 or metadata.google.internal.';
+  const samples = [
+    inspectRequest({ method: 'POST', url: '/api/chat', headers: { 'content-type': 'text/plain', 'user-agent': prose }, body: prose, production: true }),
+    inspectRequest({ method: 'POST', url: '/api/messages', headers: { 'content-type': 'application/json' }, body: { message: prose, title: '127.0.0.1 is a loopback address' }, production: true }),
+    inspectRequest({ method: 'GET', url: `/search?q=${encodeURIComponent(prose)}`, production: true }),
+    inspectRequest({ method: 'GET', url: '/search?message=http%3A%2F%2F127.0.0.1%2Fadmin', production: true }),
+    inspectRequest({ method: 'GET', url: '/search', headers: { 'x-note': 'http://127.0.0.1 is shown as an example' }, production: true })
+  ];
+  for (const result of samples) assert.equal(result.findings.some((finding) => finding.category === 'SSRF'), false, JSON.stringify(result.findings));
+});
+
+test('WAF still blocks unsafe hosts in explicit SSRF destination sinks', () => {
+  const samples = [
+    inspectRequest({ method: 'GET', url: '/fetch?url=http%3A%2F%2F127.0.0.1%2Fadmin', production: true }),
+    inspectRequest({ method: 'GET', url: '/fetch?target=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data', production: true }),
+    inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { sourceUrl: 'https://metadata.google.internal/computeMetadata/v1/' }, production: true }),
+    inspectRequest({ method: 'POST', url: '/api/webhooks', headers: { 'content-type': 'application/json' }, body: { webhookUrl: 'http://100.100.100.200/latest/meta-data' }, production: true }),
+    inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { url: 'http://2130706433/admin' }, production: true }),
+    inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { url: 'https%253A%252F%252Flocalhost%252Fadmin' }, production: true }),
+    inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { url: '//localhost/admin' }, production: true }),
+    inspectRequest({ method: 'GET', url: '/fetch', headers: { 'x-fetch-url': 'http://localhost:8080/private' }, production: true })
+  ];
+  for (const result of samples) assert.ok(result.findings.some((finding) => finding.category === 'SSRF'), JSON.stringify(result.findings));
+});
+
+test('WAF applies destination-aware SSRF inspection to multipart fields only', () => {
+  const boundary = 'ssrf-field-test';
+  const makeMultipart = (fieldName) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name=\"${fieldName}\"\r\n\r\nhttp://127.0.0.1/private\r\n--${boundary}--\r\n`);
+  const headers = { 'content-type': `multipart/form-data; boundary=${boundary}` };
+  const destination = inspectRequest({ method: 'POST', url: '/upload', headers, rawBody: makeMultipart('url'), production: true });
+  const prose = inspectRequest({ method: 'POST', url: '/upload', headers, rawBody: makeMultipart('comment'), production: true });
+  assert.ok(destination.findings.some((finding) => finding.category === 'SSRF'));
+  assert.equal(prose.findings.some((finding) => finding.category === 'SSRF'), false);
+});
+
+test('WAF evaluates only URL hosts in destination fields and does not confuse userinfo or path text with a local destination', () => {
+  const publicDestination = inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { url: 'https://127.0.0.1.example.com/path' }, production: true });
+  const userinfo = inspectRequest({ method: 'POST', url: '/api/import', headers: { 'content-type': 'application/json' }, body: { url: 'https://127.0.0.1@public.example.com/path' }, production: true });
+  const ordinaryPath = inspectRequest({ method: 'GET', url: '/articles/localhost/127.0.0.1/169.254.169.254', production: true });
+  for (const result of [publicDestination, userinfo, ordinaryPath]) assert.equal(result.findings.some((finding) => finding.category === 'SSRF'), false, JSON.stringify(result.findings));
+});
+
 test('JSON schema validator enforces required fields, bounds and additionalProperties', () => { const schema = { type: 'object', required: ['name'], additionalProperties: false, properties: { name: { type: 'string', minLength: 2 }, age: { type: 'integer', minimum: 0, maximum: 120 } } }; assert.equal(validateJsonSchema({ name: 'Ada', age: 30 }, schema).valid, true); assert.equal(validateJsonSchema({ name: 'A', age: 200, admin: true }, schema).valid, false); });
 test('parsed OpenAPI operations resolve local references and Zod-like safeParse schemas', () => { const spec = { openapi: '3.0.3', paths: { '/api/users/{id}': { patch: { operationId: 'updateUser', requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/UserPatch' } } } } } } }, components: { schemas: { UserPatch: { type: 'object', required: ['displayName'], additionalProperties: false, properties: { displayName: { type: 'string', minLength: 2 } } } } } }; const compiled = compileOpenApiRequestSchema(spec, 'PATCH', '/api/users/44'); assert.equal(compiled.operationId, 'updateUser'); assert.equal(validatePayloadSchema({ displayName: 'Ada' }, compiled).valid, true); assert.equal(validatePayloadSchema({ displayName: 'A' }, compiled).valid, false); const zodLike = { safeParse: (value) => value?.ok ? { success: true } : { success: false, error: { issues: [{ path: ['ok'], message: 'required' }] } } }; assert.equal(validatePayloadSchema({ ok: true }, zodLike).valid, true); assert.equal(validatePayloadSchema({}, zodLike).valid, false); });
 test('DLP redacts common provider secrets, email, SSN and valid Luhn cards', () => { const fakeStripeKey = ['sk', 'live', '1234567890abcdefghijkl'].join('_'); const input = `AKIAIOSFODNN7EXAMPLE ${fakeStripeKey} user@example.com 123-45-6789 4111 1111 1111 1111`; const result = redactSensitiveText(input); for (const type of ['AWS_ACCESS_KEY', 'STRIPE_SECRET', 'EMAIL', 'US_SSN', 'CARD_CANDIDATE']) assert.ok(result.detected.includes(type)); assert.ok(!result.text.includes('user@example.com')); });

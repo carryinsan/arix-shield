@@ -9,8 +9,6 @@ const STREAM_OVERLAP_BYTES = 512;
 const NON_SQL_RULES = [
   { id: 'XSS_SCRIPT', category: 'XSS', severity: 'high', pattern: /<\s*script\b|javascript\s*:|\bon\w+\s*=\s*(?:['"]?\s*)?(?:alert|prompt|confirm)\s*\(/i },
   { id: 'XSS_HTML', category: 'XSS', severity: 'medium', pattern: /<\s*(?:iframe|object|embed|svg|math)\b[^>]*(?:onload|onerror|href|src)\s*=/i },
-  { id: 'SSRF_METADATA', category: 'SSRF', severity: 'critical', pattern: /(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)/i },
-  { id: 'SSRF_LOCAL', category: 'SSRF', severity: 'high', pattern: /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?/i },
   { id: 'PATH_TRAVERSAL', category: 'PATH_TRAVERSAL', severity: 'high', pattern: /(?:\.\.\/|\.\.\\|%2e%2e(?:%2f|%5c))/i },
   { id: 'COMMAND_INJECTION', category: 'COMMAND_INJECTION', severity: 'high', pattern: /(?:;\s*(?:cat|curl|wget|bash|sh|python|nc)\b|\$\([^)]*(?:curl|wget|bash|sh)|`[^`]*(?:curl|wget|bash|sh))/i },
   { id: 'PROMPT_INJECTION', category: 'PROMPT_INJECTION', severity: 'medium', pattern: /ignore\s+(?:all\s+)?previous\s+instructions|reveal\s+(?:the\s+)?system\s+prompt|developer\s+message\s*:/i },
@@ -48,8 +46,6 @@ const SQL_GRAMMAR_WORDS = /[a-z_][a-z0-9_$]*/gi;
 const NON_SQL_CANDIDATE_NEEDLES = Object.freeze({
   XSS_SCRIPT: ['script', 'javascript', 'on'],
   XSS_HTML: ['<iframe', '<object', '<embed', '<svg', '<math', '< iframe', '< object', '< embed', '< svg', '< math'],
-  SSRF_METADATA: ['169.254', 'metadata', '100.100'],
-  SSRF_LOCAL: ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'],
   PATH_TRAVERSAL: ['..', '%2e'],
   COMMAND_INJECTION: [';', '$(', '`'],
   PROMPT_INJECTION: ['ignore', 'reveal', 'developer'],
@@ -64,6 +60,71 @@ const OPAQUE_FIELD_LIMITS = new Map([
   ['clearancejwe', 32768], ['hash', 512], ['passwordhash', 512], ['totpsecret', 256]
 ]);
 const DEFAULT_RICH_TEXT_FIELDS = new Set(['content', 'prompt', 'message', 'bio', 'comment', 'markdown', 'description', 'notes', 'text']);
+
+// SSRF is a destination/use-context issue, not a substring issue. Only fields
+// that carry a server-side destination are evaluated by the SSRF detector;
+// ordinary prose, chat messages, documentation, identifiers and unrelated
+// headers are never classified as SSRF merely for mentioning a private host.
+const SSRF_DESTINATION_FIELDS = new Set([
+  'url', 'uri', 'urls', 'uris', 'target', 'targeturl', 'targeturi',
+  'destination', 'destinationurl', 'destinationuri', 'endpoint', 'endpointurl',
+  'fetch', 'fetchurl', 'requesturl', 'sourceurl', 'remoteurl', 'upstreamurl',
+  'proxyurl', 'imageurl', 'avatarurl', 'importurl', 'downloadurl',
+  'webhook', 'webhookurl', 'callback', 'callbackurl', 'redirect', 'redirecturl',
+  'redirecturi', 'resourceurl', 'feedurl', 'rssurl', 'originurl',
+  'host', 'hostname', 'ip'
+]);
+const SSRF_URI_CANDIDATE = /(?:[a-z][a-z0-9+.-]{0,31}:)?\/\/[^\s\"'<>]+/gi;
+
+function normalizedFieldName(name) {
+  return String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isSsrfDestinationField(nameOrPath) {
+  const fieldName = normalizedFieldName(fieldNameFromPath(nameOrPath));
+  return SSRF_DESTINATION_FIELDS.has(fieldName);
+}
+
+function ssrfFindingForDestination(input) {
+  const canonical = canonicalizeSecurityText(input).value;
+  if (!canonical || canonical.length > ABSOLUTE_MAX_BODY_BYTES) return null;
+
+  const candidates = [canonical.trim()];
+  // Also inspect embedded URI candidates. This catches nested redirect targets
+  // without scanning arbitrary prose fields for IP/hostname substrings.
+  SSRF_URI_CANDIDATE.lastIndex = 0;
+  let match;
+  while ((match = SSRF_URI_CANDIDATE.exec(canonical)) !== null) candidates.push(match[0]);
+
+  for (const rawCandidate of candidates) {
+    const candidate = rawCandidate.replace(/[),.;!?]+$/g, '');
+    if (!candidate) continue;
+    let parsed;
+    try {
+      parsed = candidate.startsWith('//') ? new URL(`https:${candidate}`) : new URL(candidate);
+      if (!parsed.hostname && !/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) parsed = new URL(`https://${candidate}`);
+    } catch {
+      // A bare host/IP is a valid destination value even without a scheme.
+      if (/^[^\s\/\\?#@]+(?::\d+)?(?:[\/?#].*)?$/.test(candidate)) {
+        try { parsed = new URL(`https://${candidate}`); } catch { parsed = null; }
+      }
+    }
+    const hostname = String(parsed?.hostname || '').toLowerCase().replace(/\.$/, '');
+    if (!hostname) continue;
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname === '100.100.100.200') {
+      return { id: 'SSRF_METADATA', category: 'SSRF', severity: 'critical', detail: 'Server-side destination resolves to a cloud metadata endpoint.' };
+    }
+    if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '[::1]') {
+      return { id: 'SSRF_LOCAL', category: 'SSRF', severity: 'high', detail: 'Server-side destination targets a loopback or localhost address.' };
+    }
+  }
+  return null;
+}
+
+function addSsrfDestinationFinding(value, add, context) {
+  const finding = ssrfFindingForDestination(value);
+  if (finding) add(finding.id, finding.category, finding.severity, `${finding.detail} ${context}`);
+}
 
 function fieldNameFromPath(path) {
   const segments = String(path).replace(/\[(?:\d+)\]/g, '').split('.');
@@ -294,6 +355,7 @@ function inspectStructure(value, options, state, path = '$', depth = 0, add) {
       const canonical = canonicalizeSecurityText(value);
       if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form at ${path.slice(0, 80)}.`);
       const text = canonical.value;
+      if (isSsrfDestinationField(path)) addSsrfDestinationFinding(text, add, `Destination field: ${path.slice(0, 80)}.`);
       const richTextFields = new Set(DEFAULT_RICH_TEXT_FIELDS);
       if (Array.isArray(options.allowedRichTextFields)) for (const name of options.allowedRichTextFields) richTextFields.add(String(name).toLowerCase());
       const richText = richTextFields.has(fieldName);
@@ -551,6 +613,7 @@ function inspectMultipart(contentType, body, add) {
         const fieldText = new TextDecoder('utf-8', { fatal: false }).decode(partBytes);
         const canonical = canonicalizeSecurityText(fieldText);
         if (canonical.excessiveEncoding) add('NESTED_ENCODING', 'PROTOCOL', 'high', `Repeated encoding did not reach a canonical form in multipart field '${fieldName || 'unnamed'}'.`);
+        if (isSsrfDestinationField(fieldName)) addSsrfDestinationFinding(canonical.value, add, `Multipart destination field: ${fieldName || 'unnamed'}.`);
         for (const finding of scanNonSqlTextInChunks(canonical.value)) add(finding.id, finding.category, finding.severity, `${finding.detail} Multipart field: ${fieldName || 'unnamed'}.`);
         if (!DEFAULT_RICH_TEXT_FIELDS.has(fieldName)) {
           for (const finding of scanTextInChunks(canonical.value, grammarFindings)) add(finding.id, finding.category, finding.severity, `${finding.detail} Multipart field: ${fieldName || 'unnamed'}.`);
@@ -636,11 +699,23 @@ export function inspectRequest({ method = 'GET', url = '/', headers = {}, rawHea
   for (const rule of NON_SQL_RULES) {
     if (rule.pattern.test(urlText.value) || rule.pattern.test(rawPathCanonical) || rule.pattern.test(headerText)) add(rule.id, rule.category, rule.severity, `Matched ${rule.category.toLowerCase().replaceAll('_', ' ')} heuristic in request metadata.`);
   }
-  for (const finding of grammarFindings(urlText.value + '\n' + headerText)) add(finding.id, finding.category, finding.severity, finding.detail);
+  // Evaluate query parameters only when their names identify a destination
+  // sink (for example ?url=, ?target= or ?webhookUrl=). Do not flag a normal
+  // query/message parameter because its text happens to mention a local IP.
   try {
     const parsed = new URL(String(url), 'https://arixshield.invalid');
     const params = new Map();
-    for (const key of parsed.searchParams.keys()) params.set(key, (params.get(key) || 0) + 1);
+    for (const [key, value] of parsed.searchParams.entries()) {
+      params.set(key, (params.get(key) || 0) + 1);
+      if (isSsrfDestinationField(key)) addSsrfDestinationFinding(value, add, `Destination query parameter: ${String(key).slice(0, 60)}.`);
+    }
+    for (const [name, value] of allHeaderPairs) {
+      const lowerName = String(name).toLowerCase();
+      if (lowerName.startsWith('x-') && isSsrfDestinationField(lowerName.slice(2))) {
+        addSsrfDestinationFinding(value, add, `Destination header: ${lowerName.slice(0, 60)}.`);
+      }
+    }
+    for (const finding of grammarFindings(urlText.value + '\n' + headerText)) add(finding.id, finding.category, finding.severity, finding.detail);
     const arrayFields = new Set((Array.isArray(allowedQueryArrayFields) ? allowedQueryArrayFields : []).map((name) => String(name).toLowerCase()));
     for (const [key, count] of params) if (count > 1 && !arrayFields.has(String(key).toLowerCase())) add('HTTP_PARAMETER_POLLUTION', 'PROTOCOL', 'high', `Duplicate query parameter '${key}' is not allowed without an array schema.`);
   } catch { /* Invalid URLs were reported above. */ }
